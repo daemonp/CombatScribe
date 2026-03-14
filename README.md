@@ -1,4 +1,4 @@
-# wow-parse-rs
+# CombatScribe
 
 A native desktop application for parsing, formatting, and analyzing World of Warcraft 1.12 (Turtle WoW) combat logs. Built in Rust with the [iced](https://github.com/iced-rs/iced) GUI framework.
 
