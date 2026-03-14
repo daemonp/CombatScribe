@@ -1,0 +1,24 @@
+[package]
+name = "combat-scribe"
+version = "0.1.0"
+edition = "2021"
+authors = ["daemonp"]
+description = "WoW Vanilla 1.12.1 combat log parser and viewer with DPS/HPS analysis"
+license = "BSD-2-Clause"
+repository = "https://github.com/daemonp/CombatScribe"
+
+[dependencies]
+iced = { version = "0.13", features = ["tokio", "image"] }
+rfd = "0.15"
+regex = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+chrono = "0.4"
+tokio = { version = "1", features = ["fs", "rt"] }
+
+# Windows-specific: hide console window in release builds
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["wincon"] }
+
+[profile.release]
+opt-level = 2
+lto = true
