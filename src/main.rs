@@ -306,7 +306,7 @@ impl App {
                 Task::perform(
                     async move {
                         // Extract the session lines
-                        let lines_to_parse = selected
+                        let lines_to_extract = selected
                             .and_then(|sel| session_names.iter().position(|n| n == &sel))
                             .map_or_else(
                                 || lines.as_ref().clone(),
@@ -318,7 +318,11 @@ impl App {
                                     }
                                 },
                             );
-                        Box::new(log_parser::parse_log(&lines_to_parse))
+                        // Format lines (You/Your replacement, pet attribution,
+                        // apostrophe normalization) before parsing
+                        let (formatted_lines, _player_names) =
+                            formatter::format_log(lines_to_extract);
+                        Box::new(log_parser::parse_log(&formatted_lines))
                     },
                     Message::ViewerParsed,
                 )

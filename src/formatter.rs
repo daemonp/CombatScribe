@@ -332,7 +332,7 @@ pub fn format_log(mut lines: Vec<String>) -> (Vec<String>, Vec<String>) {
     let self_damage_rules = build_self_damage_replacements();
 
     let summoned_pet_owner_re = Regex::new(&format!(
-        r"({}) \(({}))",
+        r"({}) \(({})\)",
         name_pattern(),
         letter_class_plus()
     ))

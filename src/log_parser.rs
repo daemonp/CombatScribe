@@ -863,3 +863,98 @@ fn parse_gear_slot(raw: &str) -> Option<GearSlot> {
         raw: raw.to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_regex_heal_spell() {
+        let line = "Acedica 's Mending Light heals Acedica for 51.";
+        let caps = RE_HEAL_SPELL.captures(line).expect("should match");
+        assert_eq!(caps.get(1).unwrap().as_str(), "Acedica");
+        assert_eq!(caps.get(2).unwrap().as_str().trim(), "Mending Light");
+        assert_eq!(caps.get(3).unwrap().as_str().trim(), "Acedica");
+        assert_eq!(caps.get(4).unwrap().as_str(), "51");
+
+        // Crit heal
+        let crit = "Acedica 's Mending Light critically heals Acedica for 77.";
+        assert!(RE_HEAL_SPELL.captures(crit).is_some());
+
+        // With timestamp prefix (what the parser actually sees)
+        let ts = "1/24 14:55:35.116  Acedica 's Mending Light heals Acedica for 51.";
+        assert!(RE_HEAL_SPELL.captures(ts).is_some());
+    }
+
+    #[test]
+    fn test_regex_heal_gain() {
+        let line = "Acedica gains 148 health from Carnonos 's Rejuvenation.";
+        let caps = RE_HEAL_GAIN.captures(line).expect("should match");
+        assert_eq!(caps.get(1).unwrap().as_str(), "Acedica");
+        assert_eq!(caps.get(2).unwrap().as_str(), "148");
+        assert_eq!(caps.get(3).unwrap().as_str(), "Carnonos");
+    }
+
+    #[test]
+    fn test_regex_dmg_spell() {
+        let line = "Acedica 's Holy Shield hits Anvilrage Guardsman for 108 Holy damage.";
+        let caps = RE_DMG_SPELL.captures(line).expect("should match");
+        assert_eq!(caps.get(1).unwrap().as_str(), "Acedica");
+        assert_eq!(caps.get(4).unwrap().as_str(), "108");
+    }
+
+    #[test]
+    fn test_regex_dmg_auto() {
+        let line = "Ashbash hits Plagued Ghoul for 515.";
+        let caps = RE_DMG_AUTO.captures(line).expect("should match");
+        assert_eq!(caps.get(1).unwrap().as_str(), "Ashbash");
+        assert_eq!(caps.get(3).unwrap().as_str(), "515");
+    }
+
+    #[test]
+    fn test_parse_log_integration() {
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.440  COMBATANT_INFO: 27.01.26 12:23:41&Carnonos&DRUID&NightElf&2&nil&nil&nil&nil&47354:1508:0:0&18404:928:0:0&21665:3017:0:0&69107:0:0:0&21680:1891:0:0&47359:92:0:0&23071:1506:0:0&47388:1068:0:0&47341:1887:0:0&21672:2564:0:0&19384:928:0:0&21408:928:0:0&13965:0:0:0&11815:0:0:0&21409:849:0:0&23039:2646:0:0&nil&22397:0:0:0&nil&nil&0x00000000004A2125&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Carnonos 's Rejuvenation heals Carnonos for 400.".to_string(),
+            "1/27 12:24:02.000  Carnonos 's Regrowth critically heals Carnonos for 800.".to_string(),
+            "1/27 12:24:03.000  Carnonos gains 148 health from Carnonos 's Rejuvenation.".to_string(),
+            "1/27 12:24:04.000  Carnonos hits Razorgore the Untamed for 500.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let stats = data.player_stats.get("Carnonos").expect("Carnonos stats");
+        assert_eq!(stats.damage, 500);
+        assert_eq!(stats.healing, 400 + 800 + 148);
+        assert_eq!(data.encounters.len(), 1);
+    }
+
+    #[test]
+    fn test_dmg_regexes_dont_match_heal_lines() {
+        let heal1 = "1/24 14:55:35.116  Acedica 's Mending Light heals Acedica for 51.";
+        let heal2 = "1/24 14:55:48.277  Acedica 's Mending Light critically heals Acedica for 77.";
+        let heal3 = "1/24 14:56:15.365  Acedica gains 148 health from Carnonos 's Rejuvenation.";
+
+        assert!(
+            RE_DMG_SPELL.captures(heal1).is_none(),
+            "DMG_SPELL must not match heal line"
+        );
+        assert!(
+            RE_DMG_SPELL.captures(heal2).is_none(),
+            "DMG_SPELL must not match crit heal line"
+        );
+        assert!(
+            RE_DMG_AUTO.captures(heal1).is_none(),
+            "DMG_AUTO must not match heal spell line"
+        );
+        assert!(
+            RE_DMG_AUTO.captures(heal3).is_none(),
+            "DMG_AUTO must not match heal gain line"
+        );
+        assert!(
+            RE_DMG_SUFFER.captures(heal1).is_none(),
+            "DMG_SUFFER must not match heal line"
+        );
+    }
+}
