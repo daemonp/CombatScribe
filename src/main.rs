@@ -6,8 +6,8 @@ mod theme;
 mod viewer;
 
 use iced::widget::{
-    button, checkbox, column, container, horizontal_rule, horizontal_space, pick_list, progress_bar,
-    row, scrollable, text, Column,
+    button, checkbox, column, container, horizontal_rule, horizontal_space, pick_list,
+    progress_bar, row, scrollable, text, Column,
 };
 use iced::{Center, Element, Fill, Task, Theme};
 use std::fs;
@@ -145,10 +145,7 @@ impl App {
                     self.progress = 0.1;
                     self.file_path = Some(p.clone());
 
-                    Task::perform(
-                        async move { load_file(p).await },
-                        Message::FileLoaded,
-                    )
+                    Task::perform(async move { load_file(p).await }, Message::FileLoaded)
                 }
                 None => Task::none(), // User cancelled
             },
@@ -269,10 +266,8 @@ impl App {
                     Ok(info) => {
                         self.state = AppState::Done(info.clone());
                         self.progress = 1.0;
-                        let mut msg = format!(
-                            "Exported {} lines to {}",
-                            info.line_count, info.output_path
-                        );
+                        let mut msg =
+                            format!("Exported {} lines to {}", info.line_count, info.output_path);
                         if !info.player_names.is_empty() {
                             use std::fmt::Write;
                             let _ = write!(msg, ". Players: {}", info.player_names.join(", "));
@@ -347,8 +342,7 @@ impl App {
                 }
 
                 if matches!(viewer_msg, viewer::ViewerMessage::Quit) {
-                    return iced::window::get_latest()
-                        .and_then(iced::window::close);
+                    return iced::window::get_latest().and_then(iced::window::close);
                 }
 
                 if let AppState::Viewing(ref mut viewer_state) = self.state {
@@ -377,18 +371,12 @@ impl App {
             AppState::Done(info) => self.view_done(info),
             AppState::Error(err) => self.view_error(err),
             AppState::Viewing(viewer_state) => {
-                return viewer_state
-                    .view()
-                    .map(Message::Viewer);
+                return viewer_state.view().map(Message::Viewer);
             }
         };
 
-        let status_bar = container(
-            text(&self.status_message)
-                .size(12)
-                .color([0.5, 0.5, 0.5]),
-        )
-        .padding(8);
+        let status_bar =
+            container(text(&self.status_message).size(12).color([0.5, 0.5, 0.5])).padding(8);
 
         let layout = column![
             header_section,
@@ -421,9 +409,7 @@ impl App {
 
         column![container(
             column![
-                text("No file selected")
-                    .size(16)
-                    .color([0.6, 0.6, 0.6]),
+                text("No file selected").size(16).color([0.6, 0.6, 0.6]),
                 open_btn,
                 hint,
             ]
@@ -441,9 +427,7 @@ impl App {
     fn view_file_loaded(&self) -> Element<'_, Message> {
         let file_label = row![
             text("File:").size(14),
-            text(&self.file_name)
-                .size(14)
-                .color([0.3, 0.8, 0.5]),
+            text(&self.file_name).size(14).color([0.3, 0.8, 0.5]),
             horizontal_space(),
             button(text("Change").size(12))
                 .on_press(Message::OpenFile)
@@ -486,12 +470,9 @@ impl App {
             )
             .on_toggle(Message::ToggleRename)
             .size(18),
-            checkbox(
-                "Zero (clear) original log file after export",
-                self.zero_log
-            )
-            .on_toggle(Message::ToggleZeroLog)
-            .size(18),
+            checkbox("Zero (clear) original log file after export", self.zero_log)
+                .on_toggle(Message::ToggleZeroLog)
+                .size(18),
         ]
         .spacing(10);
 
@@ -556,9 +537,7 @@ impl App {
         details = details.push(
             row![
                 text("Output:").size(14),
-                text(&info.output_path)
-                    .size(14)
-                    .color([0.3, 0.8, 0.5]),
+                text(&info.output_path).size(14).color([0.3, 0.8, 0.5]),
             ]
             .spacing(8),
         );
@@ -584,11 +563,7 @@ impl App {
         }
 
         if info.zipped {
-            details = details.push(
-                text("ZIP archive created")
-                    .size(14)
-                    .color([0.3, 0.8, 0.5]),
-            );
+            details = details.push(text("ZIP archive created").size(14).color([0.3, 0.8, 0.5]));
         }
 
         if info.zeroed {
@@ -605,9 +580,7 @@ impl App {
             .width(Fill);
 
         column![
-            text("Export Complete!")
-                .size(22)
-                .color([0.3, 0.8, 0.5]),
+            text("Export Complete!").size(22).color([0.3, 0.8, 0.5]),
             horizontal_rule(1),
             details,
             horizontal_rule(1),
@@ -702,8 +675,7 @@ fn do_export(
     let backup_name = format!("{file_stem}.original.{timestamp}.txt");
     let backup_path = parent.join(&backup_name);
 
-    fs::copy(&opts.file_path, &backup_path)
-        .map_err(|e| format!("Failed to create backup: {e}"))?;
+    fs::copy(&opts.file_path, &backup_path).map_err(|e| format!("Failed to create backup: {e}"))?;
 
     // Determine output filename
     let output_path = if opts.rename_output {
@@ -729,8 +701,8 @@ fn do_export(
 
     // Optionally zero the original log
     let zeroed = if opts.zero_log {
-        let f = fs::File::create(&opts.file_path)
-            .map_err(|e| format!("Failed to zero log: {e}"))?;
+        let f =
+            fs::File::create(&opts.file_path).map_err(|e| format!("Failed to zero log: {e}"))?;
         f.set_len(0)
             .map_err(|e| format!("Failed to truncate log: {e}"))?;
         true
@@ -754,9 +726,10 @@ fn create_zip_file(source: &std::path::Path, zip_path: &str) -> Result<(), Strin
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    let source_name = source
-        .file_name()
-        .map_or_else(|| "log.txt".to_string(), |n| n.to_string_lossy().to_string());
+    let source_name = source.file_name().map_or_else(
+        || "log.txt".to_string(),
+        |n| n.to_string_lossy().to_string(),
+    );
 
     zip_writer
         .start_file(&source_name, options)
