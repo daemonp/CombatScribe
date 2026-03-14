@@ -23,8 +23,8 @@ use iced::widget::{
 use iced::{Center, Color, Element, Fill, Length};
 
 use crate::log_data::{
-    AbilityStats, AvoidanceStats, BuffStats, DispelEvent, Encounter, EncounterFilter,
-    InterruptEvent, LogData, LogEntry, LootEvent, PlayerEventType, ResurrectEvent,
+    AbilityStats, AvoidanceStats, BuffStats, Encounter, EncounterFilter, LogData, LogEntry,
+    LootEvent, PlayerEventType, ResurrectEvent,
 };
 use crate::theme;
 
@@ -57,7 +57,7 @@ pub struct ViewerState {
     pub detail: Option<DetailView>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewerTab {
     Meters,
     Utility,
@@ -65,7 +65,7 @@ pub enum ViewerTab {
     Events,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DamageType {
     Damage,
     DamageWithPets,
@@ -82,7 +82,7 @@ impl std::fmt::Display for DamageType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispelSubType {
     Dispels,
     Interrupts,
@@ -97,7 +97,7 @@ impl std::fmt::Display for DispelSubType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeathSubType {
     Deaths,
     Resurrects,
@@ -126,7 +126,7 @@ pub struct DetailView {
     pub detail_type: DetailType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailType {
     Damage,
     Healing,
@@ -455,11 +455,7 @@ impl ViewerState {
         damage_players.sort_by_key(|p| Reverse(p.2));
 
         let dmg_total: u64 = damage_players.iter().map(|(_, _, v)| *v).sum();
-        let dps = if duration > 0.0 {
-            dmg_total as f64 / duration
-        } else {
-            0.0
-        };
+        let dps = per_second(dmg_total, duration);
         let dmg_total_text = format!(
             "{} ({}/s)",
             theme::format_number(dmg_total),
@@ -483,11 +479,7 @@ impl ViewerState {
         healing_players.sort_by_key(|p| Reverse(p.2));
 
         let heal_total: u64 = healing_players.iter().map(|(_, _, v)| *v).sum();
-        let hps = if duration > 0.0 {
-            heal_total as f64 / duration
-        } else {
-            0.0
-        };
+        let hps = per_second(heal_total, duration);
         let heal_total_text = format!(
             "{} ({}/s)",
             theme::format_number(heal_total),
@@ -495,7 +487,7 @@ impl ViewerState {
         );
 
         // Build damage panel
-        let dmg_type_picker = pick_list(damage_types_list, Some(self.damage_type.clone()), |dt| {
+        let dmg_type_picker = pick_list(damage_types_list, Some(self.damage_type), |dt| {
             ViewerMessage::SetDamageType(dt)
         })
         .width(Fill)
@@ -510,16 +502,8 @@ impl ViewerState {
 
         let mut dmg_col = Column::new().spacing(3);
         for (rank, (name, class, value)) in damage_players.iter().enumerate() {
-            let pps = if duration > 0.0 {
-                *value as f64 / duration
-            } else {
-                0.0
-            };
-            let percent = if dmg_total > 0 {
-                (*value as f64 / dmg_total as f64) * 100.0
-            } else {
-                0.0
-            };
+            let pps = per_second(*value, duration);
+            let percent = percent_of(*value, dmg_total);
             dmg_col = dmg_col.push(self.meter_bar_row(
                 rank + 1,
                 name,
@@ -555,16 +539,8 @@ impl ViewerState {
 
         let mut heal_col = Column::new().spacing(3);
         for (rank, (name, class, value)) in healing_players.iter().enumerate() {
-            let pps = if duration > 0.0 {
-                *value as f64 / duration
-            } else {
-                0.0
-            };
-            let percent = if heal_total > 0 {
-                (*value as f64 / heal_total as f64) * 100.0
-            } else {
-                0.0
-            };
+            let pps = per_second(*value, duration);
+            let percent = percent_of(*value, heal_total);
             heal_col = heal_col.push(self.meter_bar_row(
                 rank + 1,
                 name,
@@ -605,32 +581,20 @@ impl ViewerState {
 
     fn view_dispel_panel(&self) -> Element<'_, ViewerMessage> {
         let dispel_types = vec![DispelSubType::Dispels, DispelSubType::Interrupts];
-        let type_picker = pick_list(dispel_types, Some(self.dispel_type.clone()), |dt| {
+        let type_picker = pick_list(dispel_types, Some(self.dispel_type), |dt| {
             ViewerMessage::SetDispelType(dt)
         })
         .width(Fill)
         .padding(4);
 
-        let (rows, total_text, bar_color, detail_type) = match self.dispel_type {
+        let (counts, bar_color, detail_type) = match self.dispel_type {
             DispelSubType::Dispels => {
                 let dispels = self.log_data.filtered_dispels(&self.encounter_filter);
                 let mut by_caster: HashMap<&str, u64> = HashMap::new();
                 for d in &dispels {
                     *by_caster.entry(&d.caster).or_insert(0) += 1;
                 }
-                let mut players: Vec<(&str, &str, u64)> = by_caster
-                    .into_iter()
-                    .filter(|(name, _)| self.log_data.combatants.contains_key(*name))
-                    .map(|(name, count)| (name, self.log_data.player_class(name), count))
-                    .collect();
-                players.sort_by_key(|p| Reverse(p.2));
-                let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
-                (
-                    players,
-                    format!("{total} total"),
-                    theme::BAR_DISPEL,
-                    DetailType::Dispels,
-                )
+                (by_caster, theme::BAR_DISPEL, DetailType::Dispels)
             }
             DispelSubType::Interrupts => {
                 let interrupts = self.log_data.filtered_interrupts(&self.encounter_filter);
@@ -638,21 +602,18 @@ impl ViewerState {
                 for i in &interrupts {
                     *by_caster.entry(&i.caster).or_insert(0) += 1;
                 }
-                let mut players: Vec<(&str, &str, u64)> = by_caster
-                    .into_iter()
-                    .filter(|(name, _)| self.log_data.combatants.contains_key(*name))
-                    .map(|(name, count)| (name, self.log_data.player_class(name), count))
-                    .collect();
-                players.sort_by_key(|p| Reverse(p.2));
-                let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
-                (
-                    players,
-                    format!("{total} total"),
-                    theme::BAR_INTERRUPT,
-                    DetailType::Interrupts,
-                )
+                (by_caster, theme::BAR_INTERRUPT, DetailType::Interrupts)
             }
         };
+
+        let mut players: Vec<(&str, &str, u64)> = counts
+            .into_iter()
+            .filter(|(name, _)| self.log_data.combatants.contains_key(*name))
+            .map(|(name, count)| (name, self.log_data.player_class(name), count))
+            .collect();
+        players.sort_by_key(|p| Reverse(p.2));
+        let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
+        let total_text = format!("{total} total");
 
         let header = row![
             type_picker,
@@ -661,31 +622,15 @@ impl ViewerState {
         .spacing(8)
         .align_y(Center);
 
-        let max_val = rows.first().map_or(1, |(_, _, v)| *v);
-        let mut meter_col = Column::new().spacing(3);
-        for (rank, (name, class, value)) in rows.iter().enumerate() {
-            let percent = if max_val > 0 {
-                (*value as f64 / max_val as f64) * 100.0
-            } else {
-                0.0
-            };
-            meter_col = meter_col.push(self.meter_bar_row_simple(
-                rank + 1,
-                name,
-                class,
-                *value,
-                percent,
-                bar_color,
-                Some((name.to_string(), detail_type.clone())),
-            ));
-        }
-
-        if rows.is_empty() {
-            meter_col = meter_col.push(empty_state(match self.dispel_type {
+        let meter_col = build_simple_meters(
+            &players,
+            bar_color,
+            match self.dispel_type {
                 DispelSubType::Dispels => "No dispels recorded",
                 DispelSubType::Interrupts => "No interrupts recorded",
-            }));
-        }
+            },
+            Some(detail_type),
+        );
 
         container(
             column![header, horizontal_rule(1), meter_col]
@@ -707,7 +652,7 @@ impl ViewerState {
             DeathSubType::Buffs,
             DeathSubType::Consumables,
         ];
-        let type_picker = pick_list(death_types, Some(self.death_type.clone()), |dt| {
+        let type_picker = pick_list(death_types, Some(self.death_type), |dt| {
             ViewerMessage::SetDeathType(dt)
         })
         .width(Fill)
@@ -742,83 +687,32 @@ impl ViewerState {
 
     fn view_deaths_content(&self) -> (Element<'_, ViewerMessage>, String) {
         let deaths = self.log_data.filtered_deaths(&self.encounter_filter);
-        let mut by_player: HashMap<&str, u64> = HashMap::new();
-        for d in &deaths {
-            *by_player.entry(&d.player).or_insert(0) += 1;
-        }
-        let mut players: Vec<(&str, &str, u64)> = by_player
-            .into_iter()
-            .filter(|(name, _)| self.log_data.combatants.contains_key(*name))
-            .map(|(name, count)| (name, self.log_data.player_class(name), count))
-            .collect();
-        players.sort_by_key(|p| Reverse(p.2));
-
+        let players = aggregate_by_player(
+            &deaths,
+            |d| &d.player,
+            &self.log_data.combatants,
+            |n| self.log_data.player_class(n),
+        );
         let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
-        let max_val = players.first().map_or(1, |(_, _, v)| *v);
-
-        let mut col = Column::new().spacing(2);
-        for (rank, (name, class, value)) in players.iter().enumerate() {
-            let percent = if max_val > 0 {
-                (*value as f64 / max_val as f64) * 100.0
-            } else {
-                0.0
-            };
-            col = col.push(self.meter_bar_row_simple(
-                rank + 1,
-                name,
-                class,
-                *value,
-                percent,
-                theme::BAR_DEATH,
-                None,
-            ));
-        }
-
-        if players.is_empty() {
-            col = col.push(empty_state("No deaths recorded"));
-        }
-
+        let col = build_simple_meters(&players, theme::BAR_DEATH, "No deaths recorded", None);
         (col.into(), format!("{total} deaths"))
     }
 
     fn view_resurrects_content(&self) -> (Element<'_, ViewerMessage>, String) {
         let resurrects = self.log_data.filtered_resurrects(&self.encounter_filter);
-        let mut by_caster: HashMap<&str, u64> = HashMap::new();
-        for r in &resurrects {
-            *by_caster.entry(&r.caster).or_insert(0) += 1;
-        }
-        let mut players: Vec<(&str, &str, u64)> = by_caster
-            .into_iter()
-            .filter(|(name, _)| self.log_data.combatants.contains_key(*name))
-            .map(|(name, count)| (name, self.log_data.player_class(name), count))
-            .collect();
-        players.sort_by_key(|p| Reverse(p.2));
-
+        let players = aggregate_by_player(
+            &resurrects,
+            |r| &r.caster,
+            &self.log_data.combatants,
+            |n| self.log_data.player_class(n),
+        );
         let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
-        let max_val = players.first().map_or(1, |(_, _, v)| *v);
-
-        let mut col = Column::new().spacing(2);
-        for (rank, (name, class, value)) in players.iter().enumerate() {
-            let percent = if max_val > 0 {
-                (*value as f64 / max_val as f64) * 100.0
-            } else {
-                0.0
-            };
-            col = col.push(self.meter_bar_row_simple(
-                rank + 1,
-                name,
-                class,
-                *value,
-                percent,
-                theme::BAR_RESURRECT,
-                Some((name.to_string(), DetailType::Resurrects)),
-            ));
-        }
-
-        if players.is_empty() {
-            col = col.push(empty_state("No resurrections recorded"));
-        }
-
+        let col = build_simple_meters(
+            &players,
+            theme::BAR_RESURRECT,
+            "No resurrections recorded",
+            Some(DetailType::Resurrects),
+        );
         (col.into(), format!("{total} resurrects"))
     }
 
@@ -835,30 +729,7 @@ impl ViewerState {
         players.sort_by_key(|p| Reverse(p.2));
 
         let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
-        let max_val = players.first().map_or(1, |(_, _, v)| *v);
-
-        let mut col = Column::new().spacing(2);
-        for (rank, (name, class, value)) in players.iter().enumerate() {
-            let percent = if max_val > 0 {
-                (*value as f64 / max_val as f64) * 100.0
-            } else {
-                0.0
-            };
-            col = col.push(self.meter_bar_row_simple(
-                rank + 1,
-                name,
-                class,
-                *value,
-                percent,
-                theme::BAR_ABSORB,
-                None,
-            ));
-        }
-
-        if players.is_empty() {
-            col = col.push(empty_state("No absorbs recorded"));
-        }
-
+        let col = build_simple_meters(&players, theme::BAR_ABSORB, "No absorbs recorded", None);
         (
             col.into(),
             format!("{} absorbed", theme::format_number(total)),
@@ -888,11 +759,7 @@ impl ViewerState {
 
         let mut col = Column::new().spacing(2);
         for (rank, (name, class, value, av)) in players.iter().enumerate() {
-            let percent = if max_val > 0 {
-                (*value as f64 / max_val as f64) * 100.0
-            } else {
-                0.0
-            };
+            let percent = percent_of(*value, max_val);
 
             let mut breakdown = Vec::new();
             if av.dodges > 0 {
@@ -928,12 +795,18 @@ impl ViewerState {
     }
 
     fn view_buffs_content(&self) -> (Element<'_, ViewerMessage>, String) {
-        let mut players: Vec<(&str, &str, usize)> = self
+        let mut players: Vec<(&str, &str, u64)> = self
             .log_data
             .buffs
             .iter()
             .filter(|(name, _)| self.log_data.combatants.contains_key(name.as_str()))
-            .map(|(name, buffs)| (name.as_str(), self.log_data.player_class(name), buffs.len()))
+            .map(|(name, buffs)| {
+                (
+                    name.as_str(),
+                    self.log_data.player_class(name),
+                    buffs.len() as u64,
+                )
+            })
             .filter(|(_, _, count)| *count > 0)
             .collect();
         players.sort_by_key(|p| Reverse(p.2));
@@ -942,76 +815,33 @@ impl ViewerState {
             .log_data
             .buffs
             .values()
-            .flat_map(|b| b.keys())
+            .flat_map(HashMap::keys)
             .collect();
-        let max_val = players.first().map_or(1, |(_, _, v)| *v);
 
-        let mut col = Column::new().spacing(2);
-        for (rank, (name, class, count)) in players.iter().enumerate() {
-            let percent = if max_val > 0 {
-                (*count as f64 / max_val as f64) * 100.0
-            } else {
-                0.0
-            };
-            col = col.push(self.meter_bar_row_simple(
-                rank + 1,
-                name,
-                class,
-                *count as u64,
-                percent,
-                Color::WHITE,
-                Some((name.to_string(), DetailType::Buffs)),
-            ));
-        }
-
-        if players.is_empty() {
-            col = col.push(empty_state("No buff data recorded"));
-        }
-
+        let col = build_simple_meters(
+            &players,
+            Color::WHITE,
+            "No buff data recorded",
+            Some(DetailType::Buffs),
+        );
         (col.into(), format!("{} unique buffs", total_unique.len()))
     }
 
     fn view_consumables_content(&self) -> (Element<'_, ViewerMessage>, String) {
         let consumables = self.log_data.filtered_consumables(&self.encounter_filter);
-
-        // Aggregate: player → total uses
-        let mut by_player: HashMap<&str, u64> = HashMap::new();
-        for c in &consumables {
-            if self.log_data.combatants.contains_key(c.player.as_str()) {
-                *by_player.entry(&c.player).or_insert(0) += 1;
-            }
-        }
-        let mut players: Vec<(&str, &str, u64)> = by_player
-            .into_iter()
-            .map(|(name, count)| (name, self.log_data.player_class(name), count))
-            .collect();
-        players.sort_by_key(|p| Reverse(p.2));
-
+        let players = aggregate_by_player(
+            &consumables,
+            |c| &c.player,
+            &self.log_data.combatants,
+            |n| self.log_data.player_class(n),
+        );
         let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
-        let max_val = players.first().map_or(1, |(_, _, v)| *v);
-
-        let mut col = Column::new().spacing(2);
-        for (rank, (name, class, value)) in players.iter().enumerate() {
-            let percent = if max_val > 0 {
-                (*value as f64 / max_val as f64) * 100.0
-            } else {
-                0.0
-            };
-            col = col.push(self.meter_bar_row_simple(
-                rank + 1,
-                name,
-                class,
-                *value,
-                percent,
-                theme::BAR_CONSUMABLE,
-                Some((name.to_string(), DetailType::Consumables)),
-            ));
-        }
-
-        if players.is_empty() {
-            col = col.push(empty_state("No consumable usage recorded"));
-        }
-
+        let col = build_simple_meters(
+            &players,
+            theme::BAR_CONSUMABLE,
+            "No consumable usage recorded",
+            Some(DetailType::Consumables),
+        );
         (col.into(), format!("{total} uses"))
     }
 
@@ -1347,7 +1177,7 @@ impl ViewerState {
 
         let content = match &detail.detail_type {
             DetailType::Damage | DetailType::Healing => {
-                self.view_ability_breakdown(&detail.player_name, &detail.detail_type)
+                self.view_ability_breakdown(&detail.player_name, detail.detail_type)
             }
             DetailType::Dispels => self.view_dispel_detail(&detail.player_name),
             DetailType::Interrupts => self.view_interrupt_detail(&detail.player_name),
@@ -1375,7 +1205,7 @@ impl ViewerState {
     fn view_ability_breakdown(
         &self,
         player: &str,
-        dtype: &DetailType,
+        dtype: DetailType,
     ) -> Element<'_, ViewerMessage> {
         let (stats, duration) = self.log_data.filtered_stats(&self.encounter_filter);
         let Some(ps) = stats.get(player) else {
@@ -1540,122 +1370,23 @@ impl ViewerState {
     }
 
     fn view_dispel_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
-        let dispels: Vec<&DispelEvent> = self
-            .log_data
-            .filtered_dispels(&self.encounter_filter)
-            .into_iter()
+        let dispels = self.log_data.filtered_dispels(&self.encounter_filter);
+        let events: Vec<(&str, &str)> = dispels
+            .iter()
             .filter(|d| d.caster == player)
+            .map(|d| (d.spell.as_str(), d.target.as_str()))
             .collect();
-
-        // Aggregate by spell with target sub-counts
-        let mut by_spell: HashMap<&str, (u64, HashMap<&str, u64>)> = HashMap::new();
-        for d in &dispels {
-            let entry = by_spell
-                .entry(&d.spell)
-                .or_insert_with(|| (0, HashMap::new()));
-            entry.0 += 1;
-            *entry.1.entry(&d.target).or_insert(0) += 1;
-        }
-
-        let summary = text(format!("Total Dispels: {}", dispels.len()))
-            .size(12)
-            .color([0.5, 0.5, 0.5]);
-
-        let mut spell_col = Column::new().spacing(4);
-        spell_col = spell_col.push(text("By Spell").size(13).color(theme::BAR_DISPEL));
-        for (spell, (count, _)) in &by_spell {
-            spell_col = spell_col.push(
-                row![
-                    text(*spell).size(13).width(Length::FillPortion(3)),
-                    text(count.to_string())
-                        .size(13)
-                        .width(Length::FillPortion(1)),
-                ]
-                .spacing(4),
-            );
-        }
-
-        // Top targets across all spells
-        let mut by_target: HashMap<&str, u64> = HashMap::new();
-        for d in &dispels {
-            *by_target.entry(&d.target).or_insert(0) += 1;
-        }
-        let mut sorted_targets: Vec<(&&str, &u64)> = by_target.iter().collect();
-        sorted_targets.sort_by(|a, b| b.1.cmp(a.1));
-
-        let mut target_col = Column::new().spacing(4);
-        target_col = target_col.push(text("Top Targets").size(13).color(theme::BAR_DISPEL));
-        for (target, count) in sorted_targets.iter().take(5) {
-            target_col = target_col.push(
-                row![
-                    text(**target).size(13).width(Length::FillPortion(3)),
-                    text(count.to_string())
-                        .size(13)
-                        .width(Length::FillPortion(1)),
-                ]
-                .spacing(4),
-            );
-        }
-
-        column![summary, spell_col, target_col,]
-            .spacing(10)
-            .width(Fill)
-            .into()
+        view_spell_target_detail(&events, "Dispels", theme::BAR_DISPEL)
     }
 
     fn view_interrupt_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
-        let interrupts: Vec<&InterruptEvent> = self
-            .log_data
-            .filtered_interrupts(&self.encounter_filter)
-            .into_iter()
+        let interrupts = self.log_data.filtered_interrupts(&self.encounter_filter);
+        let events: Vec<(&str, &str)> = interrupts
+            .iter()
             .filter(|i| i.caster == player)
+            .map(|i| (i.spell.as_str(), i.target.as_str()))
             .collect();
-
-        let mut by_spell: HashMap<&str, u64> = HashMap::new();
-        let mut by_target: HashMap<&str, u64> = HashMap::new();
-        for i in &interrupts {
-            *by_spell.entry(&i.spell).or_insert(0) += 1;
-            *by_target.entry(&i.target).or_insert(0) += 1;
-        }
-
-        let summary = text(format!("Total Interrupts: {}", interrupts.len()))
-            .size(12)
-            .color([0.5, 0.5, 0.5]);
-
-        let mut spell_col = Column::new().spacing(4);
-        spell_col = spell_col.push(text("By Spell").size(13).color(theme::BAR_INTERRUPT));
-        for (spell, count) in &by_spell {
-            spell_col = spell_col.push(
-                row![
-                    text(*spell).size(13).width(Length::FillPortion(3)),
-                    text(count.to_string())
-                        .size(13)
-                        .width(Length::FillPortion(1)),
-                ]
-                .spacing(4),
-            );
-        }
-
-        let mut target_col = Column::new().spacing(4);
-        target_col = target_col.push(text("Top Targets").size(13).color(theme::BAR_INTERRUPT));
-        let mut sorted_targets: Vec<(&&str, &u64)> = by_target.iter().collect();
-        sorted_targets.sort_by(|a, b| b.1.cmp(a.1));
-        for (target, count) in sorted_targets.iter().take(5) {
-            target_col = target_col.push(
-                row![
-                    text(**target).size(13).width(Length::FillPortion(3)),
-                    text(count.to_string())
-                        .size(13)
-                        .width(Length::FillPortion(1)),
-                ]
-                .spacing(4),
-            );
-        }
-
-        column![summary, spell_col, target_col,]
-            .spacing(10)
-            .width(Fill)
-            .into()
+        view_spell_target_detail(&events, "Interrupts", theme::BAR_INTERRUPT)
     }
 
     fn view_resurrect_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
@@ -1902,32 +1633,6 @@ impl ViewerState {
         )
     }
 
-    /// Simpler meter bar with just a count value (for utility panels).
-    #[allow(clippy::too_many_arguments, clippy::unused_self)]
-    fn meter_bar_row_simple(
-        &self,
-        rank: usize,
-        name: &str,
-        class: &str,
-        value: u64,
-        percent: f64,
-        bar_color: Color,
-        on_click: Option<(String, DetailType)>,
-    ) -> Element<'_, ViewerMessage> {
-        let value_text = theme::format_number(value);
-
-        build_meter_row(
-            rank,
-            name,
-            class,
-            &value_text,
-            "",
-            percent,
-            bar_color,
-            on_click,
-        )
-    }
-
     /// Meter bar with custom detail text (for avoidance breakdown).
     #[allow(clippy::too_many_arguments, clippy::unused_self)]
     fn meter_bar_row_with_detail_text(
@@ -1951,6 +1656,137 @@ impl ViewerState {
             on_click,
         )
     }
+}
+
+// ── Shared Helpers ─────────────────────────────────────────────────────────
+
+/// Unified detail view for spell+target event types (dispels, interrupts).
+///
+/// Shows total count, "By Spell" breakdown, and "Top Targets" (top 5).
+fn view_spell_target_detail<'a>(
+    events: &[(&'a str, &'a str)],
+    label: &str,
+    accent_color: Color,
+) -> Element<'a, ViewerMessage> {
+    let mut by_spell: HashMap<&str, u64> = HashMap::new();
+    let mut by_target: HashMap<&str, u64> = HashMap::new();
+    for (spell, target) in events {
+        *by_spell.entry(spell).or_insert(0) += 1;
+        *by_target.entry(target).or_insert(0) += 1;
+    }
+
+    let summary = text(format!("Total {label}: {}", events.len()))
+        .size(12)
+        .color([0.5, 0.5, 0.5]);
+
+    let mut spell_col = Column::new().spacing(4);
+    spell_col = spell_col.push(text("By Spell").size(13).color(accent_color));
+    for (spell, count) in &by_spell {
+        spell_col = spell_col.push(
+            row![
+                text(*spell).size(13).width(Length::FillPortion(3)),
+                text(count.to_string())
+                    .size(13)
+                    .width(Length::FillPortion(1)),
+            ]
+            .spacing(4),
+        );
+    }
+
+    let mut sorted_targets: Vec<(&&str, &u64)> = by_target.iter().collect();
+    sorted_targets.sort_by(|a, b| b.1.cmp(a.1));
+
+    let mut target_col = Column::new().spacing(4);
+    target_col = target_col.push(text("Top Targets").size(13).color(accent_color));
+    for (target, count) in sorted_targets.iter().take(5) {
+        target_col = target_col.push(
+            row![
+                text(**target).size(13).width(Length::FillPortion(3)),
+                text(count.to_string())
+                    .size(13)
+                    .width(Length::FillPortion(1)),
+            ]
+            .spacing(4),
+        );
+    }
+
+    column![summary, spell_col, target_col,]
+        .spacing(10)
+        .width(Fill)
+        .into()
+}
+
+/// Per-second rate, guarding against zero duration.
+fn per_second(value: u64, duration: f64) -> f64 {
+    if duration > 0.0 {
+        value as f64 / duration
+    } else {
+        0.0
+    }
+}
+
+/// Percentage of total, guarding against zero total.
+fn percent_of(value: u64, total: u64) -> f64 {
+    if total > 0 {
+        (value as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// Build a sorted, aggregated meter bar column from `(name, class, value)` tuples.
+///
+/// Shared by deaths, resurrects, absorbs, consumables, and dispel/interrupt panels.
+#[allow(clippy::too_many_arguments)]
+fn build_simple_meters<'a>(
+    players: &[(&str, &str, u64)],
+    bar_color: Color,
+    empty_msg: &'a str,
+    detail_type: Option<DetailType>,
+) -> Column<'a, ViewerMessage> {
+    let max_val = players.first().map_or(1, |(_, _, v)| *v);
+    let mut col = Column::new().spacing(2);
+    for (rank, (name, class, value)) in players.iter().enumerate() {
+        let percent = percent_of(*value, max_val);
+        let on_click = detail_type.map(|dt| ((*name).to_string(), dt));
+        col = col.push(build_meter_row(
+            rank + 1,
+            name,
+            class,
+            &theme::format_number(*value),
+            "",
+            percent,
+            bar_color,
+            on_click,
+        ));
+    }
+    if players.is_empty() {
+        col = col.push(empty_state(empty_msg));
+    }
+    col
+}
+
+/// Aggregate events by a player field, filter to known combatants, and sort descending.
+///
+/// The `class_fn` returns a class name whose lifetime is tied to `'a` (typically
+/// backed by the `LogData`'s combatant map).
+fn aggregate_by_player<'a, T>(
+    events: &'a [&T],
+    get_player: impl Fn(&'a &T) -> &'a str,
+    combatants: &'a HashMap<String, crate::log_data::Combatant>,
+    class_fn: impl Fn(&str) -> &'a str,
+) -> Vec<(&'a str, &'a str, u64)> {
+    let mut by_player: HashMap<&'a str, u64> = HashMap::new();
+    for e in events {
+        *by_player.entry(get_player(e)).or_insert(0) += 1;
+    }
+    let mut players: Vec<(&'a str, &'a str, u64)> = by_player
+        .into_iter()
+        .filter(|(name, _)| combatants.contains_key(*name))
+        .map(|(name, count)| (name, class_fn(name), count))
+        .collect();
+    players.sort_by_key(|p| Reverse(p.2));
+    players
 }
 
 // ── Free Functions ──────────────────────────────────────────────────────────

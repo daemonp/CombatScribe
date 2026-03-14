@@ -98,10 +98,10 @@ static RE_MISS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([A-Za-z\s']+) misses ([A-Za-z]+)\.").unwrap());
 
 static RE_BUFF_GAIN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"([A-Za-z]+) gains ([A-Za-z\s']+) \((\d+)\)\.").unwrap());
+    LazyLock::new(|| Regex::new(r"([A-Za-z]+) gains ([A-Za-z\s':]+?) \((\d+)\)\.").unwrap());
 
 static RE_BUFF_FADE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"([A-Za-z\s']+) fades from ([A-Za-z]+)\.").unwrap());
+    LazyLock::new(|| Regex::new(r"([A-Za-z\s':]+?) fades from ([A-Za-z]+)\.").unwrap());
 
 static RE_LOOT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -139,7 +139,8 @@ struct ParseState {
 
 /// Parse the session lines into a fully populated `LogData`.
 ///
-/// This is the Rust port of `app.js` `parseLog()`.
+/// Uses keyword-based dispatch to avoid running all regexes on every line.
+/// Most lines are damage/healing events; metadata/loot/buff lines are rare.
 pub fn parse_log(lines: &[String]) -> LogData {
     let mut data = LogData::default();
     let mut state = ParseState {
@@ -168,24 +169,86 @@ pub fn parse_log(lines: &[String]) -> LogData {
         }
         data.end_time = Some(timestamp);
 
-        parse_metadata(trimmed, timestamp, &mut data, &mut state);
-        parse_combat_state(trimmed, timestamp, &mut data, &mut state);
-        parse_unit_died(trimmed, timestamp, &mut data, &mut state);
-        parse_cast_events(trimmed, timestamp, &mut data);
-        parse_pet_ownership(trimmed, &mut data);
+        // ── Keyword-based dispatch ──────────────────────────────────────
+        // Metadata lines (rare) — check first since they start with known prefixes
+        if trimmed.contains("COMBATANT_INFO:")
+            || trimmed.contains("ZONE_INFO:")
+            || trimmed.contains("PLAYERS_IN_COMBAT:")
+        {
+            parse_metadata(trimmed, timestamp, &mut data, &mut state);
+            continue;
+        }
 
-        let absorbed_amount = RE_ABSORB
-            .captures(trimmed)
-            .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
-            .unwrap_or(0);
-        let is_crit = trimmed.contains(" crits ") || trimmed.contains(" critically ");
+        // Loot/trade lines (rare)
+        if trimmed.contains("LOOT:") || trimmed.contains("LOOT_TRADE:") {
+            parse_loot_trade(trimmed, timestamp, &mut data);
+            continue;
+        }
 
-        parse_damage_events(trimmed, timestamp, &mut data, is_crit, absorbed_amount);
-        parse_healing_events(trimmed, timestamp, &mut data);
-        parse_avoidance(trimmed, &mut data);
-        parse_buff_events(trimmed, timestamp, &mut data);
-        parse_loot_trade(trimmed, timestamp, &mut data);
-        parse_consumable(trimmed, timestamp, &mut data);
+        // Combat state changes (rare)
+        if trimmed.contains("PLAYER_REGEN_DISABLED") || trimmed.contains("PLAYER_REGEN_ENABLED") {
+            parse_combat_state(trimmed, timestamp, &mut data, &mut state);
+            continue;
+        }
+
+        // Unit died (rare)
+        if trimmed.contains("UNIT_DIED:") {
+            parse_unit_died(trimmed, timestamp, &mut data, &mut state);
+            continue;
+        }
+
+        // Cast events: dispels, resurrects, interrupts (moderately rare)
+        if trimmed.contains("casts ") {
+            parse_cast_events(trimmed, timestamp, &mut data);
+            // Cast lines can also be damage/healing — don't skip below
+        }
+
+        // Pet ownership patterns: `Name (Owner)` (moderately common)
+        // Cheap check: look for `(` which all pet patterns require
+        if trimmed.contains('(') {
+            parse_pet_ownership(trimmed, &mut data);
+        }
+
+        // ── High-frequency event dispatch ───────────────────────────────
+        // Damage: must contain " for " (hits X for N, crits X for N, suffers N from)
+        // or " suffers " (suffer format)
+        if trimmed.contains(" for ") || trimmed.contains(" suffers ") {
+            parse_damage_events(trimmed, timestamp, &mut data);
+        }
+
+        // Healing: "heals" or "health from"
+        if trimmed.contains("heals ") || trimmed.contains(" health from ") {
+            parse_healing_events(trimmed, timestamp, &mut data);
+        }
+
+        // Boss detection from combat lines (during active combat only)
+        // Skip if we already identified a known boss for this combat window
+        if state.in_combat
+            && !state
+                .current_boss
+                .as_ref()
+                .is_some_and(|b| parser::is_known_boss(b))
+        {
+            detect_boss_from_combat(trimmed, &data, &mut state);
+        }
+
+        // Avoidance: dodge/parry/miss keywords
+        if trimmed.contains(" dodges.")
+            || trimmed.contains(" parries.")
+            || trimmed.contains(" misses ")
+        {
+            parse_avoidance(trimmed, &mut data);
+        }
+
+        // Buff events: "gains " or " fades from "
+        if trimmed.contains(" gains ") || trimmed.contains(" fades from ") {
+            parse_buff_events(trimmed, timestamp, &mut data);
+        }
+
+        // Consumable usage: " uses "
+        if trimmed.contains(" uses ") {
+            parse_consumable(trimmed, timestamp, &mut data);
+        }
     }
 
     post_process(&mut data, &state.combatant_timestamps);
@@ -286,6 +349,16 @@ fn parse_combat_state(trimmed: &str, timestamp: f64, data: &mut LogData, state: 
     }
 }
 
+/// Grace period (seconds) after combat ends to still attribute a boss kill.
+///
+/// Combat can drop (`PLAYER_REGEN_ENABLED`) before the boss actually dies:
+/// - `Garr`: adds explode, combat drops briefly before Garr dies
+/// - `Majordomo Executus`: surrenders after adds die, `UNIT_DIED` fires ~8 min later
+///   after RP completes
+///
+/// 10 minutes covers all known cases including Majordomo's long RP sequence.
+const KILL_GRACE_SECS: f64 = 600.0;
+
 /// Handle `UNIT_DIED` — player deaths and boss/mob detection.
 fn parse_unit_died(trimmed: &str, timestamp: f64, data: &mut LogData, state: &mut ParseState) {
     if !trimmed.contains("UNIT_DIED:") {
@@ -305,97 +378,237 @@ fn parse_unit_died(trimmed: &str, timestamp: f64, data: &mut LogData, state: &mu
             timestamp,
             player: dead_unit.to_string(),
         });
-    } else if !data.combatants.contains_key(dead_unit) && dead_unit != "Unknown" {
+    } else if !data.all_combatants.contains_key(dead_unit) && dead_unit != "Unknown" {
         if parser::is_known_boss(dead_unit) {
-            state.current_boss = Some(dead_unit.to_string());
-            state.current_boss_killed = true;
-        } else if state
-            .current_boss
-            .as_ref()
-            .is_none_or(|b| dead_unit.len() > b.len())
-        {
-            state.current_boss = Some(dead_unit.to_string());
+            if state.in_combat {
+                // Normal case: boss dies during combat
+                state.current_boss = Some(dead_unit.to_string());
+                state.current_boss_killed = true;
+            } else {
+                // Boss died after combat dropped — retroactively mark the
+                // most recent encounter as a kill if it matches this boss
+                // and occurred within the grace period.
+                retroactive_boss_kill(data, dead_unit, timestamp);
+            }
+        } else if state.in_combat && !state.current_boss_killed {
+            // Non-boss mob died during combat — track as potential encounter name.
+            // Never overwrite a known boss, and never overwrite after a kill.
+            let dominated = state
+                .current_boss
+                .as_ref()
+                .is_none_or(|b| !parser::is_known_boss(b) && dead_unit.len() > b.len());
+            if dominated {
+                state.current_boss = Some(dead_unit.to_string());
+            }
         }
     }
 }
 
-/// Parse dispels, resurrects, and interrupts from cast events.
-fn parse_cast_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
-    // Dispels
-    for dispel_spell in DISPEL_SPELLS {
-        if trimmed.contains(&format!("casts {dispel_spell}")) {
-            if let Some(caps) = RE_CAST.captures(trimmed) {
-                let caster = caps.get(1).unwrap().as_str().to_string();
-                let spell = caps.get(2).unwrap().as_str().trim().to_string();
-                let target = caps.get(3).unwrap().as_str().trim().to_string();
-                data.dispels.push(DispelEvent {
-                    timestamp,
-                    caster: caster.clone(),
-                    target: target.clone(),
-                    spell: spell.clone(),
-                });
-                data.entries.push(LogEntry::Dispel {
-                    timestamp,
-                    caster,
-                    target,
-                    spell,
-                });
-            }
+/// Retroactively mark a recent encounter as a kill when the boss dies
+/// after combat has already ended (player regen re-enabled).
+fn retroactive_boss_kill(data: &mut LogData, boss_name: &str, death_timestamp: f64) {
+    // Search backwards for the most recent encounter that:
+    //  1. Has a matching boss name (or no name yet)
+    //  2. Ended within the grace period before the boss death
+    for enc in data.encounters.iter_mut().rev() {
+        if death_timestamp - enc.end > KILL_GRACE_SECS {
+            break; // Too far in the past
+        }
+        // Match by name if set, or by "unnamed boss encounter in this time window"
+        let name_matches = enc
+            .name
+            .as_ref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(boss_name));
+        if name_matches || enc.name.is_none() {
+            enc.name = Some(boss_name.to_string());
+            enc.is_boss = true;
+            enc.is_kill = true;
             return;
         }
     }
+}
 
-    // Resurrects
-    for res_spell in RESURRECT_SPELLS {
-        if trimmed.contains(&format!("casts {res_spell}"))
-            && !trimmed.contains("begins to cast")
-            && !trimmed.contains("fails casting")
+/// Detect boss names from damage/healing lines during combat.
+///
+/// On wipe attempts, the boss never dies so `UNIT_DIED` won't fire.
+/// Instead, check source and target names in the last-recorded damage entry
+/// against the known boss list. A known boss always takes priority.
+fn detect_boss_from_combat(trimmed: &str, data: &LogData, state: &mut ParseState) {
+    if !state.in_combat {
+        return;
+    }
+    // Already found a known boss for this combat window — nothing to do
+    if state
+        .current_boss
+        .as_ref()
+        .is_some_and(|b| parser::is_known_boss(b))
+    {
+        return;
+    }
+
+    // Check the most recent entry (just pushed by parse_damage_events / parse_healing_events)
+    let Some(entry) = data.entries.last() else {
+        return;
+    };
+
+    let names: &[&str] = match entry {
+        LogEntry::Damage { source, target, .. } | LogEntry::Healing { source, target, .. } => {
+            &[source.as_str(), target.as_str()]
+        }
+        _ => return,
+    };
+
+    for &name in names {
+        // Skip players — only interested in NPC/boss names.
+        // Also skip names with "(self damage)" suffix — these are reformatted player names.
+        if data.all_combatants.contains_key(name)
+            || name == "Unknown"
+            || name.ends_with("(self damage)")
         {
-            if let Some(caps) = RE_CAST.captures(trimmed) {
-                let caster = caps.get(1).unwrap().as_str().to_string();
-                let spell = caps.get(2).unwrap().as_str().trim().to_string();
-                let target = caps.get(3).unwrap().as_str().trim().to_string();
-                data.resurrects.push(ResurrectEvent {
-                    timestamp,
-                    caster: caster.clone(),
-                    target: target.clone(),
-                    spell: spell.clone(),
-                });
-                data.entries.push(LogEntry::Resurrect {
-                    timestamp,
-                    caster,
-                    target,
-                    spell,
-                });
-            }
+            continue;
+        }
+        if parser::is_known_boss(name) {
+            state.current_boss = Some(name.to_string());
             return;
+        }
+        // Fall back to longest non-player name if no boss identified yet
+        if state
+            .current_boss
+            .as_ref()
+            .is_none_or(|b| name.len() > b.len())
+        {
+            state.current_boss = Some(name.to_string());
         }
     }
 
-    // Interrupts
-    for int_spell in INTERRUPT_SPELLS {
-        if trimmed.contains(&format!("casts {int_spell}")) && !trimmed.contains("begins to cast") {
-            if let Some(caps) = RE_CAST.captures(trimmed) {
-                let caster = caps.get(1).unwrap().as_str().to_string();
-                let spell = caps.get(2).unwrap().as_str().trim().to_string();
-                let target = caps.get(3).unwrap().as_str().trim().to_string();
-
-                if data.combatants.contains_key(&caster) && !data.combatants.contains_key(&target) {
-                    data.interrupts.push(InterruptEvent {
-                        timestamp,
-                        caster: caster.clone(),
-                        target: target.clone(),
-                        spell: spell.clone(),
-                    });
-                    data.entries.push(LogEntry::Interrupt {
-                        timestamp,
-                        caster,
-                        target,
-                        spell,
-                    });
+    // Also check for boss names mentioned directly in the line (e.g. in resist/immune messages)
+    if state.current_boss.is_none()
+        || !state
+            .current_boss
+            .as_ref()
+            .is_some_and(|b| parser::is_known_boss(b))
+    {
+        // Quick scan: only worth checking if line contains common combat verbs
+        if trimmed.contains("hits ")
+            || trimmed.contains("crits ")
+            || trimmed.contains("suffers ")
+            || trimmed.contains("resisted")
+        {
+            for boss in parser::known_boss_names() {
+                if trimmed.contains(boss) {
+                    state.current_boss = Some(boss.to_string());
+                    return;
                 }
             }
-            return;
+        }
+    }
+}
+
+/// Categorization of cast events for the parameterized handler.
+#[derive(Clone, Copy)]
+enum CastEventKind {
+    Dispel,
+    Resurrect,
+    Interrupt,
+}
+
+/// Check if a line contains `"casts <spell>"` for any spell in the list.
+///
+/// Uses a cheap `contains("casts ")` pre-check and then `contains(spell)` to
+/// avoid the `format!("casts {spell}")` allocation per spell per line.
+fn matches_spell_cast<'a>(trimmed: &str, spells: &[&'a str]) -> Option<&'a str> {
+    if !trimmed.contains("casts ") {
+        return None;
+    }
+    spells.iter().copied().find(|spell| trimmed.contains(spell))
+}
+
+/// Parse dispels, resurrects, and interrupts from cast events.
+fn parse_cast_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
+    // Dispels — any "casts <dispel_spell>" line
+    if matches_spell_cast(trimmed, DISPEL_SPELLS).is_some() {
+        try_record_cast(trimmed, timestamp, data, CastEventKind::Dispel);
+        return;
+    }
+
+    // Resurrects — exclude "begins to cast" and "fails casting"
+    if matches_spell_cast(trimmed, RESURRECT_SPELLS).is_some()
+        && !trimmed.contains("begins to cast")
+        && !trimmed.contains("fails casting")
+    {
+        try_record_cast(trimmed, timestamp, data, CastEventKind::Resurrect);
+        return;
+    }
+
+    // Interrupts — exclude "begins to cast", require caster=player, target=non-player
+    if matches_spell_cast(trimmed, INTERRUPT_SPELLS).is_some()
+        && !trimmed.contains("begins to cast")
+    {
+        try_record_cast(trimmed, timestamp, data, CastEventKind::Interrupt);
+    }
+}
+
+/// Extract caster/spell/target from a cast line and record the appropriate event.
+fn try_record_cast(trimmed: &str, timestamp: f64, data: &mut LogData, kind: CastEventKind) {
+    let Some(caps) = RE_CAST.captures(trimmed) else {
+        return;
+    };
+    let Some(caster) = caps.get(1).map(|m| m.as_str().to_string()) else {
+        return;
+    };
+    let Some(spell) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+        return;
+    };
+    let Some(target) = caps.get(3).map(|m| m.as_str().trim().to_string()) else {
+        return;
+    };
+
+    match kind {
+        CastEventKind::Dispel => {
+            data.dispels.push(DispelEvent {
+                timestamp,
+                caster: caster.clone(),
+                target: target.clone(),
+                spell: spell.clone(),
+            });
+            data.entries.push(LogEntry::Dispel {
+                timestamp,
+                caster,
+                target,
+                spell,
+            });
+        }
+        CastEventKind::Resurrect => {
+            data.resurrects.push(ResurrectEvent {
+                timestamp,
+                caster: caster.clone(),
+                target: target.clone(),
+                spell: spell.clone(),
+            });
+            data.entries.push(LogEntry::Resurrect {
+                timestamp,
+                caster,
+                target,
+                spell,
+            });
+        }
+        CastEventKind::Interrupt => {
+            if data.all_combatants.contains_key(&caster)
+                && !data.all_combatants.contains_key(&target)
+            {
+                data.interrupts.push(InterruptEvent {
+                    timestamp,
+                    caster: caster.clone(),
+                    target: target.clone(),
+                    spell: spell.clone(),
+                });
+                data.entries.push(LogEntry::Interrupt {
+                    timestamp,
+                    caster,
+                    target,
+                    spell,
+                });
+            }
         }
     }
 }
@@ -403,90 +616,146 @@ fn parse_cast_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
 /// Detect pet ownership from `PetName (OwnerName)` patterns.
 fn parse_pet_ownership(trimmed: &str, data: &mut LogData) {
     if let Some(caps) = RE_PET_OWNER.captures(trimmed) {
-        let pet_name = caps.get(1).unwrap().as_str();
-        let owner_name = caps.get(2).unwrap().as_str();
-        if data.combatants.contains_key(owner_name) && !data.combatants.contains_key(pet_name) {
+        let Some(pet_name) = caps.get(1).map(|m| m.as_str()) else {
+            return;
+        };
+        let Some(owner_name) = caps.get(2).map(|m| m.as_str()) else {
+            return;
+        };
+        if data.all_combatants.contains_key(owner_name)
+            && !data.all_combatants.contains_key(pet_name)
+        {
             data.pet_owners
                 .insert(pet_name.to_string(), owner_name.to_string());
         }
     }
 }
 
-/// Parse all 3 damage event formats.
-fn parse_damage_events(
-    trimmed: &str,
-    timestamp: f64,
+/// Extract absorbed amount from a line (only relevant for damage lines).
+fn parse_absorbed(trimmed: &str) -> u64 {
+    RE_ABSORB
+        .captures(trimmed)
+        .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Record a parsed damage event into stats and entries.
+#[allow(clippy::too_many_arguments)]
+fn record_damage(
     data: &mut LogData,
+    timestamp: f64,
+    source: String,
+    target: String,
+    spell: String,
+    amount: u64,
+    absorbed: u64,
     is_crit: bool,
-    absorbed_amount: u64,
+    pet_owner: Option<&str>,
 ) {
+    add_damage(data, &source, &spell, amount, pet_owner, is_crit);
+    add_damage_taken(data, &target, amount);
+    record_absorb(data, &target, absorbed);
+    data.entries.push(LogEntry::Damage {
+        timestamp,
+        source,
+        target,
+        spell,
+        amount,
+        absorbed,
+        is_crit,
+    });
+}
+
+/// Parse all 3 damage event formats.
+fn parse_damage_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
+    let is_crit = trimmed.contains(" crits ") || trimmed.contains(" critically ");
+
     // Format 1: Source 's Spell hits/crits Target for N
     if let Some(caps) = RE_DMG_SPELL.captures(trimmed) {
-        let source = caps.get(1).unwrap().as_str().to_string();
-        let spell = caps.get(2).unwrap().as_str().trim().to_string();
-        let target = caps.get(3).unwrap().as_str().trim().to_string();
-        let amount: u64 = caps.get(4).unwrap().as_str().parse().unwrap_or(0);
-
+        let Some(source) = caps.get(1).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let Some(spell) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
+        let Some(target) = caps.get(3).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
+        let amount: u64 = caps
+            .get(4)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let absorbed = parse_absorbed(trimmed);
         let pet_owner = extract_pet_owner(&source, data);
-        add_damage(data, &source, &spell, amount, pet_owner.as_deref(), is_crit);
-        add_damage_taken(data, &target, amount);
-        record_absorb(data, &target, absorbed_amount);
-
-        data.entries.push(LogEntry::Damage {
+        record_damage(
+            data,
             timestamp,
             source,
             target,
             spell,
             amount,
-            absorbed: absorbed_amount,
+            absorbed,
             is_crit,
-        });
+            pet_owner.as_deref(),
+        );
         return;
     }
 
     // Format 2: Source hits/crits Target for N.
     if let Some(caps) = RE_DMG_AUTO.captures(trimmed) {
-        let source = caps.get(1).unwrap().as_str().to_string();
-        let target = caps.get(2).unwrap().as_str().trim().to_string();
-        let amount: u64 = caps.get(3).unwrap().as_str().parse().unwrap_or(0);
-
-        add_damage(data, &source, "Auto Attack", amount, None, is_crit);
-        add_damage_taken(data, &target, amount);
-        record_absorb(data, &target, absorbed_amount);
-
-        data.entries.push(LogEntry::Damage {
+        let Some(source) = caps.get(1).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let Some(target) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
+        let amount: u64 = caps
+            .get(3)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let absorbed = parse_absorbed(trimmed);
+        record_damage(
+            data,
             timestamp,
             source,
             target,
-            spell: "Auto Attack".to_string(),
+            "Auto Attack".to_string(),
             amount,
-            absorbed: absorbed_amount,
+            absorbed,
             is_crit,
-        });
+            None,
+        );
         return;
     }
 
     // Format 3: Target suffers N damage from Source 's Spell
     if let Some(caps) = RE_DMG_SUFFER.captures(trimmed) {
-        let target = caps.get(1).unwrap().as_str().trim().to_string();
-        let amount: u64 = caps.get(2).unwrap().as_str().parse().unwrap_or(0);
-        let source = caps.get(3).unwrap().as_str().to_string();
-        let spell = caps.get(4).unwrap().as_str().trim().to_string();
-
+        let Some(target) = caps.get(1).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
+        let amount: u64 = caps
+            .get(2)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let Some(source) = caps.get(3).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let Some(spell) = caps.get(4).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
+        let absorbed = parse_absorbed(trimmed);
         let pet_owner = extract_pet_owner(&source, data);
-        add_damage(data, &source, &spell, amount, pet_owner.as_deref(), is_crit);
-        add_damage_taken(data, &target, amount);
-        record_absorb(data, &target, absorbed_amount);
-
-        data.entries.push(LogEntry::Damage {
+        record_damage(
+            data,
             timestamp,
             source,
             target,
             spell,
             amount,
-            absorbed: absorbed_amount,
+            absorbed,
             is_crit,
-        });
+            pet_owner.as_deref(),
+        );
     }
 }
 
@@ -496,10 +765,19 @@ fn parse_healing_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
 
     // Format 1: Source 's Spell heals/critically heals Target for N
     if let Some(caps) = RE_HEAL_SPELL.captures(trimmed) {
-        let source = caps.get(1).unwrap().as_str().to_string();
-        let mut spell = caps.get(2).unwrap().as_str().trim().to_string();
-        let target = caps.get(3).unwrap().as_str().trim().to_string();
-        let amount: u64 = caps.get(4).unwrap().as_str().parse().unwrap_or(0);
+        let Some(source) = caps.get(1).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let Some(mut spell) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
+        let Some(target) = caps.get(3).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
+        let amount: u64 = caps
+            .get(4)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
 
         if let Some(stripped) = spell.strip_suffix(" critically") {
             spell = stripped.trim().to_string();
@@ -519,10 +797,19 @@ fn parse_healing_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
 
     // Format 2: Target gains N health from Source 's Spell
     if let Some(caps) = RE_HEAL_GAIN.captures(trimmed) {
-        let target = caps.get(1).unwrap().as_str().to_string();
-        let amount: u64 = caps.get(2).unwrap().as_str().parse().unwrap_or(0);
-        let source = caps.get(3).unwrap().as_str().to_string();
-        let spell = caps.get(4).unwrap().as_str().trim().to_string();
+        let Some(target) = caps.get(1).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let amount: u64 = caps
+            .get(2)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let Some(source) = caps.get(3).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let Some(spell) = caps.get(4).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
 
         add_healing(data, &source, &spell, amount, false);
         data.entries.push(LogEntry::Healing {
@@ -537,37 +824,48 @@ fn parse_healing_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
 }
 
 /// Parse dodge, parry, and miss events.
+///
+/// Uses `all_combatants` (built from `COMBATANT_INFO` during parsing) rather
+/// than `combatants` (which is only populated in post-processing).
 fn parse_avoidance(trimmed: &str, data: &mut LogData) {
     if let Some(caps) = RE_DODGE.captures(trimmed) {
-        let defender = caps.get(2).unwrap().as_str();
-        if data.combatants.contains_key(defender) {
-            data.avoidance
-                .entry(defender.to_string())
-                .or_default()
-                .dodges += 1;
+        if let Some(defender) = caps.get(2).map(|m| m.as_str()) {
+            if data.all_combatants.contains_key(defender) {
+                data.avoidance
+                    .entry(defender.to_string())
+                    .or_default()
+                    .dodges += 1;
+            }
         }
     }
 
     if let Some(caps) = RE_PARRY.captures(trimmed) {
-        let defender = caps.get(2).unwrap().as_str();
-        if data.combatants.contains_key(defender) {
-            data.avoidance
-                .entry(defender.to_string())
-                .or_default()
-                .parries += 1;
+        if let Some(defender) = caps.get(2).map(|m| m.as_str()) {
+            if data.all_combatants.contains_key(defender) {
+                data.avoidance
+                    .entry(defender.to_string())
+                    .or_default()
+                    .parries += 1;
+            }
         }
     }
 
     if let Some(caps) = RE_MISS.captures(trimmed) {
-        let attacker = caps.get(1).unwrap().as_str().trim();
-        let defender = caps.get(2).unwrap().as_str();
+        let Some(attacker) = caps.get(1).map(|m| m.as_str().trim()) else {
+            return;
+        };
+        let Some(defender) = caps.get(2).map(|m| m.as_str()) else {
+            return;
+        };
 
-        if data.combatants.contains_key(defender) && !data.combatants.contains_key(attacker) {
+        if data.all_combatants.contains_key(defender) && !data.all_combatants.contains_key(attacker)
+        {
             data.avoidance
                 .entry(defender.to_string())
                 .or_default()
                 .missed_by += 1;
-        } else if data.combatants.contains_key(attacker) && !data.combatants.contains_key(defender)
+        } else if data.all_combatants.contains_key(attacker)
+            && !data.all_combatants.contains_key(defender)
         {
             data.avoidance
                 .entry(attacker.to_string())
@@ -578,30 +876,35 @@ fn parse_avoidance(trimmed: &str, data: &mut LogData) {
 }
 
 /// Parse buff gain and fade events.
+///
+/// Uses `all_combatants` (built from `COMBATANT_INFO` during parsing) rather
+/// than `combatants` (which is only populated in post-processing).
 fn parse_buff_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
     if let Some(caps) = RE_BUFF_GAIN.captures(trimmed) {
-        let player = caps.get(1).unwrap().as_str();
-        let buff = caps.get(2).unwrap().as_str().to_string();
-
-        if data.combatants.contains_key(player) {
-            let buffs = data.buffs.entry(player.to_string()).or_default();
-            let stats = buffs.entry(buff).or_default();
-            stats.gains += 1;
-            if stats.first_gain.is_none() {
-                stats.first_gain = Some(timestamp);
+        if let Some(player) = caps.get(1).map(|m| m.as_str()) {
+            if let Some(buff) = caps.get(2).map(|m| m.as_str().trim().to_string()) {
+                if data.all_combatants.contains_key(player) {
+                    let buffs = data.buffs.entry(player.to_string()).or_default();
+                    let stats = buffs.entry(buff).or_default();
+                    stats.gains += 1;
+                    if stats.first_gain.is_none() {
+                        stats.first_gain = Some(timestamp);
+                    }
+                }
             }
         }
     }
 
     if let Some(caps) = RE_BUFF_FADE.captures(trimmed) {
-        let buff = caps.get(1).unwrap().as_str().to_string();
-        let player = caps.get(2).unwrap().as_str();
-
-        if data.combatants.contains_key(player) {
-            let buffs = data.buffs.entry(player.to_string()).or_default();
-            let stats = buffs.entry(buff).or_default();
-            stats.fades += 1;
-            stats.last_fade = Some(timestamp);
+        if let Some(buff) = caps.get(1).map(|m| m.as_str().trim().to_string()) {
+            if let Some(player) = caps.get(2).map(|m| m.as_str()) {
+                if data.all_combatants.contains_key(player) {
+                    let buffs = data.buffs.entry(player.to_string()).or_default();
+                    let stats = buffs.entry(buff).or_default();
+                    stats.fades += 1;
+                    stats.last_fade = Some(timestamp);
+                }
+            }
         }
     }
 }
@@ -610,11 +913,23 @@ fn parse_buff_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
 fn parse_loot_trade(trimmed: &str, timestamp: f64, data: &mut LogData) {
     if trimmed.contains("LOOT:") {
         if let Some(caps) = RE_LOOT.captures(trimmed) {
-            let player = caps.get(1).unwrap().as_str().to_string();
-            let color_code = caps.get(2).unwrap().as_str();
-            let item_id: u64 = caps.get(3).unwrap().as_str().parse().unwrap_or(0);
-            let item_name = caps.get(4).unwrap().as_str().to_string();
-            let quantity: u64 = caps.get(5).unwrap().as_str().parse().unwrap_or(1);
+            let Some(player) = caps.get(1).map(|m| m.as_str().to_string()) else {
+                return;
+            };
+            let Some(color_code) = caps.get(2).map(|m| m.as_str()) else {
+                return;
+            };
+            let item_id: u64 = caps
+                .get(3)
+                .and_then(|m| m.as_str().parse().ok())
+                .unwrap_or(0);
+            let Some(item_name) = caps.get(4).map(|m| m.as_str().to_string()) else {
+                return;
+            };
+            let quantity: u64 = caps
+                .get(5)
+                .and_then(|m| m.as_str().parse().ok())
+                .unwrap_or(1);
 
             let quality = match color_code {
                 "9d9d9d" => "poor",
@@ -640,9 +955,15 @@ fn parse_loot_trade(trimmed: &str, timestamp: f64, data: &mut LogData) {
 
     if trimmed.contains("LOOT_TRADE:") {
         if let Some(caps) = RE_TRADE.captures(trimmed) {
-            let from_player = caps.get(1).unwrap().as_str().to_string();
-            let item_name = caps.get(2).unwrap().as_str().trim().to_string();
-            let to_player = caps.get(3).unwrap().as_str().to_string();
+            let Some(from_player) = caps.get(1).map(|m| m.as_str().to_string()) else {
+                return;
+            };
+            let Some(item_name) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+                return;
+            };
+            let Some(to_player) = caps.get(3).map(|m| m.as_str().to_string()) else {
+                return;
+            };
 
             data.trades.push(TradeEvent {
                 timestamp,
@@ -663,19 +984,17 @@ fn is_player_guid(guid: &str) -> bool {
 
 /// Record absorbed damage on a player target.
 fn record_absorb(data: &mut LogData, target: &str, absorbed_amount: u64) {
-    if absorbed_amount > 0 && data.combatants.contains_key(target) {
+    if absorbed_amount > 0 && data.all_combatants.contains_key(target) {
         *data.absorbs.entry(target.to_string()).or_insert(0) += absorbed_amount;
     }
 }
 
 /// Extract pet owner from a source string like `PetName (OwnerName)`.
 fn extract_pet_owner(source: &str, data: &LogData) -> Option<String> {
-    if let Some(caps) = RE_PET_OWNER.captures(source) {
-        let _pet_name = caps.get(1).unwrap().as_str();
-        let owner_name = caps.get(2).unwrap().as_str();
-        if data.combatants.contains_key(owner_name) {
-            return Some(owner_name.to_string());
-        }
+    let caps = RE_PET_OWNER.captures(source)?;
+    let owner_name = caps.get(2)?.as_str();
+    if data.all_combatants.contains_key(owner_name) {
+        return Some(owner_name.to_string());
     }
     None
 }
@@ -823,8 +1142,12 @@ fn parse_consumable(trimmed: &str, timestamp: f64, data: &mut LogData) {
         return;
     }
     if let Some(caps) = RE_CONSUMABLE.captures(trimmed) {
-        let player = caps.get(1).unwrap().as_str().to_string();
-        let consumable = caps.get(2).unwrap().as_str().trim().to_string();
+        let Some(player) = caps.get(1).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let Some(consumable) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
 
         data.consumables.push(ConsumableUse {
             timestamp,
@@ -849,13 +1172,13 @@ fn parse_gear_slot(raw: &str) -> Option<GearSlot> {
     if raw.is_empty() || raw == "nil" {
         return None;
     }
-    let parts: Vec<&str> = raw.split(':').collect();
-    let item_id = parts.first()?.parse::<u32>().ok()?;
+    let mut parts = raw.split(':');
+    let item_id = parts.next()?.parse::<u32>().ok()?;
     if item_id == 0 {
         return None;
     }
-    let enchant_id = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let suffix_id = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let enchant_id = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let suffix_id = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     Some(GearSlot {
         item_id,
         enchant_id,
@@ -928,6 +1251,172 @@ mod tests {
         assert_eq!(stats.damage, 500);
         assert_eq!(stats.healing, 400 + 800 + 148);
         assert_eq!(data.encounters.len(), 1);
+    }
+
+    #[test]
+    fn test_regex_buff_gain() {
+        // Simple buff
+        let line = "Acedica gains Demon Armor (1).";
+        let caps = RE_BUFF_GAIN
+            .captures(line)
+            .expect("should match simple buff");
+        assert_eq!(caps.get(1).unwrap().as_str(), "Acedica");
+        assert_eq!(caps.get(2).unwrap().as_str().trim(), "Demon Armor");
+        assert_eq!(caps.get(3).unwrap().as_str(), "1");
+
+        // Buff with colon
+        let line2 = "Acedica gains Power Word: Fortitude (1).";
+        let caps2 = RE_BUFF_GAIN
+            .captures(line2)
+            .expect("should match buff with colon");
+        assert_eq!(
+            caps2.get(2).unwrap().as_str().trim(),
+            "Power Word: Fortitude"
+        );
+    }
+
+    #[test]
+    fn test_regex_buff_fade() {
+        let line = "Power Word: Fortitude fades from Acedica.";
+        let caps = RE_BUFF_FADE
+            .captures(line)
+            .expect("should match fade with colon");
+        assert_eq!(
+            caps.get(1).unwrap().as_str().trim(),
+            "Power Word: Fortitude"
+        );
+        assert_eq!(caps.get(2).unwrap().as_str(), "Acedica");
+    }
+
+    #[test]
+    fn test_regex_avoidance() {
+        let dodge = "1/24 14:55:36.750  Anvilrage Guardsman attacks. Acedica dodges.";
+        let caps = RE_DODGE.captures(dodge).expect("should match dodge");
+        assert_eq!(caps.get(2).unwrap().as_str(), "Acedica");
+
+        let parry = "1/24 14:55:35.833  Anvilrage Footman attacks. Acedica parries.";
+        let caps2 = RE_PARRY.captures(parry).expect("should match parry");
+        assert_eq!(caps2.get(2).unwrap().as_str(), "Acedica");
+    }
+
+    #[test]
+    fn test_parse_buffs_and_avoidance() {
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Acedica&PALADIN&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Acedica gains Power Word: Fortitude (1).".to_string(),
+            "1/27 12:24:02.000  Acedica gains Arcane Brilliance (1).".to_string(),
+            "1/27 12:24:03.000  Power Word: Fortitude fades from Acedica.".to_string(),
+            "1/27 12:24:04.000  Anvilrage Footman attacks. Acedica dodges.".to_string(),
+            "1/27 12:24:05.000  Anvilrage Footman attacks. Acedica parries.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        // Check buffs
+        let buffs = data.buffs.get("Acedica");
+        assert!(buffs.is_some(), "Acedica should have buffs");
+        let buffs = buffs.unwrap();
+        assert!(
+            buffs.contains_key("Power Word: Fortitude"),
+            "Should track PW:F"
+        );
+        assert!(buffs.contains_key("Arcane Brilliance"), "Should track AB");
+        assert_eq!(buffs["Power Word: Fortitude"].gains, 1);
+        assert_eq!(buffs["Power Word: Fortitude"].fades, 1);
+
+        // Check avoidance
+        let avoid = data.avoidance.get("Acedica");
+        assert!(avoid.is_some(), "Acedica should have avoidance");
+        let avoid = avoid.unwrap();
+        assert_eq!(avoid.dodges, 1);
+        assert_eq!(avoid.parries, 1);
+    }
+
+    #[test]
+    fn test_boss_detection_from_combat_lines() {
+        // Simulate a wipe: boss is fought but never dies
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Acedica&PALADIN&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 20:45:19.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:45:21.000  Acedica 's Holy Shield hits Chromaggus for 125 Holy damage.".to_string(),
+            "1/27 20:45:22.000  Chromaggus hits Acedica for 1245.".to_string(),
+            "1/27 20:45:23.000  Acedica hits Chromaggus for 113.".to_string(),
+            // Wipe — no UNIT_DIED for boss
+            "1/27 20:48:13.000  PLAYER_REGEN_ENABLED".to_string(),
+            // Second attempt — kill
+            "1/27 20:54:56.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:54:57.000  Acedica hits Chromaggus for 200.".to_string(),
+            "1/27 20:59:26.000  UNIT_DIED:Chromaggus:0xF1300036C4014F18".to_string(),
+            "1/27 20:59:26.000  Chromaggus dies.".to_string(),
+            "1/27 20:59:27.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(
+            data.encounters.len(),
+            2,
+            "Should have 2 encounters (wipe + kill)"
+        );
+
+        let wipe = &data.encounters[0];
+        assert_eq!(
+            wipe.name.as_deref(),
+            Some("Chromaggus"),
+            "Wipe should identify Chromaggus"
+        );
+        assert!(wipe.is_boss, "Wipe encounter should be marked as boss");
+        assert!(!wipe.is_kill, "Wipe should not be marked as kill");
+
+        let kill = &data.encounters[1];
+        assert_eq!(
+            kill.name.as_deref(),
+            Some("Chromaggus"),
+            "Kill should identify Chromaggus"
+        );
+        assert!(kill.is_boss, "Kill encounter should be marked as boss");
+        assert!(kill.is_kill, "Kill should be marked as kill");
+    }
+
+    #[test]
+    fn test_boss_kill_during_combat() {
+        // Boss dies during combat — should be marked as Kill
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 19:39:51.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 19:39:52.000  Tank 's Bloodthirst hits Garr for 197.".to_string(),
+            "1/27 19:40:05.000  Tank hits Garr for 150.".to_string(),
+            "1/27 19:41:06.000  UNIT_DIED:Garr:0xF130002F1900DD21".to_string(),
+            "1/27 19:42:30.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+        assert_eq!(data.encounters.len(), 1, "Should have 1 encounter");
+        let enc = &data.encounters[0];
+        assert_eq!(enc.name.as_deref(), Some("Garr"));
+        assert!(enc.is_boss, "Garr should be marked as boss");
+        assert!(enc.is_kill, "Garr should be marked as kill");
+    }
+
+    #[test]
+    fn test_boss_kill_after_combat_drops() {
+        // Boss dies AFTER combat drops (PLAYER_REGEN_ENABLED fires before UNIT_DIED)
+        // This happens with Garr (adds explode, combat drops) and Majordomo
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 19:39:51.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 19:39:52.000  Tank 's Bloodthirst hits Garr for 197.".to_string(),
+            "1/27 19:40:05.000  Tank hits Garr for 150.".to_string(),
+            // Combat drops before boss dies
+            "1/27 19:40:58.000  PLAYER_REGEN_ENABLED".to_string(),
+            // Boss dies 10s after combat ended
+            "1/27 19:41:08.000  UNIT_DIED:Garr:0xF130002F1900DD21".to_string(),
+        ];
+        let data = parse_log(&lines);
+        assert_eq!(data.encounters.len(), 1, "Should have 1 encounter");
+        let enc = &data.encounters[0];
+        assert_eq!(enc.name.as_deref(), Some("Garr"));
+        assert!(enc.is_boss, "Garr should be marked as boss");
+        assert!(enc.is_kill, "Garr should be retroactively marked as kill");
     }
 
     #[test]

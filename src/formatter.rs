@@ -30,6 +30,9 @@ fn name_pattern() -> String {
 struct ReplacementRule {
     regex: Regex,
     replacement: String,
+    /// Optional cheap keyword pre-check: if set, skip the regex unless the
+    /// line contains this substring. Avoids regex evaluation on non-matching lines.
+    keyword: Option<&'static str>,
 }
 
 /// Apply the first matching replacement from a list of rules to a line.
@@ -42,6 +45,12 @@ struct ReplacementRule {
 #[inline]
 fn handle_replacements(line: &str, rules: &[ReplacementRule]) -> Option<String> {
     for rule in rules {
+        // Skip regex evaluation if the line doesn't contain the keyword
+        if let Some(kw) = rule.keyword {
+            if !line.contains(kw) {
+                continue;
+            }
+        }
         let result = rule.regex.replace_all(line, rule.replacement.as_str());
         // Cow::Owned means a replacement happened — O(1) check vs string comparison
         if matches!(result, Cow::Owned(_)) {
@@ -56,12 +65,23 @@ fn rule(pattern: &str, replacement: String) -> ReplacementRule {
     ReplacementRule {
         regex: Regex::new(pattern).unwrap_or_else(|e| panic!("bad regex {pattern:?}: {e}")),
         replacement,
+        keyword: None,
     }
 }
 
 /// Case-insensitive variant.
 fn rule_ci(pattern: &str, replacement: String) -> ReplacementRule {
     rule(&format!("(?i){pattern}"), replacement)
+}
+
+/// Case-insensitive rule with a cheap keyword pre-check.
+fn rule_ci_kw(pattern: &str, replacement: String, keyword: &'static str) -> ReplacementRule {
+    ReplacementRule {
+        regex: Regex::new(&format!("(?i){pattern}"))
+            .unwrap_or_else(|e| panic!("bad regex {pattern:?}: {e}")),
+        replacement,
+        keyword: Some(keyword),
+    }
 }
 
 /// Build "You" replacement rules for a given player name.
@@ -72,83 +92,106 @@ fn build_you_replacements(player_name: &str) -> Vec<ReplacementRule> {
 
     vec![
         // Remove failed cast/perform lines
-        rule_ci(r".*You fail to cast.*\n", String::new()),
-        rule_ci(r".*You fail to perform.*\n", String::new()),
+        rule_ci_kw(r".*You fail to cast.*\n", String::new(), "fail to cast"),
+        rule_ci_kw(
+            r".*You fail to perform.*\n",
+            String::new(),
+            "fail to perform",
+        ),
         // Self-suffer
-        rule_ci(
+        rule_ci_kw(
             r" You suffer (.*?) from your",
             format!(" {name} suffers $1 from {name} (self damage) 's"),
+            "suffer",
         ),
         // Self-hit
-        rule_ci(
+        rule_ci_kw(
             r" Your (.*?) hits you for",
             format!(" {name} (self damage) 's $1 hits {name} for"),
+            "hits you for",
         ),
         // Self parry (legacy 'was' instead of 'is')
-        rule_ci(
+        rule_ci_kw(
             r" Your (.*?) is parried by",
             format!(" {name} 's $1 was parried by"),
+            "parried by",
         ),
         // Your X failed
-        rule_ci(r" Your (.*?) failed", format!(" {name} 's $1 fails")),
+        rule_ci_kw(
+            r" Your (.*?) failed",
+            format!(" {name} 's $1 fails"),
+            "failed",
+        ),
         // Failed. You are immune
-        rule_ci(
+        rule_ci_kw(
             r" failed\. You are immune",
             format!(" fails. {name} is immune"),
+            "You are immune",
         ),
-        // Your -> possessive
-        rule_ci(r" [Yy]our ", format!(" {name} 's ")),
+        // Your -> possessive (very common — matches most lines with "your"/"Your")
+        rule_ci_kw(r" [Yy]our ", format!(" {name} 's "), "our "),
         // You gain X from Y's -> gains from other player's spell
-        rule_ci(
+        rule_ci_kw(
             r" You gain (.*?) from (.*?)'s",
             format!(" {name} gains $1 from $2 's"),
+            "You gain",
         ),
         // You gain X from -> gains from your own spell
-        rule_ci(
+        rule_ci_kw(
             r" You gain (.*?) from ",
             format!(" {name} gains $1 from {name} 's "),
+            "You gain",
         ),
         // You gain (buff gains)
-        rule_ci(" You gain", format!(" {name} gains")),
-        rule_ci(" You hit", format!(" {name} hits")),
-        rule_ci(" You crit", format!(" {name} crits")),
-        rule_ci(" You are", format!(" {name} is")),
-        rule_ci(" You suffer", format!(" {name} suffers")),
-        rule_ci(" You lose", format!(" {name} loses")),
-        rule_ci(" You die", format!(" {name} dies")),
-        rule_ci(" You cast", format!(" {name} casts")),
-        rule_ci(" You create", format!(" {name} creates")),
-        rule_ci(" You perform", format!(" {name} performs")),
-        rule_ci(" You interrupt", format!(" {name} interrupts")),
-        rule_ci(" You miss", format!(" {name} misses")),
-        rule_ci(" You attack", format!(" {name} attacks")),
-        rule_ci(" You block", format!(" {name} blocks")),
-        rule_ci(" You parry", format!(" {name} parries")),
-        rule_ci(" You dodge", format!(" {name} dodges")),
-        rule_ci(" You resist", format!(" {name} resists")),
-        rule_ci(" You absorb", format!(" {name} absorbs")),
-        rule_ci(" You reflect", format!(" {name} reflects")),
-        rule_ci(" You receive", format!(" {name} receives")),
+        rule_ci_kw(" You gain", format!(" {name} gains"), "You gain"),
+        rule_ci_kw(" You hit", format!(" {name} hits"), "You hit"),
+        rule_ci_kw(" You crit", format!(" {name} crits"), "You crit"),
+        rule_ci_kw(" You are", format!(" {name} is"), "You are"),
+        rule_ci_kw(" You suffer", format!(" {name} suffers"), "You suffer"),
+        rule_ci_kw(" You lose", format!(" {name} loses"), "You lose"),
+        rule_ci_kw(" You die", format!(" {name} dies"), "You die"),
+        rule_ci_kw(" You cast", format!(" {name} casts"), "You cast"),
+        rule_ci_kw(" You create", format!(" {name} creates"), "You create"),
+        rule_ci_kw(" You perform", format!(" {name} performs"), "You perform"),
+        rule_ci_kw(
+            " You interrupt",
+            format!(" {name} interrupts"),
+            "You interrupt",
+        ),
+        rule_ci_kw(" You miss", format!(" {name} misses"), "You miss"),
+        rule_ci_kw(" You attack", format!(" {name} attacks"), "You attack"),
+        rule_ci_kw(" You block", format!(" {name} blocks"), "You block"),
+        rule_ci_kw(" You parry", format!(" {name} parries"), "You parry"),
+        rule_ci_kw(" You dodge", format!(" {name} dodges"), "You dodge"),
+        rule_ci_kw(" You resist", format!(" {name} resists"), "You resist"),
+        rule_ci_kw(" You absorb", format!(" {name} absorbs"), "You absorb"),
+        rule_ci_kw(" You reflect", format!(" {name} reflects"), "You reflect"),
+        rule_ci_kw(" You receive", format!(" {name} receives"), "You receive"),
         // &You receive (LOOT etc)
-        rule_ci("&You receive", format!("&{name} receives")),
+        rule_ci_kw("&You receive", format!("&{name} receives"), "&You"),
         // &You (any remaining)
-        rule_ci("&You", format!("&{name}")),
-        rule_ci(r" You deflect", format!(" {name} deflects")),
+        rule_ci_kw("&You", format!("&{name}"), "&You"),
+        rule_ci_kw(r" You deflect", format!(" {name} deflects"), "You deflect"),
         // Dodged (no 'You' in pattern — SPELLDODGEDOTHERSELF)
-        rule_ci(r"was dodged\.", format!("was dodged by {name}.")),
-        rule_ci("causes you", format!("causes {name}")),
-        rule_ci("heals you", format!("heals {name}")),
-        rule_ci("hits you for", format!("hits {name} for")),
-        rule_ci("crits you for", format!("crits {name} for")),
+        rule_ci_kw(r"was dodged\.", format!("was dodged by {name}."), "dodged"),
+        rule_ci_kw("causes you", format!("causes {name}"), "causes you"),
+        rule_ci_kw("heals you", format!("heals {name}"), "heals you"),
+        rule_ci_kw("hits you for", format!("hits {name} for"), "hits you"),
+        rule_ci_kw("crits you for", format!("crits {name} for"), "crits you"),
         // You have slain
-        rule_ci(
+        rule_ci_kw(
             r" You have slain (.*?)!",
             format!(" $1 is slain by {name}."),
+            "You have slain",
         ),
         // non-whitespace before you.
-        rule_ci(r"(\S)\syou\.", format!("$1 {name}.")),
+        rule_ci_kw(r"(\S)\syou\.", format!("$1 {name}."), "you."),
         // Fall damage
-        rule_ci(r" You fall and lose", format!(" {name} falls and loses")),
+        rule_ci_kw(
+            r" You fall and lose",
+            format!(" {name} falls and loses"),
+            "You fall",
+        ),
     ]
 }
 
@@ -201,26 +244,33 @@ fn build_pet_replacements() -> Vec<ReplacementRule> {
 fn build_generic_replacements() -> Vec<ReplacementRule> {
     vec![
         // Lines with fades/gains/afflicted — preserve 's in buff names
-        rule_ci(r" fades from .*\.", "$0".to_string()),
-        rule_ci(r" gains .*\)\.", "$0".to_string()),
-        rule_ci(r" is afflicted by .*\)\.", "$0".to_string()),
+        rule_ci_kw(r" fades from .*\.", "$0".to_string(), " fades from "),
+        rule_ci_kw(r" gains .*\)\.", "$0".to_string(), " gains "),
+        rule_ci_kw(
+            r" is afflicted by .*\)\.",
+            "$0".to_string(),
+            " is afflicted by ",
+        ),
         // Handle 's at beginning: [double space][name]'s [Capital]
-        rule_ci(
+        rule_ci_kw(
             &format!(r"  ([{L}'\- ]*?\S)'s ([A-Z])"),
             "  $1 's $2".to_string(),
+            "'s ",
         ),
         // Handle 's after 'from'
-        rule_ci(
+        rule_ci_kw(
             &format!(r"from ([{L}'\- ]*?\S)'s ([A-Z])"),
             "from $1 's $2".to_string(),
+            "'s ",
         ),
         // Handle 's after 'is immune to'
-        rule_ci(
+        rule_ci_kw(
             &format!(r"is immune to ([{L}'\- ]*?\S)'s ([A-Z])"),
             "is immune to $1 's $2".to_string(),
+            "is immune to",
         ),
         // Handle 's for pets
-        rule_ci(r"\)'s ([A-Z])", ") 's $1".to_string()),
+        rule_ci_kw(r"\)'s ([A-Z])", ") 's $1".to_string(), ")'s "),
     ]
 }
 
@@ -413,8 +463,7 @@ fn first_pass(
             }
         } else if line.contains("LOOT:") {
             // Loot fix: add quantity 1 to loot messages without quantity
-            if line.ends_with("|h|r.") {
-                let trimmed = &line[..line.len() - "|h|r.".len()];
+            if let Some(trimmed) = line.strip_suffix("|h|r.") {
                 *line = format!("{trimmed}|h|rx1.");
             }
         } else {
@@ -466,9 +515,11 @@ fn second_pass(
         }
 
         // Pet replacements — skip unless an owner name is present
-        let has_owner = owner_names
-            .iter()
-            .any(|owner| line.contains(owner.as_str()));
+        // Quick pre-check: all owner names are "(Name)" format, so '(' must be present
+        let has_owner = line.contains('(')
+            && owner_names
+                .iter()
+                .any(|owner| line.contains(owner.as_str()));
         if has_owner
             && !line.contains("dies.")
             && !line.contains("is killed by")

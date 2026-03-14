@@ -16,10 +16,62 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn main() -> iced::Result {
+    // Quick benchmark mode: `combat-scribe --bench <file>`
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "--bench" {
+        run_bench(&args[2]);
+        return Ok(());
+    }
+
     iced::application("WoW Log Viewer", App::update, App::view)
         .theme(|_| Theme::Dark)
         .window_size((1200.0, 800.0))
         .run_with(|| (App::new(), Task::none()))
+}
+
+fn run_bench(path: &str) {
+    use std::time::Instant;
+
+    eprintln!("Reading file...");
+    let t0 = Instant::now();
+    let content = fs::read_to_string(path).expect("read file");
+    let lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let read_time = t0.elapsed();
+    eprintln!("  Read {} lines in {read_time:.2?}", lines.len());
+
+    eprintln!("Running formatter...");
+    let t1 = Instant::now();
+    let (formatted, player_names) = formatter::format_log(lines);
+    let fmt_time = t1.elapsed();
+    eprintln!(
+        "  Formatted {} lines in {fmt_time:.2?} ({} players: {})",
+        formatted.len(),
+        player_names.len(),
+        player_names.join(", ")
+    );
+
+    eprintln!("Running parser...");
+    let t2 = Instant::now();
+    let data = log_parser::parse_log(&formatted);
+    let parse_time = t2.elapsed();
+    eprintln!(
+        "  Parsed in {parse_time:.2?}: {} encounters, {} combatants, {} entries",
+        data.encounters.len(),
+        data.combatants.len(),
+        data.entries.len()
+    );
+
+    // Show boss encounters
+    for enc in &data.encounters {
+        if enc.is_boss {
+            let result = if enc.is_kill { "Kill" } else { "Wipe" };
+            let name = enc.name.as_deref().unwrap_or("Unknown");
+            eprintln!("  {name} - {result} - {:.0}s", enc.duration);
+        }
+    }
+
+    let total = t0.elapsed();
+    eprintln!("Total: {total:.2?}");
 }
 
 // ── Application State ───────────────────────────────────────────────────────
@@ -264,7 +316,6 @@ impl App {
             Message::ExportComplete(result) => {
                 match result {
                     Ok(info) => {
-                        self.state = AppState::Done(info.clone());
                         self.progress = 1.0;
                         let mut msg =
                             format!("Exported {} lines to {}", info.line_count, info.output_path);
@@ -279,10 +330,11 @@ impl App {
                             msg.push_str(". Original log zeroed.");
                         }
                         self.status_message = msg;
+                        self.state = AppState::Done(info);
                     }
                     Err(e) => {
-                        self.state = AppState::Error(e.clone());
                         self.status_message = format!("Export error: {e}");
+                        self.state = AppState::Error(e);
                     }
                 }
                 Task::none()
@@ -695,20 +747,17 @@ fn do_export(
 
     // Optionally create zip
     let zipped = if opts.create_zip {
-        let zip_path = format!("{}.zip", output_path.display());
-        create_zip_file(&output_path, &zip_path)
+        let zip_path = output_path.with_extension("txt.zip");
+        create_zip_file(&output_path, &zip_path, content.as_bytes())
             .map_err(|e| format!("Failed to create zip: {e}"))?;
         true
     } else {
         false
     };
 
-    // Optionally zero the original log
+    // Optionally zero the original log (File::create truncates to zero)
     let zeroed = if opts.zero_log {
-        let f =
-            fs::File::create(&opts.file_path).map_err(|e| format!("Failed to zero log: {e}"))?;
-        f.set_len(0)
-            .map_err(|e| format!("Failed to truncate log: {e}"))?;
+        fs::File::create(&opts.file_path).map_err(|e| format!("Failed to zero log: {e}"))?;
         true
     } else {
         false
@@ -723,7 +772,11 @@ fn do_export(
     })
 }
 
-fn create_zip_file(source: &std::path::Path, zip_path: &str) -> Result<(), String> {
+fn create_zip_file(
+    source: &std::path::Path,
+    zip_path: &std::path::Path,
+    content: &[u8],
+) -> Result<(), String> {
     let file = fs::File::create(zip_path).map_err(|e| e.to_string())?;
     let mut zip_writer = zip::ZipWriter::new(file);
 
@@ -739,8 +792,7 @@ fn create_zip_file(source: &std::path::Path, zip_path: &str) -> Result<(), Strin
         .start_file(&source_name, options)
         .map_err(|e| e.to_string())?;
 
-    let content = fs::read(source).map_err(|e| e.to_string())?;
-    zip_writer.write_all(&content).map_err(|e| e.to_string())?;
+    zip_writer.write_all(content).map_err(|e| e.to_string())?;
     zip_writer.finish().map_err(|e| e.to_string())?;
 
     Ok(())

@@ -3,6 +3,7 @@
 //! Full port of the `logData` global object from `app.js`, plus
 //! encounter filtering helpers.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 // ── Core Data ───────────────────────────────────────────────────────────────
@@ -197,6 +198,10 @@ pub struct AvoidanceStats {
 }
 
 impl AvoidanceStats {
+    /// Total attacks avoided (dodges + parries + blocks + missed by attacker).
+    ///
+    /// Note: `misses` (player's own missed attacks) is excluded since it
+    /// represents offensive misses, not defensive avoidance.
     pub fn total(&self) -> u64 {
         self.dodges + self.parries + self.blocks + self.missed_by
     }
@@ -331,12 +336,16 @@ impl LogData {
 
     /// Recalculate player stats filtered to selected encounters.
     ///
-    /// Returns `(stats_map, total_duration)`.
-    pub fn filtered_stats(&self, filter: &EncounterFilter) -> (HashMap<String, PlayerStats>, f64) {
+    /// Returns `(stats_map, total_duration)`. For `EncounterFilter::All`, borrows
+    /// the existing stats to avoid a full clone.
+    pub fn filtered_stats(
+        &self,
+        filter: &EncounterFilter,
+    ) -> (Cow<'_, HashMap<String, PlayerStats>>, f64) {
         let duration = self.selected_duration(filter);
 
         if matches!(filter, EncounterFilter::All) {
-            return (self.player_stats.clone(), duration);
+            return (Cow::Borrowed(&self.player_stats), duration);
         }
 
         let mut stats: HashMap<String, PlayerStats> = HashMap::new();
@@ -388,39 +397,40 @@ impl LogData {
             }
         }
 
-        (stats, duration)
+        (Cow::Owned(stats), duration)
+    }
+
+    /// Filter any timestamped event collection to the current encounter selection.
+    fn filtered_by_time<'a, T>(
+        &self,
+        events: &'a [T],
+        get_ts: impl Fn(&T) -> f64,
+        filter: &EncounterFilter,
+    ) -> Vec<&'a T> {
+        events
+            .iter()
+            .filter(|e| self.is_in_selection(get_ts(e), filter))
+            .collect()
     }
 
     /// Filter deaths to selection.
     pub fn filtered_deaths(&self, filter: &EncounterFilter) -> Vec<&DeathEvent> {
-        self.deaths
-            .iter()
-            .filter(|d| self.is_in_selection(d.timestamp, filter))
-            .collect()
+        self.filtered_by_time(&self.deaths, |d| d.timestamp, filter)
     }
 
     /// Filter dispels to selection.
     pub fn filtered_dispels(&self, filter: &EncounterFilter) -> Vec<&DispelEvent> {
-        self.dispels
-            .iter()
-            .filter(|d| self.is_in_selection(d.timestamp, filter))
-            .collect()
+        self.filtered_by_time(&self.dispels, |d| d.timestamp, filter)
     }
 
     /// Filter resurrects to selection.
     pub fn filtered_resurrects(&self, filter: &EncounterFilter) -> Vec<&ResurrectEvent> {
-        self.resurrects
-            .iter()
-            .filter(|r| self.is_in_selection(r.timestamp, filter))
-            .collect()
+        self.filtered_by_time(&self.resurrects, |r| r.timestamp, filter)
     }
 
     /// Filter interrupts to selection.
     pub fn filtered_interrupts(&self, filter: &EncounterFilter) -> Vec<&InterruptEvent> {
-        self.interrupts
-            .iter()
-            .filter(|i| self.is_in_selection(i.timestamp, filter))
-            .collect()
+        self.filtered_by_time(&self.interrupts, |i| i.timestamp, filter)
     }
 
     /// Get the opener sequence for a player (first N abilities in first 10s).
@@ -490,10 +500,7 @@ impl LogData {
 
     /// Filter consumable uses to selection.
     pub fn filtered_consumables(&self, filter: &EncounterFilter) -> Vec<&ConsumableUse> {
-        self.consumables
-            .iter()
-            .filter(|c| self.is_in_selection(c.timestamp, filter))
-            .collect()
+        self.filtered_by_time(&self.consumables, |c| c.timestamp, filter)
     }
 
     /// Get the class of a player, or "UNKNOWN".

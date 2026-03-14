@@ -51,23 +51,8 @@ pub struct PlayerEntry {
     pub name: String,
 }
 
-/// Known raid zones for session detection.
-const RAID_ZONES: &[&str] = &[
-    "molten core",
-    "blackwing lair",
-    "naxxramas",
-    "ahn'qiraj",
-    "ruins of ahn'qiraj",
-    "temple of ahn'qiraj",
-    "onyxia's lair",
-    "zul'gurub",
-    "karazhan",
-    "emerald sanctum",
-    "the black morass",
-];
-
-/// Boss counts per raid.
-const BOSS_COUNTS: &[(&str, usize)] = &[
+/// Known raid zones with their boss counts for session detection.
+const RAID_ZONES: &[(&str, usize)] = &[
     ("molten core", 10),
     ("blackwing lair", 8),
     ("naxxramas", 15),
@@ -200,18 +185,31 @@ const KNOWN_BOSSES: &[&str] = &[
 const SESSION_GAP_SECS: f64 = 30.0 * 60.0;
 
 pub(crate) fn is_known_boss(name: &str) -> bool {
-    KNOWN_BOSSES_SET.contains(&name.to_lowercase())
+    // Boss names are ASCII — lowercase on the stack to avoid heap allocation.
+    // Max boss name is ~30 chars; use a fixed buffer.
+    if name.len() > 64 {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    let bytes = name.as_bytes();
+    buf[..bytes.len()].copy_from_slice(bytes);
+    buf[..bytes.len()].make_ascii_lowercase();
+    // SAFETY: input was valid UTF-8 and make_ascii_lowercase preserves that
+    let lowered = std::str::from_utf8(&buf[..bytes.len()]).unwrap_or("");
+    KNOWN_BOSSES_SET.contains(lowered)
+}
+
+/// Return the known boss name list (original casing) for substring scanning.
+pub(crate) fn known_boss_names() -> &'static [&'static str] {
+    KNOWN_BOSSES
 }
 
 fn is_raid_zone(zone: &str) -> bool {
-    RAID_ZONES.contains(&zone)
+    RAID_ZONES.iter().any(|(z, _)| *z == zone)
 }
 
 fn get_boss_count(zone: &str) -> Option<usize> {
-    BOSS_COUNTS
-        .iter()
-        .find(|(z, _)| *z == zone)
-        .map(|(_, c)| *c)
+    RAID_ZONES.iter().find(|(z, _)| *z == zone).map(|(_, c)| *c)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -456,15 +454,7 @@ fn parse_talent_summary(raw: &str) -> Option<String> {
 /// Format: `...UNIT_DIED:UnitName:GUID...`
 #[inline]
 pub(crate) fn extract_unit_died(line: &str) -> Option<&str> {
-    let idx = line.find("UNIT_DIED:")? + "UNIT_DIED:".len();
-    let rest = &line[idx..];
-    let colon = rest.find(':')?;
-    let name = &rest[..colon];
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    extract_unit_died_with_guid(line).map(|(name, _)| name)
 }
 
 /// Extract dead unit name and GUID from `UNIT_DIED` without regex.

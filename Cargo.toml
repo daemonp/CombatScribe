@@ -1,6 +1,6 @@
 [package]
 name = "combat-scribe"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["daemonp"]
 description = "WoW Vanilla 1.12.1 combat log parser and viewer with DPS/HPS analysis"
