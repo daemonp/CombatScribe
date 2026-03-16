@@ -46,14 +46,15 @@ pub fn class_icon(class: &str) -> image::Handle {
 // ── Item Quality Colors ─────────────────────────────────────────────────────
 
 /// Return the item quality color.
-pub fn quality_color(quality: &str) -> Color {
+pub fn quality_color(quality: crate::log_data::ItemQuality) -> Color {
+    use crate::log_data::ItemQuality;
     match quality {
-        "poor" => Color::from_rgb8(157, 157, 157),    // #9D9D9D
-        "uncommon" => Color::from_rgb8(30, 255, 0),   // #1EFF00
-        "rare" => Color::from_rgb8(0, 112, 221),      // #0070DD
-        "epic" => Color::from_rgb8(163, 53, 238),     // #A335EE
-        "legendary" => Color::from_rgb8(255, 128, 0), // #FF8000
-        _ => Color::from_rgb8(255, 255, 255),
+        ItemQuality::Poor => Color::from_rgb8(157, 157, 157), // #9D9D9D
+        ItemQuality::Common => Color::from_rgb8(255, 255, 255), // #FFFFFF
+        ItemQuality::Uncommon => Color::from_rgb8(30, 255, 0), // #1EFF00
+        ItemQuality::Rare => Color::from_rgb8(0, 112, 221),   // #0070DD
+        ItemQuality::Epic => Color::from_rgb8(163, 53, 238),  // #A335EE
+        ItemQuality::Legendary => Color::from_rgb8(255, 128, 0), // #FF8000
     }
 }
 
@@ -95,6 +96,80 @@ pub const BAR_CONSUMABLE: Color = Color {
     b: 0.0,
     a: 1.0,
 }; // #FFD700 gold
+
+// ── Timeline Colors ─────────────────────────────────────────────────────────
+
+/// Raid DPS line/area color (amber-gold).
+pub const TIMELINE_DPS: Color = Color {
+    r: 0.95,
+    g: 0.75,
+    b: 0.2,
+    a: 1.0,
+};
+
+/// Raid DTPS line/area color (red).
+pub const TIMELINE_DTPS: Color = Color {
+    r: 0.9,
+    g: 0.25,
+    b: 0.25,
+    a: 1.0,
+};
+
+/// Raid HPS line/area color (green).
+pub const TIMELINE_HPS: Color = Color {
+    r: 0.25,
+    g: 0.85,
+    b: 0.35,
+    a: 1.0,
+};
+
+/// Death marker color (bright red).
+pub const TIMELINE_DEATH: Color = Color {
+    r: 1.0,
+    g: 0.15,
+    b: 0.15,
+    a: 1.0,
+};
+
+/// Big hit marker color (orange-red).
+pub const TIMELINE_BIG_HIT: Color = Color {
+    r: 1.0,
+    g: 0.5,
+    b: 0.15,
+    a: 1.0,
+};
+
+/// Dispel marker color (teal, matching dispel bar).
+pub const TIMELINE_DISPEL: Color = Color {
+    r: 0.251,
+    g: 0.878,
+    b: 0.816,
+    a: 1.0,
+};
+
+/// Resurrect marker color.
+pub const TIMELINE_RESURRECT: Color = Color {
+    r: 0.267,
+    g: 1.0,
+    b: 0.267,
+    a: 1.0,
+};
+
+/// Interrupt marker color (matching interrupt bar).
+pub const TIMELINE_INTERRUPT: Color = Color {
+    r: 1.0,
+    g: 0.6,
+    b: 0.2,
+    a: 1.0,
+};
+
+/// Alive count line color (muted blue).
+pub const TIMELINE_ALIVE: Color = Color {
+    r: 0.4,
+    g: 0.6,
+    b: 0.9,
+    a: 1.0,
+};
 
 // ── Surface & Text Colors ───────────────────────────────────────────────────
 

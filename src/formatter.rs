@@ -360,6 +360,15 @@ const IGNORED_PET_NAMES: &[&str] = &[
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
+/// All pre-compiled replacement rule sets used by the second pass.
+struct FormatterRules {
+    pet: Vec<ReplacementRule>,
+    generic: Vec<ReplacementRule>,
+    rename: Vec<ReplacementRule>,
+    friendly_fire: Vec<ReplacementRule>,
+    self_damage: Vec<ReplacementRule>,
+}
+
 /// Process the log lines: apply all formatting/replacement rules.
 ///
 /// Takes ownership of lines to avoid an extra clone. Returns
@@ -375,11 +384,13 @@ pub fn format_log(mut lines: Vec<String>) -> (Vec<String>, Vec<String>) {
         player_you_rules.insert(name.clone(), build_you_replacements(name));
     }
 
-    let pet_rules = build_pet_replacements();
-    let generic_rules = build_generic_replacements();
-    let rename_rules = build_rename_replacements();
-    let friendly_fire_rules = build_friendly_fire_replacements();
-    let self_damage_rules = build_self_damage_replacements();
+    let rules = FormatterRules {
+        pet: build_pet_replacements(),
+        generic: build_generic_replacements(),
+        rename: build_rename_replacements(),
+        friendly_fire: build_friendly_fire_replacements(),
+        self_damage: build_self_damage_replacements(),
+    };
 
     let summoned_pet_owner_re = Regex::new(&format!(
         r"({}) \(({})\)",
@@ -395,11 +406,7 @@ pub fn format_log(mut lines: Vec<String>) -> (Vec<String>, Vec<String>) {
         &player_you_rules,
         &pet_rename_rules,
         &owner_names,
-        &pet_rules,
-        &generic_rules,
-        &rename_rules,
-        &friendly_fire_rules,
-        &self_damage_rules,
+        &rules,
     );
 
     let player_names: Vec<String> = unique_names.into_iter().collect();
@@ -483,18 +490,13 @@ fn first_pass(
 }
 
 /// Second pass: apply all replacement rules to every line.
-#[allow(clippy::too_many_arguments)]
 fn second_pass(
     lines: &mut [String],
     player_entries: &[crate::parser::PlayerEntry],
     player_you_rules: &HashMap<String, Vec<ReplacementRule>>,
     pet_rename_rules: &[ReplacementRule],
     owner_names: &HashSet<String>,
-    pet_rules: &[ReplacementRule],
-    generic_rules: &[ReplacementRule],
-    rename_rules: &[ReplacementRule],
-    friendly_fire_rules: &[ReplacementRule],
-    self_damage_rules: &[ReplacementRule],
+    rules: &FormatterRules,
 ) {
     for line in lines.iter_mut() {
         // Mob names with apostrophes — literal string replacements
@@ -525,7 +527,7 @@ fn second_pass(
             && !line.contains("is killed by")
             && !IGNORED_PET_NAMES.iter().any(|ign| line.contains(ign))
         {
-            if let Some(replaced) = handle_replacements(line, pet_rules) {
+            if let Some(replaced) = handle_replacements(line, &rules.pet) {
                 *line = replaced;
             }
         }
@@ -555,7 +557,7 @@ fn second_pass(
             || line.contains(" gains ")
             || line.contains(" is afflicted by ")
         {
-            if let Some(replaced) = handle_replacements(line, generic_rules) {
+            if let Some(replaced) = handle_replacements(line, &rules.generic) {
                 *line = replaced;
             }
         }
@@ -566,21 +568,21 @@ fn second_pass(
             || line.contains("Onyxias")
             || line.contains("Sarturas")
         {
-            if let Some(replaced) = handle_replacements(line, rename_rules) {
+            if let Some(replaced) = handle_replacements(line, &rules.rename) {
                 *line = replaced;
             }
         }
 
         // Friendly fire checks — skip if no "Power Overwhelming"
         if line.contains("Power Overwhelming") {
-            if let Some(replaced) = handle_replacements(line, friendly_fire_rules) {
+            if let Some(replaced) = handle_replacements(line, &rules.friendly_fire) {
                 *line = replaced;
             }
         }
 
         // Self damage checks — skip if no " 's " pattern
         if line.contains(" 's ") {
-            for rule in self_damage_rules {
+            for rule in &rules.self_damage {
                 if let Some(caps) = rule.regex.captures(line) {
                     // Check group 1 == group 4 (player hitting themselves)
                     if let (Some(g1), Some(g4)) = (caps.get(1), caps.get(4)) {

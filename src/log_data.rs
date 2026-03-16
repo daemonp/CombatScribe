@@ -222,7 +222,7 @@ pub struct LootEvent {
     pub item_name: String,
     #[allow(dead_code)]
     pub item_id: u64,
-    pub quality: String,
+    pub quality: ItemQuality,
     pub quantity: u64,
     pub boss: String,
     pub traded_to: Option<String>,
@@ -266,15 +266,45 @@ pub struct InterruptEvent {
     pub spell: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerEventType {
     Damage,
     Healing,
 }
 
+/// Item quality tier from `WoW` color codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ItemQuality {
+    Poor,
+    Common,
+    Uncommon,
+    Rare,
+    Epic,
+    Legendary,
+}
+
+impl ItemQuality {
+    /// Parse from the 6-char hex color code in `LOOT:` lines.
+    pub fn from_color_code(code: &str) -> Self {
+        match code {
+            "9d9d9d" => Self::Poor,
+            "1eff00" => Self::Uncommon,
+            "0070dd" => Self::Rare,
+            "a335ee" => Self::Epic,
+            "ff8000" => Self::Legendary,
+            _ => Self::Common,
+        }
+    }
+
+    /// Whether this quality is notable (green or above).
+    pub fn is_notable(self) -> bool {
+        self >= Self::Uncommon
+    }
+}
+
 // ── Encounter Filter ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncounterFilter {
     All,
     AllKills,
@@ -291,6 +321,191 @@ pub struct OpenerSpell {
     pub delay: f64,
     pub amount: u64,
     pub is_crit: bool,
+}
+
+// ── Timeline Data ───────────────────────────────────────────────────────────
+
+/// One second of aggregated raid activity for the timeline chart.
+#[derive(Debug, Clone, Default)]
+pub struct TimelineBucket {
+    /// Offset in seconds from encounter start.
+    pub offset: f64,
+    /// Total raid damage done this second.
+    pub damage: u64,
+    /// Total raid damage taken this second.
+    pub damage_taken: u64,
+    /// Total raid healing done this second.
+    pub healing: u64,
+    /// Number of raid members alive at end of this second.
+    pub alive_count: u32,
+}
+
+/// A discrete event placed on the timeline (death, dispel, big hit, etc.).
+#[derive(Debug, Clone)]
+pub struct TimelineEvent {
+    /// Offset in seconds from encounter start.
+    pub offset: f64,
+    pub kind: TimelineEventKind,
+    #[allow(dead_code)] // Stored for tooltip display in future hover-over-marker feature
+    pub label: String,
+}
+
+/// Kind of discrete timeline event, used for color-coding and icon selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineEventKind {
+    Death,
+    BigHit,
+    Dispel,
+    Resurrect,
+    Interrupt,
+}
+
+/// Precomputed timeline data for the currently selected encounter(s).
+#[derive(Debug, Clone, Default)]
+pub struct TimelineData {
+    pub buckets: Vec<TimelineBucket>,
+    pub events: Vec<TimelineEvent>,
+    /// Peak DPS across all buckets (for Y-axis scaling).
+    pub max_dps: u64,
+    /// Peak DTPS across all buckets.
+    pub max_dtps: u64,
+    /// Peak HPS across all buckets.
+    pub max_hps: u64,
+    /// Total encounter duration in seconds.
+    pub duration: f64,
+    /// Total raid member count at start.
+    pub raid_count: u32,
+}
+
+/// Which timeline data series a toggle controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineSeriesKind {
+    Dps,
+    Dtps,
+    Hps,
+    Death,
+    BigHit,
+    Alive,
+}
+
+/// Visibility toggles for each timeline data series.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // One bool per toggleable series — clearest representation
+pub struct TimelineVisibility {
+    pub show_dps: bool,
+    pub show_dtps: bool,
+    pub show_hps: bool,
+    pub show_deaths: bool,
+    pub show_big_hits: bool,
+    pub show_alive: bool,
+}
+
+impl Default for TimelineVisibility {
+    fn default() -> Self {
+        Self {
+            show_dps: true,
+            show_dtps: true,
+            show_hps: true,
+            show_deaths: true,
+            show_big_hits: true,
+            show_alive: true,
+        }
+    }
+}
+
+impl TimelineVisibility {
+    /// Toggle the given series on or off.
+    pub fn toggle(&mut self, kind: TimelineSeriesKind) {
+        match kind {
+            TimelineSeriesKind::Dps => self.show_dps = !self.show_dps,
+            TimelineSeriesKind::Dtps => self.show_dtps = !self.show_dtps,
+            TimelineSeriesKind::Hps => self.show_hps = !self.show_hps,
+            TimelineSeriesKind::Death => self.show_deaths = !self.show_deaths,
+            TimelineSeriesKind::BigHit => self.show_big_hits = !self.show_big_hits,
+            TimelineSeriesKind::Alive => self.show_alive = !self.show_alive,
+        }
+    }
+
+    /// Check if a given event kind should be visible.
+    #[allow(dead_code)] // Public API — useful for future filtering of chart event markers
+    pub fn is_event_visible(&self, kind: TimelineEventKind) -> bool {
+        match kind {
+            TimelineEventKind::BigHit => self.show_big_hits,
+            TimelineEventKind::Dispel | TimelineEventKind::Interrupt => true,
+            // Deaths and resurrects are grouped under the same toggle
+            TimelineEventKind::Death | TimelineEventKind::Resurrect => self.show_deaths,
+        }
+    }
+}
+
+// ── Event Log Facets ────────────────────────────────────────────────────────
+
+/// Which preset view mode the event log is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EventLogMode {
+    /// Show all events matching the type toggles.
+    #[default]
+    AllEvents,
+    /// Show only key events: deaths, big hits, dispels, interrupts, resurrects.
+    KeyEvents,
+    /// Show events involving each dead player in the seconds before their death.
+    DeathLog,
+}
+
+impl std::fmt::Display for EventLogMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AllEvents => write!(f, "All Events"),
+            Self::KeyEvents => write!(f, "Key Events"),
+            Self::DeathLog => write!(f, "Death Log"),
+        }
+    }
+}
+
+/// Which event types are visible in the event log.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // One bool per event type — clearest representation
+pub struct EventLogTypeFilter {
+    pub show_damage: bool,
+    pub show_healing: bool,
+    pub show_deaths: bool,
+    pub show_dispels: bool,
+    pub show_interrupts: bool,
+}
+
+impl Default for EventLogTypeFilter {
+    fn default() -> Self {
+        Self {
+            show_damage: true,
+            show_healing: true,
+            show_deaths: true,
+            show_dispels: true,
+            show_interrupts: true,
+        }
+    }
+}
+
+impl EventLogTypeFilter {
+    /// Check if a `LogEntry` passes the type filter.
+    pub fn accepts(&self, entry: &LogEntry) -> bool {
+        match entry {
+            LogEntry::Damage { .. } => self.show_damage,
+            LogEntry::Healing { .. } => self.show_healing,
+            LogEntry::Death { .. } | LogEntry::Resurrect { .. } => self.show_deaths,
+            LogEntry::Dispel { .. } => self.show_dispels,
+            LogEntry::Interrupt { .. } => self.show_interrupts,
+        }
+    }
+}
+
+/// Which event type toggle to flip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventLogTypeKind {
+    Damage,
+    Healing,
+    Deaths,
+    Dispels,
+    Interrupts,
 }
 
 // ── Filtering Methods ───────────────────────────────────────────────────────
@@ -437,7 +652,7 @@ impl LogData {
     pub fn opener_sequence(
         &self,
         player: &str,
-        event_type: &PlayerEventType,
+        event_type: PlayerEventType,
         filter: &EncounterFilter,
     ) -> Vec<OpenerSpell> {
         let limit = 8;
@@ -457,7 +672,7 @@ impl LogData {
                     is_crit,
                     timestamp,
                     ..
-                } if *event_type == PlayerEventType::Damage && source == player => {
+                } if event_type == PlayerEventType::Damage && source == player => {
                     matching.push((spell, *timestamp, *amount, *is_crit));
                 }
                 LogEntry::Healing {
@@ -467,7 +682,7 @@ impl LogData {
                     is_crit,
                     timestamp,
                     ..
-                } if *event_type == PlayerEventType::Healing && source == player => {
+                } if event_type == PlayerEventType::Healing && source == player => {
                     matching.push((spell, *timestamp, *amount, *is_crit));
                 }
                 _ => {}
@@ -508,5 +723,182 @@ impl LogData {
         self.combatants
             .get(name)
             .map_or("UNKNOWN", |c| c.class.as_str())
+    }
+
+    /// Build timeline data for the selected encounter filter.
+    ///
+    /// Buckets all events into 1-second intervals relative to the encounter start,
+    /// and collects discrete events (deaths, big hits, dispels) for overlay markers.
+    /// The `big_hit_threshold` marks any single damage-taken event above this value.
+    #[allow(clippy::too_many_lines)] // Timeline builder — single cohesive pass over events
+    #[allow(clippy::cast_possible_truncation)] // Timestamps/durations never approach usize limits
+    #[allow(clippy::cast_sign_loss)] // Duration and offsets are always non-negative
+    #[allow(clippy::cast_precision_loss)] // Bucket indices never approach 2^52
+    #[allow(clippy::similar_names)] // dps/dtps/hps are standard WoW combat log metrics
+    pub fn build_timeline(&self, filter: &EncounterFilter, big_hit_threshold: u64) -> TimelineData {
+        let encounters = self.selected_encounters(filter);
+        if encounters.is_empty() {
+            return TimelineData::default();
+        }
+
+        // For Single encounters, use the encounter's own start/end.
+        // For multi-encounter filters, concatenate them sequentially.
+        let total_duration: f64 = encounters.iter().map(|e| e.duration).sum();
+        if total_duration <= 0.0 {
+            return TimelineData::default();
+        }
+
+        let bucket_count = total_duration.ceil() as usize + 1;
+        let mut buckets: Vec<TimelineBucket> = (0..bucket_count)
+            .map(|i| TimelineBucket {
+                offset: i as f64,
+                ..TimelineBucket::default()
+            })
+            .collect();
+        let mut events: Vec<TimelineEvent> = Vec::new();
+
+        // Track alive count: start with all combatants, decrement on death,
+        // increment on resurrect.
+        let raid_count = self.combatants.len() as u32;
+        let mut alive: u32;
+
+        // Offset accumulator for multi-encounter concatenation
+        let mut offset_base: f64 = 0.0;
+
+        for enc in &encounters {
+            let enc_start = enc.start;
+            let enc_duration = enc.duration;
+
+            // Reset alive count for each encounter segment
+            alive = raid_count;
+            // Anchor the first bucket of this segment to the fresh alive count
+            let first_bucket = offset_base.floor() as usize;
+            if first_bucket < buckets.len() {
+                buckets[first_bucket].alive_count = alive;
+            }
+
+            for entry in &self.entries {
+                let ts = entry.timestamp();
+                if ts < enc_start || ts > enc.end {
+                    continue;
+                }
+
+                let relative = ts - enc_start + offset_base;
+                let bucket_idx = relative.floor() as usize;
+                if bucket_idx >= buckets.len() {
+                    continue;
+                }
+
+                match entry {
+                    LogEntry::Damage {
+                        target,
+                        amount,
+                        spell,
+                        source,
+                        ..
+                    } => {
+                        // Damage done (from raid members)
+                        if self.combatants.contains_key(source.as_str()) {
+                            buckets[bucket_idx].damage += amount;
+                        }
+                        // Damage taken (by raid members)
+                        if self.combatants.contains_key(target.as_str()) {
+                            buckets[bucket_idx].damage_taken += amount;
+                            // Big hit marker
+                            if *amount >= big_hit_threshold {
+                                events.push(TimelineEvent {
+                                    offset: relative,
+                                    kind: TimelineEventKind::BigHit,
+                                    label: format!(
+                                        "{target} takes {amount} from {source}'s {spell}"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    LogEntry::Healing { source, amount, .. } => {
+                        if self.combatants.contains_key(source.as_str()) {
+                            buckets[bucket_idx].healing += amount;
+                        }
+                    }
+                    LogEntry::Death { player, .. } => {
+                        if self.combatants.contains_key(player.as_str()) {
+                            alive = alive.saturating_sub(1);
+                            events.push(TimelineEvent {
+                                offset: relative,
+                                kind: TimelineEventKind::Death,
+                                label: format!("{player} died"),
+                            });
+                        }
+                    }
+                    LogEntry::Dispel {
+                        caster,
+                        target,
+                        spell,
+                        ..
+                    } => {
+                        events.push(TimelineEvent {
+                            offset: relative,
+                            kind: TimelineEventKind::Dispel,
+                            label: format!("{caster} dispels {spell} on {target}"),
+                        });
+                    }
+                    LogEntry::Resurrect { caster, target, .. } => {
+                        if self.combatants.contains_key(target.as_str()) {
+                            alive = alive.saturating_add(1).min(raid_count);
+                            events.push(TimelineEvent {
+                                offset: relative,
+                                kind: TimelineEventKind::Resurrect,
+                                label: format!("{caster} resurrects {target}"),
+                            });
+                        }
+                    }
+                    LogEntry::Interrupt {
+                        caster,
+                        target,
+                        spell,
+                        ..
+                    } => {
+                        events.push(TimelineEvent {
+                            offset: relative,
+                            kind: TimelineEventKind::Interrupt,
+                            label: format!("{caster} interrupts {target} with {spell}"),
+                        });
+                    }
+                }
+
+                buckets[bucket_idx].alive_count = alive;
+            }
+
+            offset_base += enc_duration;
+        }
+
+        // Forward-fill alive counts for empty buckets
+        let mut last_alive = raid_count;
+        for bucket in &mut buckets {
+            if bucket.alive_count == 0
+                && bucket.damage == 0
+                && bucket.healing == 0
+                && bucket.damage_taken == 0
+            {
+                bucket.alive_count = last_alive;
+            } else {
+                last_alive = bucket.alive_count;
+            }
+        }
+
+        let max_dps = buckets.iter().map(|b| b.damage).max().unwrap_or(0);
+        let max_dtps = buckets.iter().map(|b| b.damage_taken).max().unwrap_or(0);
+        let max_hps = buckets.iter().map(|b| b.healing).max().unwrap_or(0);
+
+        TimelineData {
+            buckets,
+            events,
+            max_dps,
+            max_dtps,
+            max_hps,
+            duration: total_duration,
+            raid_count,
+        }
     }
 }

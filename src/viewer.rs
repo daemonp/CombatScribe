@@ -17,20 +17,29 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use iced::widget::{
-    button, column, container, horizontal_rule, horizontal_space, image, pick_list, row,
+    button, canvas, column, container, horizontal_rule, horizontal_space, image, pick_list, row,
     scrollable, stack, text, text_input, Column, Row,
 };
-use iced::{Center, Color, Element, Fill, Length};
+use iced::{mouse, Center, Color, Element, Fill, Length, Point, Rectangle, Renderer, Theme};
+
+use std::sync::LazyLock;
 
 use crate::log_data::{
-    AbilityStats, AvoidanceStats, BuffStats, Encounter, EncounterFilter, LogData, LogEntry,
-    LootEvent, PlayerEventType, ResurrectEvent,
+    AbilityStats, AvoidanceStats, BuffStats, Encounter, EncounterFilter, EventLogMode,
+    EventLogTypeFilter, EventLogTypeKind, LogData, LogEntry, LootEvent, PlayerEventType,
+    ResurrectEvent, TimelineData, TimelineEventKind, TimelineSeriesKind, TimelineVisibility,
 };
 use crate::theme;
 
+/// Scrollable ID for the timeline event log panel.
+static TIMELINE_LOG_ID: LazyLock<scrollable::Id> =
+    LazyLock::new(|| scrollable::Id::new("timeline_events"));
+
 // ── State ───────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+// ViewerState cannot derive Clone because canvas::Cache is not Clone.
+// This is acceptable since ViewerState is only held in a Box by the app.
+#[derive(Debug)]
 pub struct ViewerState {
     pub log_data: LogData,
     pub current_tab: ViewerTab,
@@ -53,6 +62,25 @@ pub struct ViewerState {
     pub event_player_filter: String,
     pub event_player_names: Vec<String>,
 
+    // Timeline tab
+    pub timeline_data: TimelineData,
+    pub timeline_visibility: TimelineVisibility,
+    /// Whether all three chart series share the same Y-axis scale.
+    pub timeline_shared_y: bool,
+    /// Hovered bucket index (set by mouse position on the canvas).
+    pub timeline_hover: Option<usize>,
+    /// Clicked second offset — highlights events at this time in the log.
+    pub timeline_clicked_second: Option<usize>,
+    /// Event log facet mode (All Events, Key Events, Death Log).
+    pub event_log_mode: EventLogMode,
+    /// Event type toggles for the log panel.
+    pub event_log_types: EventLogTypeFilter,
+    /// Player filter for the event log (empty string = all players).
+    pub event_log_player: String,
+    /// Canvas geometry caches — cleared when data or visibility changes.
+    pub timeline_cache: canvas::Cache,
+    pub alive_cache: canvas::Cache,
+
     // Detail overlay
     pub detail: Option<DetailView>,
 }
@@ -61,6 +89,7 @@ pub struct ViewerState {
 pub enum ViewerTab {
     Meters,
     Utility,
+    Timeline,
     Loot,
     Events,
 }
@@ -154,6 +183,14 @@ pub enum ViewerMessage {
     ExpandAllLoot,
     CollapseAllLoot,
     SetEventPlayerFilter(String),
+    ToggleTimelineSeries(TimelineSeriesKind),
+    ToggleTimelineYAxis,
+    TimelineHover(Option<usize>),
+    /// Click on the chart canvas jumps the event log to that second.
+    TimelineClick(usize),
+    SetEventLogMode(EventLogMode),
+    ToggleEventLogType(EventLogTypeKind),
+    SetEventLogPlayer(String),
     BackToMain,
     Quit,
 }
@@ -170,6 +207,8 @@ impl ViewerState {
         player_names.sort_by_key(|a| a.to_lowercase());
         event_player_names.extend(player_names);
 
+        let timeline_data = log_data.build_timeline(&EncounterFilter::All, BIG_HIT_THRESHOLD);
+
         Self {
             log_data,
             current_tab: ViewerTab::Meters,
@@ -184,12 +223,22 @@ impl ViewerState {
             detail: None,
             event_player_filter: "All Players".to_string(),
             event_player_names,
+            timeline_data,
+            timeline_visibility: TimelineVisibility::default(),
+            timeline_shared_y: true,
+            timeline_hover: None,
+            timeline_clicked_second: None,
+            event_log_mode: EventLogMode::default(),
+            event_log_types: EventLogTypeFilter::default(),
+            event_log_player: String::new(),
+            timeline_cache: canvas::Cache::default(),
+            alive_cache: canvas::Cache::default(),
         }
     }
 
     // ── Update ──────────────────────────────────────────────────────────
 
-    pub fn update(&mut self, message: ViewerMessage) {
+    pub fn update(&mut self, message: ViewerMessage) -> iced::Task<ViewerMessage> {
         match message {
             ViewerMessage::SwitchTab(tab) => {
                 self.current_tab = tab;
@@ -198,11 +247,19 @@ impl ViewerState {
             ViewerMessage::SelectEncounter(name) => {
                 // Ignore separator lines — keep current selection
                 if name == ENCOUNTER_SEPARATOR {
-                    return;
+                    return iced::Task::none();
                 }
                 self.encounter_filter = parse_encounter_filter(&name, &self.log_data);
                 self.selected_encounter_name = Some(name);
                 self.detail = None;
+                // Rebuild timeline for new encounter selection
+                self.timeline_data = self
+                    .log_data
+                    .build_timeline(&self.encounter_filter, BIG_HIT_THRESHOLD);
+                self.timeline_hover = None;
+                self.timeline_clicked_second = None;
+                self.timeline_cache.clear();
+                self.alive_cache.clear();
             }
             ViewerMessage::SetDamageType(dt) => self.damage_type = dt,
             ViewerMessage::SetDispelType(dt) => self.dispel_type = dt,
@@ -229,8 +286,50 @@ impl ViewerState {
                 }
             }
             ViewerMessage::SetEventPlayerFilter(name) => self.event_player_filter = name,
+            ViewerMessage::ToggleTimelineSeries(kind) => {
+                self.timeline_visibility.toggle(kind);
+                self.timeline_cache.clear();
+                self.alive_cache.clear();
+            }
+            ViewerMessage::ToggleTimelineYAxis => {
+                self.timeline_shared_y = !self.timeline_shared_y;
+                self.timeline_cache.clear();
+            }
+            ViewerMessage::TimelineHover(idx) => {
+                self.timeline_hover = idx;
+                // Don't clear cache — hover is drawn as an overlay
+            }
+            ViewerMessage::SetEventLogMode(mode) => self.event_log_mode = mode,
+            ViewerMessage::ToggleEventLogType(kind) => {
+                let t = &mut self.event_log_types;
+                match kind {
+                    EventLogTypeKind::Damage => t.show_damage = !t.show_damage,
+                    EventLogTypeKind::Healing => t.show_healing = !t.show_healing,
+                    EventLogTypeKind::Deaths => t.show_deaths = !t.show_deaths,
+                    EventLogTypeKind::Dispels => t.show_dispels = !t.show_dispels,
+                    EventLogTypeKind::Interrupts => t.show_interrupts = !t.show_interrupts,
+                }
+            }
+            ViewerMessage::SetEventLogPlayer(name) => self.event_log_player = name,
+            ViewerMessage::TimelineClick(second) => {
+                self.timeline_clicked_second = Some(second);
+                // Snap the event log scrollable to the proportional position
+                // corresponding to the clicked second within the encounter.
+                let duration = self.timeline_data.duration;
+                if duration > 0.0 {
+                    let proportion = second as f32 / duration as f32;
+                    return scrollable::snap_to(
+                        TIMELINE_LOG_ID.clone(),
+                        scrollable::RelativeOffset {
+                            x: 0.0,
+                            y: proportion.clamp(0.0, 1.0),
+                        },
+                    );
+                }
+            }
             ViewerMessage::BackToMain | ViewerMessage::Quit => {} // handled by main.rs
         }
+        iced::Task::none()
     }
 
     // ── View ────────────────────────────────────────────────────────────
@@ -246,6 +345,7 @@ impl ViewerState {
             match self.current_tab {
                 ViewerTab::Meters => self.view_meters_tab(),
                 ViewerTab::Utility => self.view_utility_tab(),
+                ViewerTab::Timeline => self.view_timeline_tab(),
                 ViewerTab::Loot => self.view_loot_tab(),
                 ViewerTab::Events => self.view_events_tab(),
             }
@@ -361,6 +461,7 @@ impl ViewerState {
         let tabs = [
             ("Damage/Healing", ViewerTab::Meters),
             ("Utility", ViewerTab::Utility),
+            ("Timeline", ViewerTab::Timeline),
             ("Loot", ViewerTab::Loot),
             ("Events", ViewerTab::Events),
         ];
@@ -693,9 +794,13 @@ impl ViewerState {
             &self.log_data.combatants,
             |n| self.log_data.player_class(n),
         );
-        let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
-        let col = build_simple_meters(&players, theme::BAR_DEATH, "No deaths recorded", None);
-        (col.into(), format!("{total} deaths"))
+        view_event_meters_owned(
+            &players,
+            theme::BAR_DEATH,
+            "No deaths recorded",
+            None,
+            "deaths",
+        )
     }
 
     fn view_resurrects_content(&self) -> (Element<'_, ViewerMessage>, String) {
@@ -706,14 +811,13 @@ impl ViewerState {
             &self.log_data.combatants,
             |n| self.log_data.player_class(n),
         );
-        let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
-        let col = build_simple_meters(
+        view_event_meters_owned(
             &players,
             theme::BAR_RESURRECT,
             "No resurrections recorded",
             Some(DetailType::Resurrects),
-        );
-        (col.into(), format!("{total} resurrects"))
+            "resurrects",
+        )
     }
 
     fn view_absorbs_content(&self) -> (Element<'_, ViewerMessage>, String) {
@@ -835,14 +939,13 @@ impl ViewerState {
             &self.log_data.combatants,
             |n| self.log_data.player_class(n),
         );
-        let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
-        let col = build_simple_meters(
+        view_event_meters_owned(
             &players,
             theme::BAR_CONSUMABLE,
             "No consumable usage recorded",
             Some(DetailType::Consumables),
-        );
-        (col.into(), format!("{total} uses"))
+            "uses",
+        )
     }
 
     // ── Loot Tab ────────────────────────────────────────────────────────
@@ -877,7 +980,7 @@ impl ViewerState {
         let filtered_loot: Vec<&LootEvent> = if self.loot_search.is_empty() {
             loot.iter()
                 .copied()
-                .filter(|l| l.quality != "poor" && l.quality != "common")
+                .filter(|l| l.quality.is_notable())
                 .collect()
         } else {
             let term = self.loot_search.to_lowercase();
@@ -924,8 +1027,8 @@ impl ViewerState {
 
                 // Sort by quality
                 items.sort_by(|a, b| {
-                    quality_sort_order(&a.quality)
-                        .cmp(&quality_sort_order(&b.quality))
+                    b.quality
+                        .cmp(&a.quality)
                         .then_with(|| a.item_name.cmp(&b.item_name))
                 });
 
@@ -949,7 +1052,7 @@ impl ViewerState {
 
                 if !is_collapsed {
                     for item in &items {
-                        let item_color = theme::quality_color(&item.quality);
+                        let item_color = theme::quality_color(item.quality);
                         let player_color =
                             theme::class_color(self.log_data.player_class(&item.player));
 
@@ -1027,6 +1130,384 @@ impl ViewerState {
                 Vec::new()
             }
         }
+    }
+
+    // ── Timeline Tab ────────────────────────────────────────────────────
+
+    #[allow(clippy::too_many_lines)] // iced UI layout — timeline chart with multiple data lanes
+    fn view_timeline_tab(&self) -> Element<'_, ViewerMessage> {
+        let td = &self.timeline_data;
+        let vis = &self.timeline_visibility;
+
+        if td.buckets.is_empty() {
+            return container(
+                text("Select a boss encounter to view its timeline")
+                    .size(14)
+                    .color(theme::TEXT_MUTED),
+            )
+            .padding(40)
+            .center_x(Fill)
+            .into();
+        }
+
+        let header = row![
+            text("Encounter Timeline").size(16).color(Color::WHITE),
+            horizontal_space(),
+            text(format!(
+                "Duration: {} | Raid: {} players",
+                theme::format_duration(td.duration),
+                td.raid_count,
+            ))
+            .size(12)
+            .color(theme::TEXT_SECONDARY),
+        ]
+        .spacing(8)
+        .align_y(Center)
+        .width(Fill);
+
+        // ── Legend toggles ──────────────────────────────────────────────
+        let y_axis_label = if self.timeline_shared_y {
+            "Y: Shared"
+        } else {
+            "Y: Independent"
+        };
+
+        let legend = row![
+            legend_toggle(
+                theme::TIMELINE_DPS,
+                "Raid DPS",
+                vis.show_dps,
+                TimelineSeriesKind::Dps,
+            ),
+            legend_toggle(
+                theme::TIMELINE_DTPS,
+                "Raid DTPS",
+                vis.show_dtps,
+                TimelineSeriesKind::Dtps,
+            ),
+            legend_toggle(
+                theme::TIMELINE_HPS,
+                "Raid HPS",
+                vis.show_hps,
+                TimelineSeriesKind::Hps,
+            ),
+            legend_toggle(
+                theme::TIMELINE_DEATH,
+                "Death",
+                vis.show_deaths,
+                TimelineSeriesKind::Death,
+            ),
+            legend_toggle(
+                theme::TIMELINE_BIG_HIT,
+                "Big Hit",
+                vis.show_big_hits,
+                TimelineSeriesKind::BigHit,
+            ),
+            legend_toggle(
+                theme::TIMELINE_ALIVE,
+                "Alive",
+                vis.show_alive,
+                TimelineSeriesKind::Alive,
+            ),
+            horizontal_space(),
+            button(text(y_axis_label).size(10).color(theme::TEXT_SECONDARY))
+                .on_press(ViewerMessage::ToggleTimelineYAxis)
+                .padding([3, 8])
+                .style(transparent_button_style),
+        ]
+        .spacing(8)
+        .align_y(Center);
+
+        // ── Canvas sparkline chart ─────────────────────────────────────
+        let chart_canvas = canvas::Canvas::new(TimelineChart {
+            data: td,
+            visibility: vis,
+            shared_y: self.timeline_shared_y,
+            hover_idx: self.timeline_hover,
+        })
+        .width(Fill)
+        .height(220);
+
+        // ── Alive count sparkline ──────────────────────────────────────
+        let alive_section: Element<ViewerMessage> = if vis.show_alive {
+            let alive_label = row![
+                text("Alive").size(11).color(theme::TIMELINE_ALIVE),
+                horizontal_space(),
+                text(format!("{} max", td.raid_count))
+                    .size(10)
+                    .color(theme::TEXT_MUTED),
+            ]
+            .width(Fill);
+
+            let alive_canvas = canvas::Canvas::new(AliveChart { data: td })
+                .width(Fill)
+                .height(40);
+
+            column![alive_label, alive_canvas]
+                .spacing(4)
+                .width(Fill)
+                .into()
+        } else {
+            column![].into()
+        };
+
+        // ── Hover tooltip ──────────────────────────────────────────────
+        let tooltip: Element<ViewerMessage> = if let Some(idx) = self.timeline_hover {
+            if let Some(bucket) = td.buckets.get(idx) {
+                let time_str = format_encounter_time(bucket.offset);
+                let mut parts = vec![time_str];
+                if vis.show_dps {
+                    parts.push(format!("DPS: {}", theme::format_number(bucket.damage)));
+                }
+                if vis.show_dtps {
+                    parts.push(format!(
+                        "DTPS: {}",
+                        theme::format_number(bucket.damage_taken)
+                    ));
+                }
+                if vis.show_hps {
+                    parts.push(format!("HPS: {}", theme::format_number(bucket.healing)));
+                }
+                if vis.show_alive {
+                    parts.push(format!("Alive: {}", bucket.alive_count));
+                }
+                container(text(parts.join("  |  ")).size(12).color(Color::WHITE))
+                    .padding([4, 8])
+                    .style(|_theme: &iced::Theme| container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgba8(
+                            30, 30, 40, 0.9,
+                        ))),
+                        border: iced::Border {
+                            color: theme::SURFACE_BORDER,
+                            width: 1.0,
+                            radius: 4.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+            } else {
+                column![].into()
+            }
+        } else {
+            column![].into()
+        };
+
+        // ── Fixed top section: charts ──────────────────────────────────
+        let charts_panel = container(
+            column![
+                header,
+                legend,
+                horizontal_rule(1),
+                chart_canvas,
+                tooltip,
+                horizontal_rule(1),
+                alive_section,
+            ]
+            .spacing(6)
+            .width(Fill),
+        )
+        .padding(12)
+        .width(Fill)
+        .style(panel_style);
+
+        // ── Event log filter bar ────────────────────────────────────────
+        let mode_buttons: Element<ViewerMessage> = {
+            let modes = [
+                EventLogMode::AllEvents,
+                EventLogMode::KeyEvents,
+                EventLogMode::DeathLog,
+            ];
+            let mut r = Row::new().spacing(4).align_y(Center);
+            for mode in modes {
+                let active = self.event_log_mode == mode;
+                let label_text = mode.to_string();
+                r = r.push(
+                    button(text(label_text).size(10).color(if active {
+                        Color::WHITE
+                    } else {
+                        theme::TEXT_MUTED
+                    }))
+                    .on_press(ViewerMessage::SetEventLogMode(mode))
+                    .padding([3, 8])
+                    .style(move |_theme: &iced::Theme, status| {
+                        let bg = if active {
+                            Some(iced::Background::Color(Color::from_rgba8(
+                                80, 140, 220, 0.4,
+                            )))
+                        } else {
+                            match status {
+                                button::Status::Hovered => Some(iced::Background::Color(
+                                    Color::from_rgba8(255, 255, 255, 0.06),
+                                )),
+                                _ => None,
+                            }
+                        };
+                        button::Style {
+                            background: bg,
+                            text_color: if active {
+                                Color::WHITE
+                            } else {
+                                theme::TEXT_MUTED
+                            },
+                            border: iced::Border {
+                                radius: 4.0.into(),
+                                color: if active {
+                                    Color::from_rgba8(80, 140, 220, 0.6)
+                                } else {
+                                    Color::TRANSPARENT
+                                },
+                                width: if active { 1.0 } else { 0.0 },
+                            },
+                            shadow: iced::Shadow::default(),
+                        }
+                    }),
+                );
+            }
+            r.into()
+        };
+
+        let type_toggles: Element<ViewerMessage> = {
+            let types = [
+                (
+                    "Dmg",
+                    self.event_log_types.show_damage,
+                    EventLogTypeKind::Damage,
+                    Color::from_rgb8(200, 200, 200),
+                ),
+                (
+                    "Heal",
+                    self.event_log_types.show_healing,
+                    EventLogTypeKind::Healing,
+                    theme::TIMELINE_HPS,
+                ),
+                (
+                    "Death",
+                    self.event_log_types.show_deaths,
+                    EventLogTypeKind::Deaths,
+                    theme::TIMELINE_DEATH,
+                ),
+                (
+                    "Dispel",
+                    self.event_log_types.show_dispels,
+                    EventLogTypeKind::Dispels,
+                    theme::TIMELINE_DISPEL,
+                ),
+                (
+                    "Intr",
+                    self.event_log_types.show_interrupts,
+                    EventLogTypeKind::Interrupts,
+                    theme::TIMELINE_INTERRUPT,
+                ),
+            ];
+            let mut r = Row::new().spacing(4).align_y(Center);
+            for (label, active, kind, color) in types {
+                let text_color = if active { color } else { theme::TEXT_MUTED };
+                r = r.push(
+                    button(text(label).size(10).color(text_color))
+                        .on_press(ViewerMessage::ToggleEventLogType(kind))
+                        .padding([2, 6])
+                        .style(move |_theme: &iced::Theme, status| {
+                            let bg = match status {
+                                button::Status::Hovered => Some(iced::Background::Color(
+                                    Color::from_rgba8(255, 255, 255, 0.06),
+                                )),
+                                _ => {
+                                    if active {
+                                        Some(iced::Background::Color(Color { a: 0.08, ..color }))
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
+                            button::Style {
+                                background: bg,
+                                text_color,
+                                border: iced::Border {
+                                    radius: 3.0.into(),
+                                    ..Default::default()
+                                },
+                                shadow: iced::Shadow::default(),
+                            }
+                        }),
+                );
+            }
+            r.into()
+        };
+
+        // Player filter — build list of players from combatants
+        let mut player_names: Vec<String> = vec!["All Players".to_string()];
+        player_names.extend(
+            self.log_data
+                .combatants
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+        );
+        let selected_player = if self.event_log_player.is_empty() {
+            "All Players".to_string()
+        } else {
+            self.event_log_player.clone()
+        };
+
+        let player_picker = pick_list(player_names, Some(selected_player), |name| {
+            if name == "All Players" {
+                ViewerMessage::SetEventLogPlayer(String::new())
+            } else {
+                ViewerMessage::SetEventLogPlayer(name)
+            }
+        })
+        .text_size(11)
+        .padding(3);
+
+        let filter_bar = container(
+            row![
+                mode_buttons,
+                type_toggles,
+                horizontal_space(),
+                player_picker
+            ]
+            .spacing(12)
+            .align_y(Center)
+            .width(Fill),
+        )
+        .padding([6, 12])
+        .width(Fill)
+        .style(|_theme: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba8(20, 22, 28, 0.8))),
+            border: iced::Border {
+                color: theme::SURFACE_BORDER,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        });
+
+        // ── Scrollable bottom section: event log ───────────────────────
+        let player_filter = if self.event_log_player.is_empty() {
+            None
+        } else {
+            Some(self.event_log_player.as_str())
+        };
+
+        let event_log = build_timeline_event_log(
+            &self.log_data,
+            &self.encounter_filter,
+            &self.event_log_types,
+            self.event_log_mode,
+            player_filter,
+            self.timeline_clicked_second,
+        );
+
+        let event_scrollable = scrollable(container(event_log).padding([4, 12]).width(Fill))
+            .id(TIMELINE_LOG_ID.clone())
+            .height(Fill);
+
+        // Stack: fixed charts on top, filter bar, scrollable log fills remaining space
+        column![charts_panel, filter_bar, event_scrollable]
+            .spacing(4)
+            .width(Fill)
+            .height(Fill)
+            .into()
     }
 
     // ── Events Tab ──────────────────────────────────────────────────────
@@ -1257,7 +1738,7 @@ impl ViewerState {
         };
         let opener = self
             .log_data
-            .opener_sequence(player, &event_type, &self.encounter_filter);
+            .opener_sequence(player, event_type, &self.encounter_filter);
 
         let mut opener_section = Column::new();
         if !opener.is_empty() {
@@ -1716,6 +2197,40 @@ fn view_spell_target_detail<'a>(
         .into()
 }
 
+/// Shared helper: build meter bars from pre-aggregated players and return total label.
+///
+/// Converts borrowed `&str` slices to owned data so the result doesn't borrow
+/// the caller's local filtered-events vector.
+fn view_event_meters_owned<'a>(
+    players: &[(&str, &str, u64)],
+    bar_color: Color,
+    empty_msg: &'a str,
+    detail_type: Option<DetailType>,
+    unit: &str,
+) -> (Element<'a, ViewerMessage>, String) {
+    let total: u64 = players.iter().map(|(_, _, v)| *v).sum();
+    let max_val = players.first().map_or(1, |(_, _, v)| *v);
+    let mut col = Column::new().spacing(2);
+    for (rank, (name, class, value)) in players.iter().enumerate() {
+        let percent = percent_of(*value, max_val);
+        let on_click = detail_type.map(|dt| ((*name).to_string(), dt));
+        col = col.push(build_meter_row(
+            rank + 1,
+            name,
+            class,
+            &theme::format_number(*value),
+            "",
+            percent,
+            bar_color,
+            on_click,
+        ));
+    }
+    if players.is_empty() {
+        col = col.push(empty_state(empty_msg));
+    }
+    (col.into(), format!("{total} {unit}"))
+}
+
 /// Per-second rate, guarding against zero duration.
 fn per_second(value: u64, duration: f64) -> f64 {
     if duration > 0.0 {
@@ -1795,71 +2310,61 @@ fn aggregate_by_player<'a, T>(
 const ENCOUNTER_SEPARATOR: &str = "-------------------";
 
 /// Build the encounter names list for the `pick_list`.
+///
+/// Single pass over encounters to collect counts and durations.
 fn build_encounter_names(data: &LogData) -> Vec<String> {
     let mut names = Vec::new();
 
-    // Quick filters
     let total_duration = data.end_time.unwrap_or(0.0) - data.start_time.unwrap_or(0.0);
     names.push(format!(
         "All Combat ({})",
         theme::format_duration(total_duration)
     ));
 
-    let kill_count = data
-        .encounters
-        .iter()
-        .filter(|e| e.is_boss && e.is_kill)
-        .count();
-    let wipe_count = data
-        .encounters
-        .iter()
-        .filter(|e| e.is_boss && !e.is_kill)
-        .count();
-    let trash_count = data.encounters.iter().filter(|e| !e.is_boss).count();
+    // Single pass: accumulate counts and durations for all categories
+    let mut kill_count: usize = 0;
+    let mut kill_duration: f64 = 0.0;
+    let mut wipe_count: usize = 0;
+    let mut wipe_duration: f64 = 0.0;
+    let mut trash_count: usize = 0;
+    let mut trash_duration: f64 = 0.0;
+
+    for enc in &data.encounters {
+        if enc.is_boss {
+            if enc.is_kill {
+                kill_count += 1;
+                kill_duration += enc.duration;
+            } else {
+                wipe_count += 1;
+                wipe_duration += enc.duration;
+            }
+        } else {
+            trash_count += 1;
+            trash_duration += enc.duration;
+        }
+    }
 
     if kill_count > 0 {
-        let kill_duration: f64 = data
-            .encounters
-            .iter()
-            .filter(|e| e.is_boss && e.is_kill)
-            .map(|e| e.duration)
-            .sum();
         names.push(format!(
-            "All Kills ({}) - {}",
-            kill_count,
+            "All Kills ({kill_count}) - {}",
             theme::format_duration(kill_duration)
         ));
     }
     if wipe_count > 0 {
-        let wipe_duration: f64 = data
-            .encounters
-            .iter()
-            .filter(|e| e.is_boss && !e.is_kill)
-            .map(|e| e.duration)
-            .sum();
         names.push(format!(
-            "All Wipes ({}) - {}",
-            wipe_count,
+            "All Wipes ({wipe_count}) - {}",
             theme::format_duration(wipe_duration)
         ));
     }
     if trash_count > 0 {
-        let trash_duration: f64 = data
-            .encounters
-            .iter()
-            .filter(|e| !e.is_boss)
-            .map(|e| e.duration)
-            .sum();
         names.push(format!(
-            "All Trash ({}) - {}",
-            trash_count,
+            "All Trash ({trash_count}) - {}",
             theme::format_duration(trash_duration)
         ));
     }
 
     // Separator between quick filters and individual boss encounters
-    let has_boss_encounters = data.encounters.iter().any(|e| e.is_boss);
-    if has_boss_encounters {
+    if kill_count > 0 || wipe_count > 0 {
         names.push(ENCOUNTER_SEPARATOR.to_string());
     }
 
@@ -1918,19 +2423,6 @@ fn build_single_encounter_name(enc: &Encounter, index: usize) -> String {
             index + 1,
             theme::format_duration(enc.duration)
         )
-    }
-}
-
-/// Quality sort order (lower = higher priority).
-fn quality_sort_order(quality: &str) -> u8 {
-    match quality {
-        "legendary" => 0,
-        "epic" => 1,
-        "rare" => 2,
-        "uncommon" => 3,
-        "common" => 4,
-        "poor" => 5,
-        _ => 6,
     }
 }
 
@@ -2089,6 +2581,789 @@ fn panel_style(_theme: &iced::Theme) -> container::Style {
         },
         ..Default::default()
     }
+}
+
+/// Big hit threshold: damage-taken events above this value are marked on the timeline.
+const BIG_HIT_THRESHOLD: u64 = 2000;
+
+/// Format seconds offset as encounter time (M:SS).
+fn format_encounter_time(seconds: f64) -> String {
+    let total = seconds as u64;
+    let mins = total / 60;
+    let secs = total % 60;
+    format!("{mins}:{secs:02}")
+}
+
+/// Build a clickable legend toggle button.
+///
+/// Active: full-color dot + white text. Inactive: dimmed dot + muted text.
+fn legend_toggle(
+    color: Color,
+    label: &str,
+    active: bool,
+    kind: TimelineSeriesKind,
+) -> Element<'_, ViewerMessage> {
+    let dot_color = if active {
+        color
+    } else {
+        Color { a: 0.25, ..color }
+    };
+    let text_color = if active {
+        Color::WHITE
+    } else {
+        theme::TEXT_MUTED
+    };
+
+    let dot: Element<ViewerMessage> = container("")
+        .width(8)
+        .height(8)
+        .style(move |_theme: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(dot_color)),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into();
+
+    let content = row![dot, text(label).size(11).color(text_color)]
+        .spacing(4)
+        .align_y(Center);
+
+    button(content)
+        .on_press(ViewerMessage::ToggleTimelineSeries(kind))
+        .padding([2, 6])
+        .style(move |_theme: &iced::Theme, status| {
+            let bg = if active {
+                match status {
+                    button::Status::Hovered => Some(iced::Background::Color(Color::from_rgba8(
+                        255, 255, 255, 0.08,
+                    ))),
+                    _ => Some(iced::Background::Color(Color::from_rgba8(
+                        255, 255, 255, 0.04,
+                    ))),
+                }
+            } else {
+                match status {
+                    button::Status::Hovered => Some(iced::Background::Color(Color::from_rgba8(
+                        255, 255, 255, 0.04,
+                    ))),
+                    _ => None,
+                }
+            };
+            button::Style {
+                background: bg,
+                text_color,
+                border: iced::Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                shadow: iced::Shadow::default(),
+            }
+        })
+        .into()
+}
+
+// ── Timeline Canvas Programs ────────────────────────────────────────────────
+
+/// Canvas program that renders the main DPS/DTPS/HPS sparkline chart.
+///
+/// Each enabled series is drawn as a filled area with a solid stroke on top.
+/// Death and big-hit markers are drawn as vertical lines at their X positions.
+struct TimelineChart<'a> {
+    data: &'a TimelineData,
+    visibility: &'a TimelineVisibility,
+    shared_y: bool,
+    hover_idx: Option<usize>,
+}
+
+impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
+    type State = ();
+
+    #[allow(clippy::similar_names)] // dps/dtps/hps are standard WoW combat metrics
+    #[allow(clippy::too_many_lines)] // Canvas draw — single rendering pass with multiple layers
+    #[allow(clippy::many_single_char_names)] // x/y/w/h/n/t are standard 2D drawing variables
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let td = self.data;
+        let vis = self.visibility;
+        let w = bounds.width;
+        let h = bounds.height;
+
+        if td.buckets.is_empty() || w < 2.0 || h < 2.0 {
+            return vec![];
+        }
+
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+
+        // Background
+        frame.fill_rectangle(
+            Point::ORIGIN,
+            bounds.size(),
+            Color::from_rgba8(0, 0, 0, 0.3),
+        );
+
+        let n = td.buckets.len();
+        let x_scale = w / n.max(1) as f32;
+
+        // Compute Y-axis maximums
+        let shared_max = td.max_dps.max(td.max_dtps).max(td.max_hps).max(1) as f32;
+        let dps_max = if self.shared_y {
+            shared_max
+        } else {
+            td.max_dps.max(1) as f32
+        };
+        let dtps_max = if self.shared_y {
+            shared_max
+        } else {
+            td.max_dtps.max(1) as f32
+        };
+        let hps_max = if self.shared_y {
+            shared_max
+        } else {
+            td.max_hps.max(1) as f32
+        };
+
+        // Draw series in back-to-front order: DPS (behind), HPS, DTPS (front).
+        // Each call is explicit to avoid a complex generic tuple array.
+        if vis.show_dps {
+            draw_sparkline_area(
+                &mut frame,
+                &td.buckets,
+                &|b| b.damage,
+                x_scale,
+                h,
+                dps_max,
+                theme::TIMELINE_DPS,
+            );
+        }
+        if vis.show_hps {
+            draw_sparkline_area(
+                &mut frame,
+                &td.buckets,
+                &|b| b.healing,
+                x_scale,
+                h,
+                hps_max,
+                theme::TIMELINE_HPS,
+            );
+        }
+        if vis.show_dtps {
+            draw_sparkline_area(
+                &mut frame,
+                &td.buckets,
+                &|b| b.damage_taken,
+                x_scale,
+                h,
+                dtps_max,
+                theme::TIMELINE_DTPS,
+            );
+        }
+
+        // Draw event markers (vertical lines for deaths and big hits)
+        for event in &td.events {
+            let visible = match event.kind {
+                TimelineEventKind::Death | TimelineEventKind::Resurrect => vis.show_deaths,
+                TimelineEventKind::BigHit => vis.show_big_hits,
+                _ => false, // dispels/interrupts shown in event list only
+            };
+            if !visible {
+                continue;
+            }
+            let x = (event.offset as f32 / td.duration as f32) * w;
+            let marker_color = match event.kind {
+                TimelineEventKind::Death => theme::TIMELINE_DEATH,
+                TimelineEventKind::BigHit => theme::TIMELINE_BIG_HIT,
+                TimelineEventKind::Resurrect => theme::TIMELINE_RESURRECT,
+                _ => Color::WHITE,
+            };
+
+            let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
+            frame.stroke(
+                &line,
+                canvas::Stroke::default()
+                    .with_color(Color {
+                        a: 0.5,
+                        ..marker_color
+                    })
+                    .with_width(1.0),
+            );
+
+            // Small circle at top
+            let dot = canvas::Path::circle(Point::new(x, 4.0), 3.0);
+            frame.fill(&dot, marker_color);
+        }
+
+        // Hover line
+        if let Some(idx) = self.hover_idx {
+            let x = (idx as f32 + 0.5) * x_scale;
+            let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
+            frame.stroke(
+                &line,
+                canvas::Stroke::default()
+                    .with_color(Color::from_rgba8(255, 255, 255, 0.6))
+                    .with_width(1.0),
+            );
+        }
+
+        // Y-axis scale labels drawn on canvas
+        let y_max_display = if self.shared_y {
+            shared_max as u64
+        } else {
+            // Show the largest visible series max
+            let mut m = 0_u64;
+            if vis.show_dps {
+                m = m.max(td.max_dps);
+            }
+            if vis.show_dtps {
+                m = m.max(td.max_dtps);
+            }
+            if vis.show_hps {
+                m = m.max(td.max_hps);
+            }
+            m.max(1)
+        };
+
+        let y_labels = [
+            (0.0, theme::format_number(y_max_display)),
+            (h / 2.0, theme::format_number(y_max_display / 2)),
+            (h - 10.0, "0".to_string()),
+        ];
+        for (y, label_text) in &y_labels {
+            frame.fill_text(canvas::Text {
+                content: label_text.clone(),
+                position: Point::new(4.0, *y),
+                color: theme::TEXT_MUTED,
+                size: 10.0.into(),
+                ..canvas::Text::default()
+            });
+        }
+
+        // X-axis time labels
+        let label_interval = if td.duration > 300.0 {
+            60.0
+        } else if td.duration > 120.0 {
+            30.0
+        } else {
+            15.0
+        };
+
+        let mut t = 0.0;
+        while t < td.duration {
+            let x = (t as f32 / td.duration as f32) * w;
+            let label_text = format_encounter_time(t);
+            frame.fill_text(canvas::Text {
+                content: label_text,
+                position: Point::new(x + 2.0, h - 12.0),
+                color: Color {
+                    a: 0.3,
+                    ..Color::WHITE
+                },
+                size: 9.0.into(),
+                ..canvas::Text::default()
+            });
+            t += label_interval;
+        }
+
+        vec![frame.into_geometry()]
+    }
+
+    fn update(
+        &self,
+        _state: &mut (),
+        event: canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<ViewerMessage>) {
+        match event {
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    let n = self.data.buckets.len();
+                    if n > 0 {
+                        let x_scale = bounds.width / n as f32;
+                        let idx = (pos.x / x_scale) as usize;
+                        let clamped = idx.min(n.saturating_sub(1));
+                        return (
+                            canvas::event::Status::Captured,
+                            Some(ViewerMessage::TimelineHover(Some(clamped))),
+                        );
+                    }
+                } else {
+                    return (
+                        canvas::event::Status::Ignored,
+                        Some(ViewerMessage::TimelineHover(None)),
+                    );
+                }
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    let n = self.data.buckets.len();
+                    if n > 0 {
+                        let x_scale = bounds.width / n as f32;
+                        let idx = (pos.x / x_scale) as usize;
+                        let clamped = idx.min(n.saturating_sub(1));
+                        return (
+                            canvas::event::Status::Captured,
+                            Some(ViewerMessage::TimelineClick(clamped)),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        (canvas::event::Status::Ignored, None)
+    }
+}
+
+/// Draw a single filled sparkline area on the frame.
+///
+/// Builds a closed path from the bucket values, fills with semi-transparent
+/// color, then strokes the top edge with a solid line.
+fn draw_sparkline_area(
+    frame: &mut canvas::Frame,
+    buckets: &[crate::log_data::TimelineBucket],
+    get_val: &dyn Fn(&crate::log_data::TimelineBucket) -> u64,
+    x_scale: f32,
+    height: f32,
+    y_max: f32,
+    color: Color,
+) {
+    if buckets.is_empty() {
+        return;
+    }
+
+    // Build the line path (top edge)
+    let line_path = canvas::Path::new(|b| {
+        for (i, bucket) in buckets.iter().enumerate() {
+            let x = (i as f32 + 0.5) * x_scale;
+            let val = get_val(bucket) as f32;
+            let y = height - (val / y_max) * height;
+            if i == 0 {
+                b.move_to(Point::new(x, y));
+            } else {
+                b.line_to(Point::new(x, y));
+            }
+        }
+    });
+
+    // Build the filled area path (line + close back to baseline)
+    let area_path = canvas::Path::new(|b| {
+        // Start at bottom-left
+        b.move_to(Point::new(0.5 * x_scale, height));
+
+        for (i, bucket) in buckets.iter().enumerate() {
+            let x = (i as f32 + 0.5) * x_scale;
+            let val = get_val(bucket) as f32;
+            let y = height - (val / y_max) * height;
+            b.line_to(Point::new(x, y));
+        }
+
+        // Close back to bottom-right
+        let last_x = ((buckets.len() - 1) as f32 + 0.5) * x_scale;
+        b.line_to(Point::new(last_x, height));
+        b.close();
+    });
+
+    // Fill area with transparency
+    frame.fill(&area_path, Color { a: 0.2, ..color });
+
+    // Stroke line on top
+    frame.stroke(
+        &line_path,
+        canvas::Stroke::default()
+            .with_color(color)
+            .with_width(1.5)
+            .with_line_join(canvas::LineJoin::Round),
+    );
+}
+
+/// Canvas program for the alive-count sparkline below the main chart.
+struct AliveChart<'a> {
+    data: &'a TimelineData,
+}
+
+impl canvas::Program<ViewerMessage> for AliveChart<'_> {
+    type State = ();
+
+    #[allow(clippy::many_single_char_names)] // x/y/w/h/n are standard 2D drawing variables
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let td = self.data;
+        let w = bounds.width;
+        let h = bounds.height;
+
+        if td.buckets.is_empty() || w < 2.0 || h < 2.0 {
+            return vec![];
+        }
+
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+
+        // Background
+        frame.fill_rectangle(
+            Point::ORIGIN,
+            bounds.size(),
+            Color::from_rgba8(0, 0, 0, 0.2),
+        );
+
+        let n = td.buckets.len();
+        let x_scale = w / n.max(1) as f32;
+        let y_max = td.raid_count.max(1) as f32;
+
+        // Filled area
+        let area_path = canvas::Path::new(|b| {
+            b.move_to(Point::new(0.5 * x_scale, h));
+            for (i, bucket) in td.buckets.iter().enumerate() {
+                let x = (i as f32 + 0.5) * x_scale;
+                let y = h - (bucket.alive_count as f32 / y_max) * h;
+                b.line_to(Point::new(x, y));
+            }
+            let last_x = ((n - 1) as f32 + 0.5) * x_scale;
+            b.line_to(Point::new(last_x, h));
+            b.close();
+        });
+
+        frame.fill(
+            &area_path,
+            Color {
+                a: 0.25,
+                ..theme::TIMELINE_ALIVE
+            },
+        );
+
+        // Stroke line
+        let line_path = canvas::Path::new(|b| {
+            for (i, bucket) in td.buckets.iter().enumerate() {
+                let x = (i as f32 + 0.5) * x_scale;
+                let y = h - (bucket.alive_count as f32 / y_max) * h;
+                if i == 0 {
+                    b.move_to(Point::new(x, y));
+                } else {
+                    b.line_to(Point::new(x, y));
+                }
+            }
+        });
+
+        frame.stroke(
+            &line_path,
+            canvas::Stroke::default()
+                .with_color(theme::TIMELINE_ALIVE)
+                .with_width(1.5)
+                .with_line_join(canvas::LineJoin::Round),
+        );
+
+        vec![frame.into_geometry()]
+    }
+}
+
+/// Seconds before a death to show in Death Log mode.
+const DEATH_LOG_WINDOW: f64 = 10.0;
+
+/// Big hit threshold for Key Events mode.
+const KEY_EVENT_BIG_HIT: u64 = 2000;
+
+/// Build the encounter event log for the timeline tab.
+///
+/// Supports three modes:
+/// - `AllEvents`: every entry matching type filters
+/// - `KeyEvents`: deaths, big hits, dispels, interrupts, resurrects only
+/// - `DeathLog`: for each player death, all events involving that player
+///   in the 10 seconds before death
+#[allow(clippy::too_many_lines)] // Event log builder — single pass with mode dispatch
+#[allow(clippy::too_many_arguments)] // Will be refactored into a struct in future
+fn build_timeline_event_log<'a>(
+    log_data: &'a LogData,
+    filter: &EncounterFilter,
+    type_filter: &EventLogTypeFilter,
+    mode: EventLogMode,
+    player_filter: Option<&str>,
+    clicked_second: Option<usize>,
+) -> Element<'a, ViewerMessage> {
+    let encounters = log_data.selected_encounters(filter);
+    if encounters.is_empty() {
+        return empty_state("No encounter selected");
+    }
+
+    // For Death Log mode, pre-compute death windows
+    let death_windows: Vec<(f64, f64, &str)> = if mode == EventLogMode::DeathLog {
+        build_death_windows(log_data, &encounters)
+    } else {
+        Vec::new()
+    };
+
+    let mut col = Column::new().spacing(1);
+
+    // Header
+    let header_text = match mode {
+        EventLogMode::AllEvents => "Event Log — click chart to jump",
+        EventLogMode::KeyEvents => "Key Events — deaths, big hits, dispels, interrupts",
+        EventLogMode::DeathLog => "Death Log — 10s before each death",
+    };
+    col = col.push(
+        row![
+            text("Time").size(10).color(theme::TEXT_MUTED).width(50),
+            text(header_text).size(11).color(theme::TEXT_SECONDARY),
+        ]
+        .spacing(8),
+    );
+    col = col.push(horizontal_rule(1));
+
+    let mut offset_base: f64 = 0.0;
+    let mut row_count: usize = 0;
+    let max_rows = 5000;
+
+    // For Death Log mode, insert separator headers before each death window
+    let mut last_death_label: Option<String> = None;
+
+    for enc in &encounters {
+        let enc_start = enc.start;
+        let enc_duration = enc.duration;
+
+        for entry in &log_data.entries {
+            let ts = entry.timestamp();
+            if ts < enc_start || ts > enc.end {
+                continue;
+            }
+
+            let relative = ts - enc_start + offset_base;
+            let second = relative.floor() as usize;
+
+            // ── Type filter ────────────────────────────────────────────
+            if !type_filter.accepts(entry) {
+                continue;
+            }
+
+            // ── Player filter ──────────────────────────────────────────
+            if let Some(player) = player_filter {
+                let involves_player =
+                    entry.source() == player || entry.target().is_some_and(|t| t == player);
+                if !involves_player {
+                    continue;
+                }
+            }
+
+            // ── Mode-specific filter ───────────────────────────────────
+            match mode {
+                EventLogMode::AllEvents => {}
+                EventLogMode::KeyEvents => {
+                    if !is_key_event(entry, &log_data.combatants) {
+                        continue;
+                    }
+                }
+                EventLogMode::DeathLog => {
+                    // Check if this event falls in any death window and involves
+                    // the player who is about to die
+                    let in_window = death_windows.iter().find(|(start, end, player)| {
+                        ts >= *start
+                            && ts <= *end
+                            && (entry.source() == *player
+                                || entry.target().is_some_and(|t| t == *player))
+                    });
+                    if let Some((_, end_ts, dead_player)) = in_window {
+                        // Insert a death header separator when entering a new window
+                        let death_label = format!(
+                            "{} — died at {}",
+                            dead_player,
+                            format_encounter_time(*end_ts - enc_start + offset_base)
+                        );
+                        if last_death_label.as_deref() != Some(&death_label) {
+                            if last_death_label.is_some() {
+                                col = col.push(container("").height(6));
+                            }
+                            col = col.push(
+                                container(
+                                    text(death_label.clone())
+                                        .size(11)
+                                        .color(theme::TIMELINE_DEATH),
+                                )
+                                .padding([4, 8])
+                                .width(Fill)
+                                .style(|_theme: &iced::Theme| container::Style {
+                                    background: Some(iced::Background::Color(Color::from_rgba8(
+                                        255, 50, 50, 0.08,
+                                    ))),
+                                    border: iced::Border {
+                                        radius: 3.0.into(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                }),
+                            );
+                            last_death_label = Some(death_label);
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+            }
+
+            // ── Render row ─────────────────────────────────────────────
+            let (color, label) = format_log_entry(entry);
+
+            let is_highlighted = clicked_second.is_some_and(|cs| second == cs);
+            let bg_alpha: f32 = if is_highlighted { 0.15 } else { 0.0 };
+
+            let time_str = format_encounter_time(relative);
+
+            let event_row: Element<ViewerMessage> = container(
+                row![
+                    text(time_str).size(10).color(theme::TEXT_MUTED).width(50),
+                    text(label).size(10).color(color),
+                ]
+                .spacing(6),
+            )
+            .padding([1, 4])
+            .width(Fill)
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: if bg_alpha > 0.0 {
+                    Some(iced::Background::Color(Color::from_rgba8(
+                        100, 180, 255, bg_alpha,
+                    )))
+                } else {
+                    None
+                },
+                ..Default::default()
+            })
+            .into();
+
+            col = col.push(event_row);
+            row_count += 1;
+            if row_count >= max_rows {
+                col = col.push(
+                    text(format!("... truncated at {max_rows} events"))
+                        .size(10)
+                        .color(theme::TEXT_MUTED),
+                );
+                return col.width(Fill).into();
+            }
+        }
+
+        offset_base += enc_duration;
+    }
+
+    if row_count == 0 {
+        col = col.push(empty_state("No events matching filters"));
+    }
+
+    col.width(Fill).into()
+}
+
+/// Format a `LogEntry` into a color + label string for display.
+fn format_log_entry(entry: &LogEntry) -> (Color, String) {
+    match entry {
+        LogEntry::Damage {
+            source,
+            target,
+            spell,
+            amount,
+            is_crit,
+            ..
+        } => {
+            let crit = if *is_crit { " (crit)" } else { "" };
+            (
+                Color::from_rgb8(200, 200, 200),
+                format!(
+                    "{source}'s {spell} hits {target} for {}{crit}",
+                    theme::format_number(*amount)
+                ),
+            )
+        }
+        LogEntry::Healing {
+            source,
+            target,
+            spell,
+            amount,
+            is_crit,
+            ..
+        } => {
+            let crit = if *is_crit { " (crit)" } else { "" };
+            (
+                theme::TIMELINE_HPS,
+                format!(
+                    "{source}'s {spell} heals {target} for {}{crit}",
+                    theme::format_number(*amount)
+                ),
+            )
+        }
+        LogEntry::Death { player, .. } => (theme::TIMELINE_DEATH, format!("{player} died")),
+        LogEntry::Dispel {
+            caster,
+            target,
+            spell,
+            ..
+        } => (
+            theme::TIMELINE_DISPEL,
+            format!("{caster} dispels {spell} on {target}"),
+        ),
+        LogEntry::Resurrect { caster, target, .. } => (
+            theme::TIMELINE_RESURRECT,
+            format!("{caster} resurrects {target}"),
+        ),
+        LogEntry::Interrupt {
+            caster,
+            target,
+            spell,
+            ..
+        } => (
+            theme::TIMELINE_INTERRUPT,
+            format!("{caster} interrupts {target} with {spell}"),
+        ),
+    }
+}
+
+/// Check if a `LogEntry` qualifies as a "key event" for the Key Events filter.
+fn is_key_event(
+    entry: &LogEntry,
+    combatants: &HashMap<String, crate::log_data::Combatant>,
+) -> bool {
+    match entry {
+        LogEntry::Death { .. }
+        | LogEntry::Dispel { .. }
+        | LogEntry::Resurrect { .. }
+        | LogEntry::Interrupt { .. } => true,
+        LogEntry::Damage { target, amount, .. } => {
+            // Big hits on raid members
+            *amount >= KEY_EVENT_BIG_HIT && combatants.contains_key(target.as_str())
+        }
+        LogEntry::Healing { .. } => false,
+    }
+}
+
+/// Build death windows for Death Log mode.
+///
+/// For each player death within the selected encounters, creates a window
+/// of `(start_ts, death_ts, player_name)` covering the 10 seconds before death.
+fn build_death_windows<'a>(
+    log_data: &'a LogData,
+    encounters: &[&Encounter],
+) -> Vec<(f64, f64, &'a str)> {
+    let mut windows = Vec::new();
+    for enc in encounters {
+        for entry in &log_data.entries {
+            if let LogEntry::Death { timestamp, player } = entry {
+                if *timestamp >= enc.start
+                    && *timestamp <= enc.end
+                    && log_data.combatants.contains_key(player.as_str())
+                {
+                    let window_start = (timestamp - DEATH_LOG_WINDOW).max(enc.start);
+                    windows.push((window_start, *timestamp, player.as_str()));
+                }
+            }
+        }
+    }
+    windows
 }
 
 /// Create an empty-state text element.

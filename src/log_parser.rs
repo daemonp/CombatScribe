@@ -9,7 +9,8 @@ use std::sync::LazyLock;
 
 use crate::log_data::{
     AbilityStats, Combatant, ConsumableUse, DeathEvent, DispelEvent, Encounter, GearSlot,
-    InterruptEvent, LogData, LogEntry, LootEvent, PlayerStats, ResurrectEvent, TradeEvent,
+    InterruptEvent, ItemQuality, LogData, LogEntry, LootEvent, PlayerStats, ResurrectEvent,
+    TradeEvent,
 };
 use crate::parser;
 
@@ -137,6 +138,11 @@ struct ParseState {
     combatant_timestamps: HashMap<String, f64>,
 }
 
+/// Check if an `Option<String>` contains a known boss name.
+fn has_known_boss(boss: Option<&String>) -> bool {
+    boss.is_some_and(|b| parser::is_known_boss(b))
+}
+
 /// Parse the session lines into a fully populated `LogData`.
 ///
 /// Uses keyword-based dispatch to avoid running all regexes on every line.
@@ -223,12 +229,7 @@ pub fn parse_log(lines: &[String]) -> LogData {
 
         // Boss detection from combat lines (during active combat only)
         // Skip if we already identified a known boss for this combat window
-        if state.in_combat
-            && !state
-                .current_boss
-                .as_ref()
-                .is_some_and(|b| parser::is_known_boss(b))
-        {
+        if state.in_combat && !has_known_boss(state.current_boss.as_ref()) {
             detect_boss_from_combat(trimmed, &data, &mut state);
         }
 
@@ -326,10 +327,7 @@ fn parse_combat_state(trimmed: &str, timestamp: f64, data: &mut LogData, state: 
             if let Some(start) = state.combat_start {
                 let duration = timestamp - start;
                 if duration > 5.0 {
-                    let is_boss = state
-                        .current_boss
-                        .as_ref()
-                        .is_some_and(|b| parser::is_known_boss(b));
+                    let is_boss = has_known_boss(state.current_boss.as_ref());
                     data.encounters.push(Encounter {
                         name: state.current_boss.clone(),
                         start,
@@ -393,10 +391,11 @@ fn parse_unit_died(trimmed: &str, timestamp: f64, data: &mut LogData, state: &mu
         } else if state.in_combat && !state.current_boss_killed {
             // Non-boss mob died during combat — track as potential encounter name.
             // Never overwrite a known boss, and never overwrite after a kill.
-            let dominated = state
-                .current_boss
-                .as_ref()
-                .is_none_or(|b| !parser::is_known_boss(b) && dead_unit.len() > b.len());
+            let dominated = !has_known_boss(state.current_boss.as_ref())
+                && state
+                    .current_boss
+                    .as_ref()
+                    .is_none_or(|b| dead_unit.len() > b.len());
             if dominated {
                 state.current_boss = Some(dead_unit.to_string());
             }
@@ -438,11 +437,7 @@ fn detect_boss_from_combat(trimmed: &str, data: &LogData, state: &mut ParseState
         return;
     }
     // Already found a known boss for this combat window — nothing to do
-    if state
-        .current_boss
-        .as_ref()
-        .is_some_and(|b| parser::is_known_boss(b))
-    {
+    if has_known_boss(state.current_boss.as_ref()) {
         return;
     }
 
@@ -482,12 +477,7 @@ fn detect_boss_from_combat(trimmed: &str, data: &LogData, state: &mut ParseState
     }
 
     // Also check for boss names mentioned directly in the line (e.g. in resist/immune messages)
-    if state.current_boss.is_none()
-        || !state
-            .current_boss
-            .as_ref()
-            .is_some_and(|b| parser::is_known_boss(b))
-    {
+    if !has_known_boss(state.current_boss.as_ref()) {
         // Quick scan: only worth checking if line contains common combat verbs
         if trimmed.contains("hits ")
             || trimmed.contains("crits ")
@@ -639,10 +629,8 @@ fn parse_absorbed(trimmed: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Record a parsed damage event into stats and entries.
-#[allow(clippy::too_many_arguments)]
-fn record_damage(
-    data: &mut LogData,
+/// Parsed damage event ready to be recorded into stats and entries.
+struct DamageEvent<'a> {
     timestamp: f64,
     source: String,
     target: String,
@@ -650,8 +638,21 @@ fn record_damage(
     amount: u64,
     absorbed: u64,
     is_crit: bool,
-    pet_owner: Option<&str>,
-) {
+    pet_owner: Option<&'a str>,
+}
+
+/// Record a parsed damage event into stats and entries.
+fn record_damage(data: &mut LogData, event: DamageEvent<'_>) {
+    let DamageEvent {
+        timestamp,
+        source,
+        target,
+        spell,
+        amount,
+        absorbed,
+        is_crit,
+        pet_owner,
+    } = event;
     add_damage(data, &source, &spell, amount, pet_owner, is_crit);
     add_damage_taken(data, &target, amount);
     record_absorb(data, &target, absorbed);
@@ -689,14 +690,16 @@ fn parse_damage_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
         let pet_owner = extract_pet_owner(&source, data);
         record_damage(
             data,
-            timestamp,
-            source,
-            target,
-            spell,
-            amount,
-            absorbed,
-            is_crit,
-            pet_owner.as_deref(),
+            DamageEvent {
+                timestamp,
+                source,
+                target,
+                spell,
+                amount,
+                absorbed,
+                is_crit,
+                pet_owner: pet_owner.as_deref(),
+            },
         );
         return;
     }
@@ -716,14 +719,16 @@ fn parse_damage_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
         let absorbed = parse_absorbed(trimmed);
         record_damage(
             data,
-            timestamp,
-            source,
-            target,
-            "Auto Attack".to_string(),
-            amount,
-            absorbed,
-            is_crit,
-            None,
+            DamageEvent {
+                timestamp,
+                source,
+                target,
+                spell: "Auto Attack".to_string(),
+                amount,
+                absorbed,
+                is_crit,
+                pet_owner: None,
+            },
         );
         return;
     }
@@ -747,14 +752,16 @@ fn parse_damage_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
         let pet_owner = extract_pet_owner(&source, data);
         record_damage(
             data,
-            timestamp,
-            source,
-            target,
-            spell,
-            amount,
-            absorbed,
-            is_crit,
-            pet_owner.as_deref(),
+            DamageEvent {
+                timestamp,
+                source,
+                target,
+                spell,
+                amount,
+                absorbed,
+                is_crit,
+                pet_owner: pet_owner.as_deref(),
+            },
         );
     }
 }
@@ -931,21 +938,14 @@ fn parse_loot_trade(trimmed: &str, timestamp: f64, data: &mut LogData) {
                 .and_then(|m| m.as_str().parse().ok())
                 .unwrap_or(1);
 
-            let quality = match color_code {
-                "9d9d9d" => "poor",
-                "1eff00" => "uncommon",
-                "0070dd" => "rare",
-                "a335ee" => "epic",
-                "ff8000" => "legendary",
-                _ => "common",
-            };
+            let quality = ItemQuality::from_color_code(color_code);
 
             data.loot.push(LootEvent {
                 timestamp,
                 player,
                 item_name,
                 item_id,
-                quality: quality.to_string(),
+                quality,
                 quantity,
                 boss: String::new(),
                 traded_to: None,

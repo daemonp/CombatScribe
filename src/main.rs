@@ -11,30 +11,55 @@ use iced::widget::{
 };
 use iced::{Center, Element, Fill, Task, Theme};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 fn main() -> iced::Result {
-    // Quick benchmark mode: `combat-scribe --bench <file>`
     let args: Vec<String> = std::env::args().collect();
+
+    // Quick benchmark mode: `combat-scribe --bench <file>`
     if args.len() >= 3 && args[1] == "--bench" {
         run_bench(&args[2]);
         return Ok(());
     }
 
+    // If a file path is passed as the first argument, load it immediately
+    let initial_file: Option<PathBuf> = if args.len() >= 2 && !args[1].starts_with('-') {
+        Some(PathBuf::from(&args[1]))
+    } else {
+        None
+    };
+
     iced::application("WoW Log Viewer", App::update, App::view)
         .theme(|_| Theme::Dark)
         .window_size((1200.0, 800.0))
-        .run_with(|| (App::new(), Task::none()))
+        .run_with(move || {
+            let app = App::new();
+            if let Some(path) = initial_file {
+                let p = path.clone();
+                (
+                    app,
+                    Task::done(Message::FileSelected(Some(p))),
+                )
+            } else {
+                (app, Task::none())
+            }
+        })
 }
 
 fn run_bench(path: &str) {
     use std::time::Instant;
 
+    let file_path = std::path::Path::new(path);
     eprintln!("Reading file...");
     let t0 = Instant::now();
-    let content = fs::read_to_string(path).expect("read file");
+    let content = if is_zip_file(file_path) {
+        let bytes = fs::read(path).expect("read zip file");
+        read_text_from_zip_bytes(&bytes).expect("extract txt from zip")
+    } else {
+        fs::read_to_string(path).expect("read file")
+    };
     let lines: Vec<String> = content.lines().map(str::to_string).collect();
     let read_time = t0.elapsed();
     eprintln!("  Read {} lines in {read_time:.2?}", lines.len());
@@ -76,7 +101,7 @@ fn run_bench(path: &str) {
 
 // ── Application State ───────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum AppState {
     /// Waiting for user to select a file.
     Idle,
@@ -402,7 +427,7 @@ impl App {
                 }
 
                 if let AppState::Viewing(ref mut viewer_state) = self.state {
-                    viewer_state.update(viewer_msg);
+                    return viewer_state.update(viewer_msg).map(Message::Viewer);
                 }
                 Task::none()
             }
@@ -671,7 +696,7 @@ impl App {
 
 async fn pick_file() -> Option<PathBuf> {
     let file = rfd::AsyncFileDialog::new()
-        .add_filter("Combat Log", &["txt"])
+        .add_filter("Combat Log", &["txt", "zip"])
         .add_filter("All Files", &["*"])
         .set_title("Select WoW Combat Log")
         .pick_file()
@@ -681,12 +706,56 @@ async fn pick_file() -> Option<PathBuf> {
 }
 
 async fn load_file(path: PathBuf) -> Result<Arc<Vec<String>>, String> {
-    let content = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| format!("Failed to read file: {e}"))?;
+    let content = if is_zip_file(&path) {
+        // Read the raw bytes and extract the first .txt from the zip
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| format!("Failed to read zip file: {e}"))?;
+        read_text_from_zip_bytes(&bytes)?
+    } else {
+        tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("Failed to read file: {e}"))?
+    };
 
     let lines: Vec<String> = content.lines().map(str::to_string).collect();
     Ok(Arc::new(lines))
+}
+
+/// Check if a path looks like a zip file (by extension).
+fn is_zip_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+}
+
+/// Extract the first `.txt` file from a zip archive's raw bytes.
+fn read_text_from_zip_bytes(bytes: &[u8]) -> Result<String, String> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open zip archive: {e}"))?;
+
+    // Find the first .txt entry
+    let txt_index = (0..archive.len())
+        .find(|&i| {
+            archive
+                .by_index(i)
+                .is_ok_and(|f| {
+                    f.name()
+                        .to_lowercase()
+                        .ends_with(".txt")
+                })
+        })
+        .ok_or_else(|| "No .txt file found inside zip archive".to_string())?;
+
+    let mut file = archive
+        .by_index(txt_index)
+        .map_err(|e| format!("Failed to read file from zip: {e}"))?;
+
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|e| format!("Failed to read text from zip entry '{}': {e}", file.name()))?;
+
+    Ok(content)
 }
 
 /// Export pipeline — runs synchronous I/O (no async needed).
