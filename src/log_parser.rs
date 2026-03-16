@@ -442,37 +442,35 @@ fn detect_boss_from_combat(trimmed: &str, data: &LogData, state: &mut ParseState
     }
 
     // Check the most recent entry (just pushed by parse_damage_events / parse_healing_events)
-    let Some(entry) = data.entries.last() else {
-        return;
-    };
+    if let Some(entry) = data.entries.last() {
+        let names: &[&str] = match entry {
+            LogEntry::Damage { source, target, .. } | LogEntry::Healing { source, target, .. } => {
+                &[source.as_str(), target.as_str()]
+            }
+            _ => &[],
+        };
 
-    let names: &[&str] = match entry {
-        LogEntry::Damage { source, target, .. } | LogEntry::Healing { source, target, .. } => {
-            &[source.as_str(), target.as_str()]
-        }
-        _ => return,
-    };
-
-    for &name in names {
-        // Skip players — only interested in NPC/boss names.
-        // Also skip names with "(self damage)" suffix — these are reformatted player names.
-        if data.all_combatants.contains_key(name)
-            || name == "Unknown"
-            || name.ends_with("(self damage)")
-        {
-            continue;
-        }
-        if parser::is_known_boss(name) {
-            state.current_boss = Some(name.to_string());
-            return;
-        }
-        // Fall back to longest non-player name if no boss identified yet
-        if state
-            .current_boss
-            .as_ref()
-            .is_none_or(|b| name.len() > b.len())
-        {
-            state.current_boss = Some(name.to_string());
+        for &name in names {
+            // Skip players — only interested in NPC/boss names.
+            // Also skip names with "(self damage)" suffix — these are reformatted player names.
+            if data.all_combatants.contains_key(name)
+                || name == "Unknown"
+                || name.ends_with("(self damage)")
+            {
+                continue;
+            }
+            if parser::is_known_boss(name) {
+                state.current_boss = Some(name.to_string());
+                return;
+            }
+            // Fall back to longest non-player name if no boss identified yet
+            if state
+                .current_boss
+                .as_ref()
+                .is_none_or(|b| name.len() > b.len())
+            {
+                state.current_boss = Some(name.to_string());
+            }
         }
     }
 
@@ -485,7 +483,7 @@ fn detect_boss_from_combat(trimmed: &str, data: &LogData, state: &mut ParseState
             || trimmed.contains("resisted")
         {
             for boss in parser::known_boss_names() {
-                if trimmed.contains(boss) {
+                if contains_word(trimmed, boss) {
                     state.current_boss = Some(boss.to_string());
                     return;
                 }
@@ -977,6 +975,25 @@ fn parse_loot_trade(trimmed: &str, timestamp: f64, data: &mut LogData) {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Check whether `name` appears in `line` as a whole word, not as a substring
+/// of a longer word (e.g. "Garr" should match "Garr hits" but not "Garrote").
+///
+/// Uses ASCII-aware boundary checks — characters adjacent to the match must be
+/// non-alphanumeric (or absent) for the match to count. Apostrophes and spaces
+/// are valid boundaries, so `"Garr 's Magma Shackles"` still matches.
+fn contains_word(line: &str, name: &str) -> bool {
+    let bytes = line.as_bytes();
+    for (idx, _) in line.match_indices(name) {
+        let before_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
+        let after_pos = idx + name.len();
+        let after_ok = after_pos >= bytes.len() || !bytes[after_pos].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
 /// Check if a GUID represents a player (starts with `0x0000000000`).
 fn is_player_guid(guid: &str) -> bool {
     guid.starts_with("0x0000000000")
@@ -1445,5 +1462,90 @@ mod tests {
             RE_DMG_SUFFER.captures(heal1).is_none(),
             "DMG_SUFFER must not match heal line"
         );
+    }
+
+    #[test]
+    fn test_contains_word_boundaries() {
+        // Exact match at various positions
+        assert!(contains_word("Garr hits Tank for 500.", "Garr"));
+        assert!(contains_word("Tank hits Garr for 500.", "Garr"));
+        assert!(contains_word("Garr", "Garr"));
+
+        // Apostrophe is a valid word boundary (possessive form)
+        assert!(contains_word(
+            "Garr 's Magma Shackles hits Tank for 100.",
+            "Garr"
+        ));
+
+        // Embedded in a longer word — must NOT match
+        assert!(!contains_word(
+            "Scamilla 's Garrote hits Ancient Core Hound for 166.",
+            "Garr"
+        ));
+        assert!(!contains_word(
+            "Ancient Core Hound suffers 166 Physical damage from Scamilla 's Garrote.",
+            "Garr"
+        ));
+
+        // Multi-word boss names
+        assert!(contains_word(
+            "Baron Geddon hits Tank for 3000 Fire damage.",
+            "Baron Geddon"
+        ));
+        assert!(contains_word(
+            "Tank suffers 500 Fire damage from Sulfuron Harbinger 's Shadow Word: Pain.",
+            "Sulfuron Harbinger"
+        ));
+    }
+
+    #[test]
+    fn test_garrote_does_not_create_garr_encounter() {
+        // A rogue using Garrote on trash should NOT create a "Garr" boss encounter.
+        // This is a regression test for the substring false-positive bug.
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Rogue&ROGUE&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 19:33:50.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 19:33:51.000  Rogue 's Garrote hits Ancient Core Hound for 166.".to_string(),
+            "1/27 19:33:54.000  Ancient Core Hound suffers 166 Physical damage from Rogue 's Garrote.".to_string(),
+            "1/27 19:33:57.000  Ancient Core Hound suffers 166 Physical damage from Rogue 's Garrote.".to_string(),
+            "1/27 19:34:01.000  UNIT_DIED:Ancient Core Hound:0xF130002F1900AA11".to_string(),
+            "1/27 19:34:02.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+        assert_eq!(data.encounters.len(), 1, "Should have 1 encounter");
+        let enc = &data.encounters[0];
+        assert_eq!(
+            enc.name.as_deref(),
+            Some("Ancient Core Hound"),
+            "Encounter should be named after the mob, not Garr"
+        );
+        assert!(
+            !enc.is_boss,
+            "Trash mob encounter should not be marked as boss"
+        );
+        assert!(!enc.is_kill, "Trash mob kill should not be a boss kill");
+    }
+
+    #[test]
+    fn test_garr_substring_scan_detects_real_garr() {
+        // When Garr actually appears in a resist/immune line (substring scan path),
+        // it should still be detected as the boss.
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 19:39:51.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 19:39:52.000  Garr 's Immolate was resisted by Tank.".to_string(),
+            // Wipe — no UNIT_DIED for boss
+            "1/27 19:42:55.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+        assert_eq!(data.encounters.len(), 1, "Should have 1 encounter");
+        let enc = &data.encounters[0];
+        assert_eq!(
+            enc.name.as_deref(),
+            Some("Garr"),
+            "Should detect Garr from resist line"
+        );
+        assert!(enc.is_boss, "Garr should be marked as boss");
+        assert!(!enc.is_kill, "Wipe should not be marked as kill");
     }
 }
