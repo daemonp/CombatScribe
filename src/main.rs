@@ -1,3 +1,4 @@
+mod config;
 mod formatter;
 mod log_data;
 mod log_parser;
@@ -22,6 +23,19 @@ fn main() -> iced::Result {
     // Quick benchmark mode: `combat-scribe --bench <file>`
     if args.len() >= 3 && args[1] == "--bench" {
         run_bench(&args[2]);
+        return Ok(());
+    }
+
+    // Debug session detection: `combat-scribe --debug-sessions <file>`
+    if args.len() >= 3 && args[1] == "--debug-sessions" {
+        run_debug_sessions(&args[2]);
+        return Ok(());
+    }
+
+    // Debug wipe detection: `combat-scribe --debug-wipes <file> [session#]`
+    if args.len() >= 3 && args[1] == "--debug-wipes" {
+        let session_num = args.get(3).and_then(|s| s.parse::<usize>().ok());
+        run_debug_wipes(&args[2], session_num);
         return Ok(());
     }
 
@@ -97,6 +111,184 @@ fn run_bench(path: &str) {
     eprintln!("Total: {total:.2?}");
 }
 
+/// Debug session detection — prints session boundaries, line ranges, and per-session parse results.
+#[allow(clippy::too_many_lines)] // diagnostic output needs many prints
+fn run_debug_sessions(path: &str) {
+    let file_path = std::path::Path::new(path);
+    eprintln!("Reading file...");
+    let content = if is_zip_file(file_path) {
+        let bytes = fs::read(path).expect("read zip file");
+        read_text_from_zip_bytes(&bytes).expect("extract txt from zip")
+    } else {
+        fs::read_to_string(path).expect("read file")
+    };
+    let lines: Vec<String> = content.lines().map(str::to_string).collect();
+    eprintln!("  {} total lines in file\n", lines.len());
+
+    let sessions = parser::detect_sessions(&lines);
+    eprintln!("Detected {} sessions:\n", sessions.len());
+
+    // Print session details
+    for (i, s) in sessions.iter().enumerate() {
+        eprintln!("  Session {}: \"{}\"", i + 1, s.name);
+        eprintln!(
+            "    Scan window: lines {}..{} ({} lines)",
+            s.start_line,
+            s.end_line,
+            s.end_line.saturating_sub(s.start_line) + 1
+        );
+        eprintln!(
+            "    Time: {:.0}..{:.0} ({:.0}s)",
+            s.start_time, s.end_time, s.duration_secs
+        );
+        eprintln!("    Combat count: {}", s.combat_count);
+        if !s.you_players.is_empty() {
+            eprintln!("    You: {}", s.you_players.join(", "));
+        }
+        eprintln!();
+    }
+
+    // Parse each session and show details
+    for (i, session) in sessions.iter().enumerate() {
+        eprintln!("--- Session {} parse details ---", i + 1);
+        let session_lines = parser::extract_session_lines(&lines, session, &sessions);
+        eprintln!("  Extracted {} lines", session_lines.len());
+
+        let (formatted, player_names) = formatter::format_log(session_lines);
+        eprintln!(
+            "  Formatted {} lines, players: [{}]",
+            formatted.len(),
+            player_names.join(", ")
+        );
+
+        let data = log_parser::parse_log(&formatted);
+        eprintln!("  Zone: \"{}\"", data.zone_name);
+        eprintln!(
+            "  Combatants: {} (all: {})",
+            data.combatants.len(),
+            data.all_combatants.len()
+        );
+        if let Some((in_combat, total)) = data.raid_size {
+            eprintln!("  PLAYERS_IN_COMBAT: {in_combat}/{total}");
+        }
+        eprintln!("  Encounters: {}", data.encounters.len());
+
+        for enc in &data.encounters {
+            if enc.is_boss {
+                let result = if enc.is_kill { "Kill" } else { "Wipe" };
+                let name = enc.name.as_deref().unwrap_or("Unknown");
+                let attempt = enc.attempt.map_or(String::new(), |a| format!(" #{a}"));
+                let zone = enc.zone.as_deref().unwrap_or("?");
+                eprintln!(
+                    "    {name} - {result}{attempt} - {:.0}s [zone: {zone}]",
+                    enc.duration
+                );
+            }
+        }
+        let boss_count = data.encounters.iter().filter(|e| e.is_boss).count();
+        let trash_count = data.encounters.iter().filter(|e| !e.is_boss).count();
+        eprintln!("  Boss encounters: {boss_count}, Trash: {trash_count}");
+        eprintln!();
+    }
+}
+
+/// Debug encounter/wipe detection for a specific session.
+///
+/// Usage: `combat-scribe --debug-wipes <file> [session#]`
+///
+/// If no session number is given, uses the first raid session.
+/// Shows every encounter with timestamps, gap to previous, boss detection
+/// method, and merge decisions.
+#[allow(clippy::too_many_lines)] // diagnostic output
+fn run_debug_wipes(path: &str, session_num: Option<usize>) {
+    let file_path = std::path::Path::new(path);
+    eprintln!("Reading file...");
+    let content = if is_zip_file(file_path) {
+        let bytes = fs::read(path).expect("read zip file");
+        read_text_from_zip_bytes(&bytes).expect("extract txt from zip")
+    } else {
+        fs::read_to_string(path).expect("read file")
+    };
+    let lines: Vec<String> = content.lines().map(str::to_string).collect();
+
+    let sessions = parser::detect_sessions(&lines);
+    if sessions.is_empty() {
+        eprintln!("No sessions found.");
+        return;
+    }
+
+    // Pick session: user-specified or first with boss encounters
+    let idx = session_num.map_or(0, |n| n.saturating_sub(1));
+    if idx >= sessions.len() {
+        eprintln!("Session {idx} not found (have {} sessions)", sessions.len());
+        return;
+    }
+    let session = &sessions[idx];
+    eprintln!("Analyzing session {}: \"{}\"\n", idx + 1, session.name,);
+
+    let session_lines = parser::extract_session_lines(&lines, session, &sessions);
+    let (formatted, _) = formatter::format_log(session_lines);
+    let data = log_parser::parse_log(&formatted);
+
+    eprintln!(
+        "Zone: \"{}\", {} encounters ({} boss, {} trash)\n",
+        data.zone_name,
+        data.encounters.len(),
+        data.encounters.iter().filter(|e| e.is_boss).count(),
+        data.encounters.iter().filter(|e| !e.is_boss).count(),
+    );
+
+    let mut prev_end: Option<f64> = None;
+    for (i, enc) in data.encounters.iter().enumerate() {
+        let gap = prev_end.map_or_else(
+            || "  (first)".to_string(),
+            |pe| format!("  gap: {:.0}s from prev", enc.start - pe),
+        );
+
+        let result = if enc.is_kill { "KILL" } else { "WIPE" };
+        let boss_tag = if enc.is_boss { " [BOSS]" } else { "" };
+        let name = enc.name.as_deref().unwrap_or("(unnamed)");
+        let zone = enc.zone.as_deref().unwrap_or("?");
+        let attempt = enc.attempt.map_or(String::new(), |a| format!(" #{a}"));
+
+        eprintln!("  {:>3}. {name} — {result}{attempt}{boss_tag}", i + 1,);
+        eprintln!(
+            "       duration: {:.0}s, start: {:.0}, end: {:.0}",
+            enc.duration, enc.start, enc.end,
+        );
+        eprintln!(
+            "       zone: {zone}, deaths: {}/{} active{gap}",
+            enc.player_deaths, enc.active_players
+        );
+
+        // Check if this encounter should have merged with the previous one
+        if let Some(pe) = prev_end {
+            let gap_secs = enc.start - pe;
+            if enc.is_boss && gap_secs < 60.0 {
+                // Check if the previous encounter was the same boss
+                if i > 0 {
+                    let prev = &data.encounters[i - 1];
+                    if prev.is_boss {
+                        let same = prev
+                            .name
+                            .as_ref()
+                            .zip(enc.name.as_ref())
+                            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
+                        if same {
+                            eprintln!(
+                                "       *** SHOULD MERGE with prev (same boss, {gap_secs:.0}s gap < 60s) ***"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        prev_end = Some(enc.end);
+        eprintln!();
+    }
+}
+
 // ── Application State ───────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -132,6 +324,7 @@ struct ExportOptions {
 #[allow(clippy::struct_excessive_bools)] // export options are independent toggles
 struct App {
     state: AppState,
+    config: config::AppConfig,
     file_path: Option<PathBuf>,
     file_name: String,
     lines: Arc<Vec<String>>,
@@ -153,6 +346,7 @@ impl App {
     fn new() -> Self {
         Self {
             state: AppState::Empty,
+            config: config::AppConfig::load(),
             file_path: None,
             file_name: String::new(),
             lines: Arc::new(Vec::new()),
@@ -173,17 +367,18 @@ impl App {
         let lines = Arc::clone(&self.lines);
         let sessions = self.sessions.clone();
         let selected_name = self.selected_session.clone();
-        let session_names = self.session_names.clone();
 
         Task::perform(
             async move {
-                // Find which session to extract
-                let lines_to_extract = selected_name
-                    .and_then(|sel| session_names.iter().position(|n| n == &sel))
-                    .map_or_else(
-                        || lines.as_ref().clone(),
-                        |idx| parser::extract_session_lines(&lines, &sessions[idx]),
-                    );
+                // Find the session matching the selected name.
+                // Session names are display strings (Session::to_string()),
+                // so match against all sessions regardless of filtering.
+                let session_idx = selected_name
+                    .and_then(|sel| sessions.iter().position(|s| s.to_string() == sel));
+                let lines_to_extract = session_idx.map_or_else(
+                    || lines.as_ref().clone(),
+                    |idx| parser::extract_session_lines(&lines, &sessions[idx], &sessions),
+                );
                 // Format lines (You/Your replacement, pet attribution,
                 // apostrophe normalization) before parsing
                 let (formatted_lines, _player_names) = formatter::format_log(lines_to_extract);
@@ -226,10 +421,16 @@ impl App {
     #[allow(clippy::too_many_lines)] // iced update pattern — one match arm per message
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::OpenFile => Task::perform(pick_file(), Message::FileSelected),
+            Message::OpenFile => {
+                let dir = self.config.last_directory.clone();
+                Task::perform(pick_file(dir), Message::FileSelected)
+            }
 
             Message::FileSelected(path) => match path {
                 Some(p) => {
+                    self.config.set_last_directory_from_file(&p);
+                    self.config.save();
+
                     self.file_name = p
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -260,13 +461,17 @@ impl App {
 
             Message::SessionsDetected(sessions) => {
                 self.sessions = sessions;
+                // Only show raid/instance sessions in the dropdown —
+                // overworld sessions (Orgrimmar, Stranglethorn Vale, etc.)
+                // are noise for a combat log viewer.
                 self.session_names = self
                     .sessions
                     .iter()
+                    .filter(|s| s.is_raid)
                     .map(std::string::ToString::to_string)
                     .collect();
 
-                // Auto-select first session (preferring raid sessions)
+                // Auto-select first raid session
                 if let Some(first) = self.session_names.first() {
                     self.selected_session = Some(first.clone());
                 }
@@ -330,7 +535,6 @@ impl App {
                 let lines = Arc::clone(&self.lines);
                 let sessions = self.sessions.clone();
                 let selected = self.selected_session.clone();
-                let session_names = self.session_names.clone();
                 let opts = ExportOptions {
                     file_path,
                     create_zip: self.create_zip,
@@ -339,15 +543,7 @@ impl App {
                 };
 
                 Task::perform(
-                    async move {
-                        do_export(
-                            &lines,
-                            &sessions,
-                            selected.as_deref(),
-                            &session_names,
-                            &opts,
-                        )
-                    },
+                    async move { do_export(&lines, &sessions, selected.as_deref(), &opts) },
                     Message::ExportComplete,
                 )
             }
@@ -362,7 +558,8 @@ impl App {
                 // Intercept viewer messages that need app-level handling
                 match viewer_msg {
                     viewer::ViewerMessage::LoadFile => {
-                        Task::perform(pick_file(), Message::FileSelected)
+                        let dir = self.config.last_directory.clone();
+                        Task::perform(pick_file(dir), Message::FileSelected)
                     }
                     viewer::ViewerMessage::ShowExport => {
                         self.show_export_modal = true;
@@ -741,15 +938,17 @@ fn primary_button_style(_theme: &iced::Theme, status: button::Status) -> button:
 
 // ── Async helpers ───────────────────────────────────────────────────────────
 
-async fn pick_file() -> Option<PathBuf> {
-    let file = rfd::AsyncFileDialog::new()
+async fn pick_file(start_dir: Option<PathBuf>) -> Option<PathBuf> {
+    let mut dialog = rfd::AsyncFileDialog::new()
         .add_filter("Combat Log", &["txt", "zip"])
         .add_filter("All Files", &["*"])
-        .set_title("Select WoW Combat Log")
-        .pick_file()
-        .await;
+        .set_title("Select WoW Combat Log");
 
-    file.map(|f| f.path().to_path_buf())
+    if let Some(dir) = start_dir {
+        dialog = dialog.set_directory(dir);
+    }
+
+    dialog.pick_file().await.map(|f| f.path().to_path_buf())
 }
 
 async fn load_file(path: PathBuf) -> Result<Arc<Vec<String>>, String> {
@@ -806,15 +1005,15 @@ fn do_export(
     all_lines: &[String],
     sessions: &[parser::Session],
     selected: Option<&str>,
-    session_names: &[String],
     opts: &ExportOptions,
 ) -> Result<DoneInfo, String> {
-    // Determine which lines to process
+    // Determine which lines to process.
+    // Match selected name against all sessions (not just filtered names).
     let lines_to_process = selected
-        .and_then(|sel| session_names.iter().position(|n| n == sel))
+        .and_then(|sel| sessions.iter().position(|s| s.to_string() == sel))
         .map_or_else(
             || all_lines.to_vec(),
-            |idx| parser::extract_session_lines(all_lines, &sessions[idx]),
+            |idx| parser::extract_session_lines(all_lines, &sessions[idx], sessions),
         );
 
     // Format the log (takes ownership, applies all replacements)

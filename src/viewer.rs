@@ -214,6 +214,8 @@ pub enum ViewerMessage {
     SetEventLogMode(EventLogMode),
     ToggleEventLogType(EventLogTypeKind),
     SetEventLogPlayer(String),
+    /// Copy the current event log contents to the system clipboard.
+    CopyEventLog,
     /// Request to load a new file (handled by App).
     LoadFile,
     /// Request to open the export modal (handled by App).
@@ -269,6 +271,7 @@ impl ViewerState {
 
     // ── Update ──────────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_lines)] // iced message dispatch — one arm per variant
     pub fn update(&mut self, message: ViewerMessage) -> iced::Task<ViewerMessage> {
         match message {
             ViewerMessage::SwitchTab(tab) => {
@@ -343,6 +346,28 @@ impl ViewerState {
                 }
             }
             ViewerMessage::SetEventLogPlayer(name) => self.event_log_player = name,
+            ViewerMessage::CopyEventLog => {
+                let player_filter = if self.event_log_player.is_empty() {
+                    None
+                } else {
+                    Some(self.event_log_player.as_str())
+                };
+                let text = build_timeline_event_log_text(
+                    &self.log_data,
+                    &self.encounter_filter,
+                    &self.event_log_types,
+                    self.event_log_mode,
+                    player_filter,
+                );
+                match arboard::Clipboard::new() {
+                    Ok(mut clipboard) => {
+                        if let Err(e) = clipboard.set_text(text) {
+                            eprintln!("Failed to set clipboard text: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to open clipboard: {e}"),
+                }
+            }
             ViewerMessage::TimelineClick(second) => {
                 self.timeline_clicked_second = Some(second);
                 // Snap the event log scrollable to the proportional position
@@ -1539,12 +1564,18 @@ impl ViewerState {
         .text_size(11)
         .padding(3);
 
+        let copy_btn = button(text("Copy").size(10).color(theme::TEXT_SECONDARY))
+            .on_press(ViewerMessage::CopyEventLog)
+            .padding([3, 10])
+            .style(transparent_button_style);
+
         let filter_bar = container(
             row![
                 mode_buttons,
                 type_toggles,
                 horizontal_space(),
-                player_picker
+                player_picker,
+                copy_btn,
             ]
             .spacing(12)
             .align_y(Center)
@@ -3491,6 +3522,107 @@ fn build_timeline_event_log<'a>(
     }
 
     col.width(Fill).into()
+}
+
+/// Build the event log as plain text for clipboard copy.
+///
+/// Mirrors the filtering logic of `build_timeline_event_log` but produces a
+/// newline-separated string instead of UI elements.
+fn build_timeline_event_log_text(
+    log_data: &LogData,
+    filter: &EncounterFilter,
+    type_filter: &EventLogTypeFilter,
+    mode: EventLogMode,
+    player_filter: Option<&str>,
+) -> String {
+    let encounters = log_data.selected_encounters(filter);
+    if encounters.is_empty() {
+        return String::new();
+    }
+
+    let death_windows: Vec<(f64, f64, &str)> = if mode == EventLogMode::DeathLog {
+        build_death_windows(log_data, &encounters)
+    } else {
+        Vec::new()
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut offset_base: f64 = 0.0;
+    let mut row_count: usize = 0;
+    let max_rows = 5000;
+    let mut last_death_label: Option<String> = None;
+
+    for enc in &encounters {
+        let enc_start = enc.start;
+        let enc_duration = enc.duration;
+
+        for entry in &log_data.entries {
+            let ts = entry.timestamp();
+            if ts < enc_start || ts > enc.end {
+                continue;
+            }
+
+            let relative = ts - enc_start + offset_base;
+
+            if !type_filter.accepts(entry) {
+                continue;
+            }
+
+            if let Some(player) = player_filter {
+                let involves_player =
+                    entry.source() == player || entry.target().is_some_and(|t| t == player);
+                if !involves_player {
+                    continue;
+                }
+            }
+
+            match mode {
+                EventLogMode::AllEvents => {}
+                EventLogMode::KeyEvents => {
+                    if !is_key_event(entry, &log_data.combatants) {
+                        continue;
+                    }
+                }
+                EventLogMode::DeathLog => {
+                    let in_window = death_windows.iter().find(|(start, end, player)| {
+                        ts >= *start
+                            && ts <= *end
+                            && (entry.source() == *player
+                                || entry.target().is_some_and(|t| t == *player))
+                    });
+                    if let Some((_, end_ts, dead_player)) = in_window {
+                        let death_label = format!(
+                            "{} — died at {}",
+                            dead_player,
+                            format_encounter_time(*end_ts - enc_start + offset_base)
+                        );
+                        if last_death_label.as_deref() != Some(&death_label) {
+                            if last_death_label.is_some() {
+                                lines.push(String::new());
+                            }
+                            lines.push(format!("--- {death_label} ---"));
+                            last_death_label = Some(death_label);
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+            }
+
+            let time_str = format_encounter_time(relative);
+            let (_color, label) = format_log_entry(entry);
+            lines.push(format!("{time_str}  {label}"));
+            row_count += 1;
+            if row_count >= max_rows {
+                lines.push(format!("... truncated at {max_rows} events"));
+                break;
+            }
+        }
+
+        offset_base += enc_duration;
+    }
+
+    lines.join("\n")
 }
 
 /// Format a `LogEntry` into a color + label string for display.

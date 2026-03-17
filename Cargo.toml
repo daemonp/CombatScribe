@@ -11,9 +11,13 @@ repository = "https://github.com/daemonp/CombatScribe"
 iced = { version = "0.13", features = ["tokio", "image", "canvas"] }
 rfd = "0.15"
 regex = "1"
+arboard = { version = "3", features = ["wayland-data-control"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["fs", "rt"] }
+dirs = "6"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
 
 # Windows-specific: hide console window in release builds
 [target.'cfg(windows)'.dependencies]

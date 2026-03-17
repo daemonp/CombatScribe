@@ -4,7 +4,7 @@
 //! a fully populated [`LogData`] structure.
 
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::log_data::{
@@ -60,31 +60,32 @@ static RE_CAST: LazyLock<Regex> = LazyLock::new(|| {
 
 static RE_DMG_SPELL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"([A-Za-z]+(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+) (?:hits|crits) ([A-Za-z\s']+) for (\d+)",
+        r"([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+) (?:hits|crits) ([A-Za-z\s']+) for (\d+)",
     )
     .unwrap()
 });
 
-static RE_DMG_AUTO: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"([A-Za-z]+) (?:hits|crits) ([A-Za-z\s']+) for (\d+)\.").unwrap());
+static RE_DMG_AUTO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"([A-Za-z]+(?:\s[A-Za-z]+)*) (?:hits|crits) ([A-Za-z\s']+) for (\d+)\.").unwrap()
+});
 
 static RE_DMG_SUFFER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"([A-Za-z\s']+) suffers (\d+) (?:\w+ )?damage from ([A-Za-z]+(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+)",
+        r"([A-Za-z\s']+) suffers (\d+) (?:\w+ )?damage from ([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+)",
     )
     .unwrap()
 });
 
 static RE_HEAL_SPELL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"([A-Za-z]+(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+) (?:heals|critically heals) ([A-Za-z\s']+) for (\d+)",
+        r"([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+) (?:heals|critically heals) ([A-Za-z\s']+) for (\d+)",
     )
     .unwrap()
 });
 
 static RE_HEAL_GAIN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"([A-Za-z]+) gains (\d+) health from ([A-Za-z]+(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+)",
+        r"([A-Za-z]+(?:\s[A-Za-z]+)*) gains (\d+) health from ([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+)",
     )
     .unwrap()
 });
@@ -136,13 +137,15 @@ struct ParseState {
     current_boss: Option<String>,
     current_boss_killed: bool,
     current_zone: Option<String>,
-    /// Timestamp of first `COMBATANT_INFO` sighting per player (for windowed filtering).
-    combatant_timestamps: HashMap<String, f64>,
     /// Per-combatant damage deficit for effective healing calculation.
     ///
     /// Every damage event increments the target's deficit; every heal is capped at
     /// `min(heal_amount, deficit)` to produce effective heal vs overheal.
     health_deficit: HashMap<String, u64>,
+    /// Players who died during the current encounter (unique names).
+    encounter_deaths: HashSet<String>,
+    /// Players who participated in the current encounter (dealt/took damage).
+    encounter_active: HashSet<String>,
 }
 
 /// Check if an `Option<String>` contains a known boss name.
@@ -162,8 +165,9 @@ pub fn parse_log(lines: &[String]) -> LogData {
         current_boss: None,
         current_boss_killed: false,
         current_zone: None,
-        combatant_timestamps: HashMap::new(),
         health_deficit: HashMap::new(),
+        encounter_deaths: HashSet::new(),
+        encounter_active: HashSet::new(),
     };
 
     for line in lines {
@@ -189,7 +193,7 @@ pub fn parse_log(lines: &[String]) -> LogData {
             || trimmed.contains("ZONE_INFO:")
             || trimmed.contains("PLAYERS_IN_COMBAT:")
         {
-            parse_metadata(trimmed, timestamp, &mut data, &mut state);
+            parse_metadata(trimmed, &mut data, &mut state);
             continue;
         }
 
@@ -241,6 +245,23 @@ pub fn parse_log(lines: &[String]) -> LogData {
             detect_boss_from_combat(trimmed, &data, &mut state);
         }
 
+        // Track active players for per-encounter scoreboard (wipe detection).
+        // Check the last entry added — if source or target is a known combatant
+        // (player), record them as active in this encounter.
+        if state.in_combat {
+            if let Some(entry) = data.entries.last() {
+                let src = entry.source();
+                if data.all_combatants.contains_key(src) {
+                    state.encounter_active.insert(src.to_string());
+                }
+                if let Some(tgt) = entry.target() {
+                    if data.all_combatants.contains_key(tgt) {
+                        state.encounter_active.insert(tgt.to_string());
+                    }
+                }
+            }
+        }
+
         // Avoidance: dodge/parry/miss keywords
         if trimmed.contains(" dodges.")
             || trimmed.contains(" parries.")
@@ -260,14 +281,14 @@ pub fn parse_log(lines: &[String]) -> LogData {
         }
     }
 
-    post_process(&mut data, &state.combatant_timestamps);
+    post_process(&mut data);
     data
 }
 
 // ── Line-Level Parse Helpers ────────────────────────────────────────────────
 
 /// Parse `COMBATANT_INFO`, `ZONE_INFO`, and `PLAYERS_IN_COMBAT` lines.
-fn parse_metadata(trimmed: &str, timestamp: f64, data: &mut LogData, state: &mut ParseState) {
+fn parse_metadata(trimmed: &str, data: &mut LogData, state: &mut ParseState) {
     if trimmed.contains("COMBATANT_INFO:") {
         if let Some(info) = parser::extract_combatant_full(trimmed) {
             let name_str = info.name.to_string();
@@ -285,13 +306,7 @@ fn parse_metadata(trimmed: &str, timestamp: f64, data: &mut LogData, state: &mut
                 pet_name: info.pet_name.map(str::to_string),
             };
             // Track ALL combatant sightings for full roster preservation
-            data.all_combatants
-                .insert(name_str.clone(), combatant.clone());
-            // Track first-seen timestamp for windowed filtering
-            state
-                .combatant_timestamps
-                .entry(name_str)
-                .or_insert(timestamp);
+            data.all_combatants.insert(name_str, combatant.clone());
         } else if let Some((name, class)) = parser::extract_combatant(trimmed) {
             // Fallback: minimal extraction if full parse fails
             let name_str = name.to_string();
@@ -299,12 +314,7 @@ fn parse_metadata(trimmed: &str, timestamp: f64, data: &mut LogData, state: &mut
                 class: class.to_string(),
                 ..Combatant::default()
             };
-            data.all_combatants
-                .insert(name_str.clone(), combatant.clone());
-            state
-                .combatant_timestamps
-                .entry(name_str)
-                .or_insert(timestamp);
+            data.all_combatants.insert(name_str, combatant.clone());
         }
     }
 
@@ -329,6 +339,8 @@ fn parse_combat_state(trimmed: &str, timestamp: f64, data: &mut LogData, state: 
     if trimmed.contains("PLAYER_REGEN_DISABLED") {
         state.in_combat = true;
         state.combat_start = Some(timestamp);
+        state.encounter_deaths.clear();
+        state.encounter_active.clear();
     }
 
     if trimmed.contains("PLAYER_REGEN_ENABLED") {
@@ -337,6 +349,10 @@ fn parse_combat_state(trimmed: &str, timestamp: f64, data: &mut LogData, state: 
                 let duration = timestamp - start;
                 if duration > 5.0 {
                     let is_boss = has_known_boss(state.current_boss.as_ref());
+                    #[allow(clippy::cast_possible_truncation)] // encounter won't have 4B players
+                    let player_deaths = state.encounter_deaths.len() as u32;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let active_players = state.encounter_active.len() as u32;
                     data.encounters.push(Encounter {
                         name: state.current_boss.clone(),
                         start,
@@ -346,10 +362,14 @@ fn parse_combat_state(trimmed: &str, timestamp: f64, data: &mut LogData, state: 
                         is_kill: is_boss && state.current_boss_killed,
                         zone: state.current_zone.clone(),
                         attempt: None,
+                        player_deaths,
+                        active_players,
                     });
                 }
                 state.current_boss = None;
                 state.current_boss_killed = false;
+                state.encounter_deaths.clear();
+                state.encounter_active.clear();
             }
         }
         state.in_combat = false;
@@ -385,6 +405,10 @@ fn parse_unit_died(trimmed: &str, timestamp: f64, data: &mut LogData, state: &mu
             timestamp,
             player: dead_unit.to_string(),
         });
+        // Track per-encounter player deaths for wipe detection
+        if state.in_combat {
+            state.encounter_deaths.insert(dead_unit.to_string());
+        }
     } else if !data.all_combatants.contains_key(dead_unit) && dead_unit != "Unknown" {
         if parser::is_known_boss(dead_unit) {
             if state.in_combat {
@@ -493,11 +517,18 @@ fn detect_boss_from_combat(trimmed: &str, data: &LogData, state: &mut ParseState
         {
             // Boss names from raid_data are lowercased; lowercase the line for matching.
             let line_lower = trimmed.to_lowercase();
-            for boss in parser::known_boss_names() {
+
+            // Prefer zone-constrained boss list when we know the current zone.
+            // This prevents false positives like "Knight" (Upper Karazhan) matching
+            // "Necro Knight" combat lines in Naxxramas.
+            let zone_bosses = parser::bosses_for_zone(state.current_zone.as_deref());
+            let boss_list: &[&str] = zone_bosses.as_deref().unwrap_or(parser::known_boss_names());
+
+            for boss in boss_list {
                 if contains_word(&line_lower, boss) {
-                    // Store the boss name as-is (lowercased) — `is_known_boss` is
-                    // case-insensitive so downstream checks will still work.
-                    state.current_boss = Some(boss.to_string());
+                    // Title-case for consistent display with other code paths
+                    // that preserve original log casing (e.g. UNIT_DIED).
+                    state.current_boss = Some(title_case(boss));
                     return;
                 }
             }
@@ -1158,6 +1189,20 @@ fn is_player_guid(guid: &str) -> bool {
     guid.starts_with("0x0000000000")
 }
 
+/// Title-case a name (e.g. `"hakkar"` → `"Hakkar"`, `"high priest thekal"` → `"High Priest Thekal"`).
+fn title_case(s: &str) -> String {
+    s.split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            chars.next().map_or_else(String::new, |c| {
+                let upper: String = c.to_uppercase().collect();
+                format!("{upper}{}", chars.as_str())
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Record absorbed damage on a player target.
 fn record_absorb(data: &mut LogData, target: &str, absorbed_amount: u64) {
     if absorbed_amount > 0 && data.all_combatants.contains_key(target) {
@@ -1254,8 +1299,15 @@ fn add_healing(
 }
 
 /// Post-process: assign bosses to loot, link trades, number encounter attempts,
-/// and build windowed combatant roster.
-fn post_process(data: &mut LogData, combatant_timestamps: &HashMap<String, f64>) {
+/// and build filtered combatant roster.
+fn post_process(data: &mut LogData) {
+    // Merge fragmented boss encounters.
+    // Boss abilities like Hakkar's Mind Control cause brief combat drops
+    // (PLAYER_REGEN_ENABLED → PLAYER_REGEN_DISABLED) mid-fight, creating
+    // spurious short encounters.  Merge consecutive boss encounters for the
+    // same boss when the gap is < 60 seconds.
+    merge_boss_encounters(&mut data.encounters);
+
     // Assign bosses to loot (within 2 minutes after encounter end)
     for loot in &mut data.loot {
         let mut boss = "Trash/Other".to_string();
@@ -1282,42 +1334,120 @@ fn post_process(data: &mut LogData, combatant_timestamps: &HashMap<String, f64>)
         }
     }
 
-    // Number encounter attempts
+    // Downgrade combat-drop encounters to non-boss.
+    // Boss abilities (e.g. Hakkar's Mind Control) can cause brief combat drops
+    // where nobody dies.  These are not real wipe attempts — they're just
+    // the boss resetting or a phase transition.  A real wipe requires at
+    // least ~50% of active players to die (accounting for DI/soulstone/ankh).
+    for enc in &mut data.encounters {
+        if enc.is_boss && !enc.is_kill && enc.active_players > 0 {
+            #[allow(clippy::cast_precision_loss)] // small player counts
+            let death_ratio = f64::from(enc.player_deaths) / f64::from(enc.active_players);
+            if death_ratio < WIPE_DEATH_THRESHOLD {
+                // Not enough deaths to be a real wipe — demote to trash
+                enc.is_boss = false;
+            }
+        }
+    }
+
+    // Number encounter attempts (case-insensitive boss name matching)
     let mut boss_attempts: HashMap<String, usize> = HashMap::new();
     for enc in &mut data.encounters {
         if enc.is_boss {
             if let Some(name) = &enc.name {
-                let count = boss_attempts.entry(name.clone()).or_insert(0);
+                let key = name.to_lowercase();
+                let count = boss_attempts.entry(key).or_insert(0);
                 *count += 1;
                 enc.attempt = Some(*count);
             }
         }
     }
 
-    // Build filtered combatants using windowed heuristic.
+    // Build filtered combatants from encounter participation.
     // COMBATANT_INFO fires for ALL nearby players (cities, open world), not just
-    // raid/party members.  Use a "raid window" to filter:
-    //   - 5 minutes before first encounter start → last encounter end
-    //   - Plus any player who appears in player_stats (dealt/took damage, healed)
-    let raid_window = build_raid_window(&data.encounters);
+    // raid/party members.  A time-window heuristic pulls in too many bystanders
+    // (e.g. 276 "players" in a 40-man raid).  Instead, require actual combat
+    // participation: the player must appear in player_stats (dealt/took damage
+    // or healed during an encounter).
     for (name, combatant) in &data.all_combatants {
-        let in_window = combatant_timestamps
-            .get(name)
-            .is_some_and(|&ts| raid_window.as_ref().is_some_and(|w| ts >= w.0 && ts <= w.1));
-        let in_combat = data.player_stats.contains_key(name);
-        if in_window || in_combat {
+        if data.player_stats.contains_key(name) {
             data.combatants.insert(name.clone(), combatant.clone());
         }
     }
 }
 
-/// Compute the raid window: 5 min before first encounter start → last encounter end.
-/// Returns `None` if there are no encounters.
-fn build_raid_window(encounters: &[Encounter]) -> Option<(f64, f64)> {
-    let first_start = encounters.iter().map(|e| e.start).reduce(f64::min)?;
-    let last_end = encounters.iter().map(|e| e.end).reduce(f64::max)?;
-    // 5 minutes = 300 seconds before first encounter
-    Some((first_start - 300.0, last_end))
+/// Maximum gap (seconds) between consecutive boss encounters to be merged.
+///
+/// Boss abilities like Mind Control can cause brief combat drops mid-fight.
+/// 60 seconds covers all known cases while avoiding merging genuinely separate
+/// attempts (wipe recovery + re-pull typically takes > 60 seconds).
+const ENCOUNTER_MERGE_GAP: f64 = 60.0;
+
+/// Minimum death ratio to consider a non-kill boss encounter a real wipe.
+///
+/// If fewer than this fraction of active players died, the encounter is
+/// treated as a combat drop / boss reset rather than a genuine wipe attempt.
+/// Set to 0.5 (50%) to account for Divine Intervention, soulstone, and ankh
+/// survivors — a real wipe will kill most of the raid even with 1-3 survivors.
+const WIPE_DEATH_THRESHOLD: f64 = 0.5;
+
+/// Merge consecutive boss encounters for the same boss that are close together.
+///
+/// When a boss ability (e.g. Hakkar's Mind Control) causes a brief combat drop,
+/// the parse loop creates multiple short encounters for what is actually a single
+/// fight.  This function collapses those fragments into one encounter spanning
+/// from the first fragment's start to the last fragment's end.
+fn merge_boss_encounters(encounters: &mut Vec<Encounter>) {
+    if encounters.len() < 2 {
+        return;
+    }
+
+    let mut merged: Vec<Encounter> = Vec::with_capacity(encounters.len());
+
+    for enc in encounters.drain(..) {
+        let should_merge = enc.is_boss
+            && enc.name.is_some()
+            && merged.last().is_some_and(|prev: &Encounter| {
+                prev.is_boss
+                    && prev.name.is_some()
+                    && same_boss_name(prev.name.as_deref(), enc.name.as_deref())
+                    && (enc.start - prev.end) < ENCOUNTER_MERGE_GAP
+            });
+
+        if should_merge {
+            // Merge into the previous encounter
+            let prev = merged
+                .last_mut()
+                .expect("should_merge guarantees a previous element");
+            prev.end = enc.end;
+            prev.duration = prev.end - prev.start;
+            // Kill trumps wipe: if any fragment is a kill, the merged encounter is a kill
+            if enc.is_kill {
+                prev.is_kill = true;
+            }
+            // Accumulate death/active counts across merged segments
+            prev.player_deaths += enc.player_deaths;
+            prev.active_players = prev.active_players.max(enc.active_players);
+            // Prefer the title-cased name (from UNIT_DIED) over lowercase
+            if let Some(name) = &enc.name {
+                if name.chars().next().is_some_and(char::is_uppercase) {
+                    prev.name = Some(name.clone());
+                }
+            }
+        } else {
+            merged.push(enc);
+        }
+    }
+
+    *encounters = merged;
+}
+
+/// Case-insensitive boss name comparison.
+fn same_boss_name(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
 }
 
 /// Parse consumable usage from V1 `"uses"` lines.
@@ -1523,14 +1653,15 @@ mod tests {
 
     #[test]
     fn test_boss_detection_from_combat_lines() {
-        // Simulate a wipe: boss is fought but never dies
+        // Simulate a wipe: boss is fought, player dies, boss does not die
         let lines: Vec<String> = vec![
             "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Acedica&PALADIN&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
             "1/27 20:45:19.000  PLAYER_REGEN_DISABLED".to_string(),
             "1/27 20:45:21.000  Acedica 's Holy Shield hits Chromaggus for 125 Holy damage.".to_string(),
             "1/27 20:45:22.000  Chromaggus hits Acedica for 1245.".to_string(),
             "1/27 20:45:23.000  Acedica hits Chromaggus for 113.".to_string(),
-            // Wipe — no UNIT_DIED for boss
+            // Player dies — real wipe
+            "1/27 20:48:12.000  UNIT_DIED:Acedica:0x0000000000000001".to_string(),
             "1/27 20:48:13.000  PLAYER_REGEN_ENABLED".to_string(),
             // Second attempt — kill
             "1/27 20:54:56.000  PLAYER_REGEN_DISABLED".to_string(),
@@ -1713,11 +1844,78 @@ mod tests {
         let enc = &data.encounters[0];
         assert_eq!(
             enc.name.as_deref(),
-            Some("garr"),
-            "Should detect Garr from resist line (lowercased from raid_data)"
+            Some("Garr"),
+            "Should detect Garr from resist line (title-cased for consistent display)"
         );
         assert!(enc.is_boss, "Garr should be marked as boss");
         assert!(!enc.is_kill, "Wipe should not be marked as kill");
+    }
+
+    // ── Encounter Merging Tests ────────────────────────────────────
+
+    #[test]
+    fn test_boss_encounter_merge_mc_combat_drop() {
+        // Simulate Hakkar's Mind Control causing a brief combat drop mid-fight.
+        // Three combat windows within 60s of each other should merge into one encounter.
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            // Segment 1: initial pull
+            "1/27 20:00:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:00:05.000  Hakkar 's Blood Bolt hits Tank for 800.".to_string(),
+            "1/27 20:00:39.000  PLAYER_REGEN_ENABLED".to_string(),
+            // MC causes brief drop — gap < 60s
+            // Segment 2: combat resumes after MC
+            "1/27 20:00:54.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:01:10.000  Hakkar 's Blood Bolt hits Tank for 900.".to_string(),
+            "1/27 20:01:37.000  PLAYER_REGEN_ENABLED".to_string(),
+            // Another MC — gap < 60s
+            // Segment 3: final segment with boss kill
+            "1/27 20:01:52.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:02:20.000  Hakkar 's Blood Bolt hits Tank for 700.".to_string(),
+            "1/27 20:02:23.000  UNIT_DIED:Hakkar:0xF130003A6C000001".to_string(),
+            "1/27 20:02:23.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+        assert_eq!(
+            data.encounters.len(),
+            1,
+            "Three short combat windows should merge into 1 encounter"
+        );
+        let enc = &data.encounters[0];
+        assert_eq!(enc.name.as_deref(), Some("Hakkar"));
+        assert!(enc.is_boss, "Should be a boss encounter");
+        assert!(enc.is_kill, "Should be a kill (boss died in segment 3)");
+        // Duration spans from first segment start to last segment end
+        assert!(
+            enc.duration > 120.0,
+            "Merged duration should span all three segments"
+        );
+    }
+
+    #[test]
+    fn test_boss_encounters_not_merged_when_far_apart() {
+        // Two boss encounters > 60s apart should NOT merge (separate pulls).
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            // Attempt 1 (wipe)
+            "1/27 20:00:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:00:05.000  Hakkar 's Blood Bolt hits Tank for 800.".to_string(),
+            "1/27 20:02:00.000  PLAYER_REGEN_ENABLED".to_string(),
+            // 2 minute gap (> 60s) — separate pull
+            // Attempt 2 (kill)
+            "1/27 20:04:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:04:05.000  Hakkar 's Blood Bolt hits Tank for 900.".to_string(),
+            "1/27 20:05:23.000  UNIT_DIED:Hakkar:0xF130003A6C000001".to_string(),
+            "1/27 20:05:23.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+        assert_eq!(
+            data.encounters.len(),
+            2,
+            "Encounters > 60s apart should stay separate"
+        );
+        assert!(!data.encounters[0].is_kill, "First should be a wipe");
+        assert!(data.encounters[1].is_kill, "Second should be a kill");
     }
 
     // ── Effective Healing Tests ─────────────────────────────────────

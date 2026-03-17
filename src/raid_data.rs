@@ -75,6 +75,7 @@ pub(crate) fn normalize_zone(zone: &str) -> String {
 }
 
 /// Check if a zone is a known non-raid overworld zone.
+#[allow(dead_code)] // Available for session detection refinement
 pub(crate) fn is_overworld_zone(zone: &str) -> bool {
     let lower = zone.to_lowercase();
     OVERWORLD_ZONES.binary_search(&&*lower).is_ok()
@@ -102,6 +103,26 @@ pub(crate) fn instance_from_bosses(boss_kills: &[String]) -> Option<&'static str
 /// these are lowercased) for substring scanning in combat lines.
 pub(crate) fn all_boss_names() -> &'static [&'static str] {
     ALL_BOSSES
+}
+
+/// Return boss names that belong to a specific raid zone.
+///
+/// If `zone` is `None` or doesn't match any raid, returns `None` so the
+/// caller can fall back to the full boss list.
+pub(crate) fn bosses_for_zone(zone: Option<&str>) -> Option<Vec<&'static str>> {
+    let zone_lower = zone?.to_lowercase();
+    // Also resolve aliases so "ahn'qiraj temple" matches "temple of ahn'qiraj", etc.
+    let canonical = normalize_zone(&zone_lower);
+    let bosses: Vec<&'static str> = BOSS_TO_RAID
+        .iter()
+        .filter(|(_, raid)| raid.to_lowercase() == canonical || raid.to_lowercase() == zone_lower)
+        .map(|(boss, _)| *boss)
+        .collect();
+    if bosses.is_empty() {
+        None
+    } else {
+        Some(bosses)
+    }
 }
 
 /// Title-case a zone name for display (e.g. `"molten core"` → `"Molten Core"`).

@@ -177,6 +177,7 @@ fn main() {
         "/// Non-raid overworld zones that should never be treated as raid instances."
     )
     .unwrap();
+    writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "pub(crate) static OVERWORLD_ZONES: &[&str] = &[").unwrap();
     for z in &overworld {
         writeln!(out, "    {},", quote(z)).unwrap();

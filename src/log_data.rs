@@ -174,6 +174,10 @@ pub struct Encounter {
     pub is_kill: bool,
     pub zone: Option<String>,
     pub attempt: Option<usize>,
+    /// Number of unique players who died during this encounter.
+    pub player_deaths: u32,
+    /// Number of unique players active (dealt/took damage) during this encounter.
+    pub active_players: u32,
 }
 
 #[derive(Debug, Clone, Default)]
