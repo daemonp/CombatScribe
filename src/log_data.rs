@@ -349,8 +349,10 @@ pub struct TimelineBucket {
     pub damage: u64,
     /// Total raid damage taken this second.
     pub damage_taken: u64,
-    /// Total raid healing done this second.
+    /// Total raid healing done this second (player-to-player only).
     pub healing: u64,
+    /// Total healing done to bosses/enemies this second (e.g. Shadow of Ebonroc, Blood Siphon).
+    pub boss_healing: u64,
     /// Number of raid members alive at end of this second.
     pub alive_count: u32,
 }
@@ -386,6 +388,8 @@ pub struct TimelineData {
     pub max_dtps: u64,
     /// Peak HPS across all buckets.
     pub max_hps: u64,
+    /// Peak boss/enemy HPS across all buckets.
+    pub max_boss_hps: u64,
     /// Total encounter duration in seconds.
     pub duration: f64,
     /// Total raid member count at start.
@@ -398,6 +402,7 @@ pub enum TimelineSeriesKind {
     Dps,
     Dtps,
     Hps,
+    BossHeal,
     Death,
     BigHit,
     Alive,
@@ -410,6 +415,7 @@ pub struct TimelineVisibility {
     pub show_dps: bool,
     pub show_dtps: bool,
     pub show_hps: bool,
+    pub show_boss_heals: bool,
     pub show_deaths: bool,
     pub show_big_hits: bool,
     pub show_alive: bool,
@@ -421,6 +427,7 @@ impl Default for TimelineVisibility {
             show_dps: true,
             show_dtps: true,
             show_hps: true,
+            show_boss_heals: true,
             show_deaths: true,
             show_big_hits: true,
             show_alive: true,
@@ -435,6 +442,7 @@ impl TimelineVisibility {
             TimelineSeriesKind::Dps => self.show_dps = !self.show_dps,
             TimelineSeriesKind::Dtps => self.show_dtps = !self.show_dtps,
             TimelineSeriesKind::Hps => self.show_hps = !self.show_hps,
+            TimelineSeriesKind::BossHeal => self.show_boss_heals = !self.show_boss_heals,
             TimelineSeriesKind::Death => self.show_deaths = !self.show_deaths,
             TimelineSeriesKind::BigHit => self.show_big_hits = !self.show_big_hits,
             TimelineSeriesKind::Alive => self.show_alive = !self.show_alive,
@@ -839,11 +847,18 @@ impl LogData {
                     }
                     LogEntry::Healing {
                         source,
+                        target,
                         effective_heal,
                         ..
                     } => {
                         if self.combatants.contains_key(source.as_str()) {
-                            buckets[bucket_idx].healing += effective_heal;
+                            if self.combatants.contains_key(target.as_str()) {
+                                buckets[bucket_idx].healing += effective_heal;
+                            } else if !is_pet_target(target, &self.combatants) {
+                                buckets[bucket_idx].boss_healing += effective_heal;
+                            }
+                            // Pet heals (player healing their own pet) are dropped
+                            // from both sparklines.
                         }
                     }
                     LogEntry::Death { player, .. } => {
@@ -915,6 +930,7 @@ impl LogData {
         let max_dps = buckets.iter().map(|b| b.damage).max().unwrap_or(0);
         let max_dtps = buckets.iter().map(|b| b.damage_taken).max().unwrap_or(0);
         let max_hps = buckets.iter().map(|b| b.healing).max().unwrap_or(0);
+        let max_boss_hps = buckets.iter().map(|b| b.boss_healing).max().unwrap_or(0);
 
         TimelineData {
             buckets,
@@ -922,8 +938,28 @@ impl LogData {
             max_dps,
             max_dtps,
             max_hps,
+            max_boss_hps,
             duration: total_duration,
             raid_count,
         }
     }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Check if a heal target is a player's pet (e.g. `"Nymeria (Phair)"`).
+///
+/// Returns `true` when the parenthesized name is a known combatant whose
+/// `pet_name` matches the name before the parentheses.  This lets us
+/// distinguish pet heals (dropped from sparklines) from MC'd-mob heals
+/// (counted as boss/enemy healing).
+fn is_pet_target(target: &str, combatants: &HashMap<String, Combatant>) -> bool {
+    if let Some(paren_start) = target.find('(') {
+        let owner = target[paren_start + 1..].trim_end_matches(')').trim();
+        let pet_part = target[..paren_start].trim();
+        if let Some(combatant) = combatants.get(owner) {
+            return combatant.pet_name.as_deref() == Some(pet_part);
+        }
+    }
+    false
 }

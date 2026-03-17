@@ -78,14 +78,14 @@ static RE_DMG_SUFFER: LazyLock<Regex> = LazyLock::new(|| {
 
 static RE_HEAL_SPELL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+) (?:heals|critically heals) ([A-Za-z\s']+) for (\d+)",
+        r"([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+) (?:heals|critically heals) ([A-Za-z\s']+(?:\s*\([^)]+\))?) for (\d+)",
     )
     .unwrap()
 });
 
 static RE_HEAL_GAIN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"([A-Za-z]+(?:\s[A-Za-z]+)*) gains (\d+) health from ([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+)",
+        r"([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) gains (\d+) health from ([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+)",
     )
     .unwrap()
 });
@@ -928,6 +928,11 @@ fn compute_effective_heal(
 }
 
 /// Parse both healing event formats.
+///
+/// Only updates `player_stats` (via `add_healing`) when the heal target is a
+/// known player (`all_combatants`).  Boss-targeted heals (Shadow of Ebonroc,
+/// Blood Siphon, etc.) are still stored as `LogEntry::Healing` for the timeline
+/// but excluded from the player's healing totals.
 fn parse_healing_events(
     trimmed: &str,
     timestamp: f64,
@@ -957,15 +962,20 @@ fn parse_healing_events(
         }
 
         let (effective_heal, overheal) = compute_effective_heal(health_deficit, &target, amount);
-        add_healing(
-            data,
-            &source,
-            &spell,
-            amount,
-            effective_heal,
-            overheal,
-            is_heal_crit,
-        );
+        // Only credit player stats when the target is a known player.
+        // Boss/NPC/pet targets are still recorded as LogEntry::Healing for the
+        // timeline sparkline but excluded from the healer's stats.
+        if data.all_combatants.contains_key(target.as_str()) {
+            add_healing(
+                data,
+                &source,
+                &spell,
+                amount,
+                effective_heal,
+                overheal,
+                is_heal_crit,
+            );
+        }
         data.entries.push(LogEntry::Healing {
             timestamp,
             source,
@@ -996,15 +1006,17 @@ fn parse_healing_events(
         };
 
         let (effective_heal, overheal) = compute_effective_heal(health_deficit, &target, amount);
-        add_healing(
-            data,
-            &source,
-            &spell,
-            amount,
-            effective_heal,
-            overheal,
-            false,
-        );
+        if data.all_combatants.contains_key(target.as_str()) {
+            add_healing(
+                data,
+                &source,
+                &spell,
+                amount,
+                effective_heal,
+                overheal,
+                false,
+            );
+        }
         data.entries.push(LogEntry::Healing {
             timestamp,
             source,

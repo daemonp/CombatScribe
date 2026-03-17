@@ -123,6 +123,14 @@ pub const TIMELINE_HPS: Color = Color {
     a: 1.0,
 };
 
+/// Boss/enemy heal line/area color (purple/magenta).
+pub const TIMELINE_BOSS_HEAL: Color = Color {
+    r: 0.75,
+    g: 0.3,
+    b: 0.85,
+    a: 1.0,
+};
+
 /// Death marker color (bright red).
 pub const TIMELINE_DEATH: Color = Color {
     r: 1.0,

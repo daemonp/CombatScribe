@@ -1297,6 +1297,12 @@ impl ViewerState {
                 TimelineSeriesKind::Hps,
             ),
             legend_toggle(
+                theme::TIMELINE_BOSS_HEAL,
+                "Boss Heals",
+                vis.show_boss_heals,
+                TimelineSeriesKind::BossHeal,
+            ),
+            legend_toggle(
                 theme::TIMELINE_DEATH,
                 "Death",
                 vis.show_deaths,
@@ -1372,6 +1378,12 @@ impl ViewerState {
                 }
                 if vis.show_hps {
                     parts.push(format!("HPS: {}", theme::format_number(bucket.healing)));
+                }
+                if vis.show_boss_heals && bucket.boss_healing > 0 {
+                    parts.push(format!(
+                        "Boss HPS: {}",
+                        theme::format_number(bucket.boss_healing)
+                    ));
                 }
                 if vis.show_alive {
                     parts.push(format!("Alive: {}", bucket.alive_count));
@@ -2978,7 +2990,12 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
         let x_scale = w / n.max(1) as f32;
 
         // Compute Y-axis maximums
-        let shared_max = td.max_dps.max(td.max_dtps).max(td.max_hps).max(1) as f32;
+        let shared_max = td
+            .max_dps
+            .max(td.max_dtps)
+            .max(td.max_hps)
+            .max(td.max_boss_hps)
+            .max(1) as f32;
         let dps_max = if self.shared_y {
             shared_max
         } else {
@@ -2994,8 +3011,13 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
         } else {
             td.max_hps.max(1) as f32
         };
+        let boss_hps_max = if self.shared_y {
+            shared_max
+        } else {
+            td.max_boss_hps.max(1) as f32
+        };
 
-        // Draw series in back-to-front order: DPS (behind), HPS, DTPS (front).
+        // Draw series in back-to-front order: DPS, Boss Heals, HPS, DTPS (front).
         // Each call is explicit to avoid a complex generic tuple array.
         if vis.show_dps {
             draw_sparkline_area(
@@ -3006,6 +3028,17 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
                 h,
                 dps_max,
                 theme::TIMELINE_DPS,
+            );
+        }
+        if vis.show_boss_heals {
+            draw_sparkline_area(
+                &mut frame,
+                &td.buckets,
+                &|b| b.boss_healing,
+                x_scale,
+                h,
+                boss_hps_max,
+                theme::TIMELINE_BOSS_HEAL,
             );
         }
         if vis.show_hps {
@@ -3091,6 +3124,9 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
             }
             if vis.show_hps {
                 m = m.max(td.max_hps);
+            }
+            if vis.show_boss_heals {
+                m = m.max(td.max_boss_hps);
             }
             m.max(1)
         };
