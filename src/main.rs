@@ -38,10 +38,7 @@ fn main() -> iced::Result {
             let app = App::new();
             if let Some(path) = initial_file {
                 let p = path.clone();
-                (
-                    app,
-                    Task::done(Message::FileSelected(Some(p))),
-                )
+                (app, Task::done(Message::FileSelected(Some(p))))
             } else {
                 (app, Task::none())
             }
@@ -739,11 +736,7 @@ fn read_text_from_zip_bytes(bytes: &[u8]) -> Result<String, String> {
         .find(|&i| {
             archive
                 .by_index(i)
-                .is_ok_and(|f| {
-                    f.name()
-                        .to_lowercase()
-                        .ends_with(".txt")
-                })
+                .is_ok_and(|f| f.name().to_lowercase().ends_with(".txt"))
         })
         .ok_or_else(|| "No .txt file found inside zip archive".to_string())?;
 
