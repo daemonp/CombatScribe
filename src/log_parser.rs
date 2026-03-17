@@ -119,6 +119,8 @@ static RE_PET_OWNER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([A-Za-z]+)\s+\(([A-Za-z]+)\)").unwrap());
 
 static RE_ABSORB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((\d+) absorbed\)").unwrap());
+static RE_RESISTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((\d+) resisted\)").unwrap());
+static RE_BLOCKED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\((\d+) blocked\)").unwrap());
 
 /// V1 consumable line: `PlayerName uses ConsumableName.` or `...on Target.`
 static RE_CONSUMABLE: LazyLock<Regex> = LazyLock::new(|| {
@@ -136,6 +138,11 @@ struct ParseState {
     current_zone: Option<String>,
     /// Timestamp of first `COMBATANT_INFO` sighting per player (for windowed filtering).
     combatant_timestamps: HashMap<String, f64>,
+    /// Per-combatant damage deficit for effective healing calculation.
+    ///
+    /// Every damage event increments the target's deficit; every heal is capped at
+    /// `min(heal_amount, deficit)` to produce effective heal vs overheal.
+    health_deficit: HashMap<String, u64>,
 }
 
 /// Check if an `Option<String>` contains a known boss name.
@@ -156,6 +163,7 @@ pub fn parse_log(lines: &[String]) -> LogData {
         current_boss_killed: false,
         current_zone: None,
         combatant_timestamps: HashMap::new(),
+        health_deficit: HashMap::new(),
     };
 
     for line in lines {
@@ -219,12 +227,12 @@ pub fn parse_log(lines: &[String]) -> LogData {
         // Damage: must contain " for " (hits X for N, crits X for N, suffers N from)
         // or " suffers " (suffer format)
         if trimmed.contains(" for ") || trimmed.contains(" suffers ") {
-            parse_damage_events(trimmed, timestamp, &mut data);
+            parse_damage_events(trimmed, timestamp, &mut data, &mut state.health_deficit);
         }
 
         // Healing: "heals" or "health from"
         if trimmed.contains("heals ") || trimmed.contains(" health from ") {
-            parse_healing_events(trimmed, timestamp, &mut data);
+            parse_healing_events(trimmed, timestamp, &mut data, &mut state.health_deficit);
         }
 
         // Boss detection from combat lines (during active combat only)
@@ -627,6 +635,61 @@ fn parse_absorbed(trimmed: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Extract resisted amount from the `(N resisted)` trailer on damage lines.
+fn parse_resisted(trimmed: &str) -> u64 {
+    RE_RESISTED
+        .captures(trimmed)
+        .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Extract blocked amount from the `(N blocked)` trailer on damage lines.
+fn parse_blocked(trimmed: &str) -> u64 {
+    RE_BLOCKED
+        .captures(trimmed)
+        .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Parsed mitigation trailer data from parenthesized suffixes on damage lines.
+///
+/// Extracts `(N absorbed)`, `(N resisted)`, `(N blocked)`, `(glancing)`, `(crushing)`
+/// from lines like: `Boss hits Tank for 5000. (1500 resisted) (200 blocked) (glancing)`
+struct TrailerData {
+    absorbed: u64,
+    resisted: u64,
+    blocked: u64,
+    is_glancing: bool,
+    is_crushing: bool,
+}
+
+/// Parse all mitigation data from the trailer portion of a damage line.
+fn parse_trailer(trimmed: &str) -> TrailerData {
+    TrailerData {
+        absorbed: parse_absorbed(trimmed),
+        resisted: parse_resisted(trimmed),
+        blocked: parse_blocked(trimmed),
+        is_glancing: trimmed.contains("(glancing)"),
+        is_crushing: trimmed.contains("(crushing)"),
+    }
+}
+
+/// Extract the damage school word from a damage line.
+///
+/// Vanilla `WoW` damage lines include the school as `"for N School damage"`, e.g.:
+/// `"Ragnaros hits Tank for 5000 Fire damage."` or `"Tank suffers 300 Nature damage"`.
+/// Auto-attacks have no school word (just `"for N."`) and default to Physical.
+fn parse_school(trimmed: &str) -> Option<String> {
+    // Look for the pattern: digits followed by a school word followed by "damage"
+    // Common schools: Physical, Holy, Fire, Nature, Frost, Shadow, Arcane
+    static RE_SCHOOL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\d+ (Physical|Holy|Fire|Nature|Frost|Shadow|Arcane) damage").unwrap()
+    });
+    RE_SCHOOL
+        .captures(trimmed)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+}
+
 /// Parsed damage event ready to be recorded into stats and entries.
 struct DamageEvent<'a> {
     timestamp: f64,
@@ -635,12 +698,21 @@ struct DamageEvent<'a> {
     spell: String,
     amount: u64,
     absorbed: u64,
+    resisted: u64,
+    blocked: u64,
     is_crit: bool,
+    is_glancing: bool,
+    is_crushing: bool,
+    school: Option<String>,
     pet_owner: Option<&'a str>,
 }
 
-/// Record a parsed damage event into stats and entries.
-fn record_damage(data: &mut LogData, event: DamageEvent<'_>) {
+/// Record a parsed damage event into stats, entries, and health deficit.
+fn record_damage(
+    data: &mut LogData,
+    health_deficit: &mut HashMap<String, u64>,
+    event: DamageEvent<'_>,
+) {
     let DamageEvent {
         timestamp,
         source,
@@ -648,12 +720,19 @@ fn record_damage(data: &mut LogData, event: DamageEvent<'_>) {
         spell,
         amount,
         absorbed,
+        resisted,
+        blocked,
         is_crit,
+        is_glancing,
+        is_crushing,
+        school,
         pet_owner,
     } = event;
     add_damage(data, &source, &spell, amount, pet_owner, is_crit);
     add_damage_taken(data, &target, amount);
     record_absorb(data, &target, absorbed);
+    // Increment target's health deficit for effective healing calculation
+    *health_deficit.entry(target.clone()).or_insert(0) += amount;
     data.entries.push(LogEntry::Damage {
         timestamp,
         source,
@@ -661,13 +740,26 @@ fn record_damage(data: &mut LogData, event: DamageEvent<'_>) {
         spell,
         amount,
         absorbed,
+        resisted,
+        blocked,
         is_crit,
+        is_glancing,
+        is_crushing,
+        school,
     });
 }
 
 /// Parse all 3 damage event formats.
-fn parse_damage_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
+#[allow(clippy::too_many_lines)] // Three format variants with trailer/school extraction each
+fn parse_damage_events(
+    trimmed: &str,
+    timestamp: f64,
+    data: &mut LogData,
+    health_deficit: &mut HashMap<String, u64>,
+) {
     let is_crit = trimmed.contains(" crits ") || trimmed.contains(" critically ");
+    let trailer = parse_trailer(trimmed);
+    let school = parse_school(trimmed);
 
     // Format 1: Source 's Spell hits/crits Target for N
     if let Some(caps) = RE_DMG_SPELL.captures(trimmed) {
@@ -684,18 +776,23 @@ fn parse_damage_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
             .get(4)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
-        let absorbed = parse_absorbed(trimmed);
         let pet_owner = extract_pet_owner(&source, data);
         record_damage(
             data,
+            health_deficit,
             DamageEvent {
                 timestamp,
                 source,
                 target,
                 spell,
                 amount,
-                absorbed,
+                absorbed: trailer.absorbed,
+                resisted: trailer.resisted,
+                blocked: trailer.blocked,
                 is_crit,
+                is_glancing: trailer.is_glancing,
+                is_crushing: trailer.is_crushing,
+                school: school.clone(),
                 pet_owner: pet_owner.as_deref(),
             },
         );
@@ -714,17 +811,22 @@ fn parse_damage_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
             .get(3)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
-        let absorbed = parse_absorbed(trimmed);
         record_damage(
             data,
+            health_deficit,
             DamageEvent {
                 timestamp,
                 source,
                 target,
                 spell: "Auto Attack".to_string(),
                 amount,
-                absorbed,
+                absorbed: trailer.absorbed,
+                resisted: trailer.resisted,
+                blocked: trailer.blocked,
                 is_crit,
+                is_glancing: trailer.is_glancing,
+                is_crushing: trailer.is_crushing,
+                school: school.clone(),
                 pet_owner: None,
             },
         );
@@ -746,26 +848,56 @@ fn parse_damage_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
         let Some(spell) = caps.get(4).map(|m| m.as_str().trim().to_string()) else {
             return;
         };
-        let absorbed = parse_absorbed(trimmed);
         let pet_owner = extract_pet_owner(&source, data);
         record_damage(
             data,
+            health_deficit,
             DamageEvent {
                 timestamp,
                 source,
                 target,
                 spell,
                 amount,
-                absorbed,
+                absorbed: trailer.absorbed,
+                resisted: trailer.resisted,
+                blocked: trailer.blocked,
                 is_crit,
+                is_glancing: trailer.is_glancing,
+                is_crushing: trailer.is_crushing,
+                school,
                 pet_owner: pet_owner.as_deref(),
             },
         );
     }
 }
 
+/// Compute effective healing from the target's health deficit.
+///
+/// Returns `(effective_heal, overheal)`. The effective amount is capped at the
+/// target's accumulated damage deficit; the remainder is overheal.
+fn compute_effective_heal(
+    health_deficit: &mut HashMap<String, u64>,
+    target: &str,
+    amount: u64,
+) -> (u64, u64) {
+    let deficit = health_deficit.entry(target.to_string()).or_insert(0);
+    if amount > *deficit {
+        let effective = *deficit;
+        *deficit = 0;
+        (effective, amount - effective)
+    } else {
+        *deficit -= amount;
+        (amount, 0)
+    }
+}
+
 /// Parse both healing event formats.
-fn parse_healing_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
+fn parse_healing_events(
+    trimmed: &str,
+    timestamp: f64,
+    data: &mut LogData,
+    health_deficit: &mut HashMap<String, u64>,
+) {
     let is_heal_crit = trimmed.contains("critically heals");
 
     // Format 1: Source 's Spell heals/critically heals Target for N
@@ -788,13 +920,24 @@ fn parse_healing_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
             spell = stripped.trim().to_string();
         }
 
-        add_healing(data, &source, &spell, amount, is_heal_crit);
+        let (effective_heal, overheal) = compute_effective_heal(health_deficit, &target, amount);
+        add_healing(
+            data,
+            &source,
+            &spell,
+            amount,
+            effective_heal,
+            overheal,
+            is_heal_crit,
+        );
         data.entries.push(LogEntry::Healing {
             timestamp,
             source,
             target,
             spell,
             amount,
+            effective_heal,
+            overheal,
             is_crit: is_heal_crit,
         });
         return;
@@ -816,13 +959,24 @@ fn parse_healing_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
             return;
         };
 
-        add_healing(data, &source, &spell, amount, false);
+        let (effective_heal, overheal) = compute_effective_heal(health_deficit, &target, amount);
+        add_healing(
+            data,
+            &source,
+            &spell,
+            amount,
+            effective_heal,
+            overheal,
+            false,
+        );
         data.entries.push(LogEntry::Healing {
             timestamp,
             source,
             target,
             spell,
             amount,
+            effective_heal,
+            overheal,
             is_crit: false,
         });
     }
@@ -1068,14 +1222,26 @@ fn add_damage_taken(data: &mut LogData, target: &str, amount: u64) {
 }
 
 /// Add healing to a source player's stats.
-fn add_healing(data: &mut LogData, source: &str, spell: &str, amount: u64, is_crit: bool) {
+fn add_healing(
+    data: &mut LogData,
+    source: &str,
+    spell: &str,
+    amount: u64,
+    effective: u64,
+    overheal: u64,
+    is_crit: bool,
+) {
     let stats = ensure_stats(data, source);
     stats.healing += amount;
+    stats.effective_healing += effective;
+    stats.overhealing += overheal;
     let ab = stats
         .healing_abilities
         .entry(spell.to_string())
         .or_default();
     ab.total += amount;
+    ab.effective += effective;
+    ab.overheal += overheal;
     ab.hits += 1;
     if is_crit {
         ab.crits += 1;
@@ -1547,5 +1713,226 @@ mod tests {
         );
         assert!(enc.is_boss, "Garr should be marked as boss");
         assert!(!enc.is_kill, "Wipe should not be marked as kill");
+    }
+
+    // ── Effective Healing Tests ─────────────────────────────────────
+
+    #[test]
+    fn test_effective_healing_basic() {
+        // Warrior takes 3000 damage, then receives 2800 heal (fully effective)
+        // followed by another 2800 heal (only 200 effective, 2600 overheal)
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Priest&PRIEST&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Boss hits Warrior for 3000.".to_string(),
+            "1/27 12:24:02.000  Priest 's Greater Heal heals Warrior for 2800.".to_string(),
+            "1/27 12:24:03.000  Priest 's Greater Heal heals Warrior for 2800.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let stats = data.player_stats.get("Priest").expect("Priest stats");
+        assert_eq!(stats.healing, 5600, "Raw healing should be 5600");
+        assert_eq!(
+            stats.effective_healing, 3000,
+            "Effective healing = damage taken = 3000"
+        );
+        assert_eq!(stats.overhealing, 2600, "Overheal = 5600 - 3000 = 2600");
+
+        // Check individual entries
+        let heals: Vec<_> = data
+            .entries
+            .iter()
+            .filter_map(|e| {
+                if let LogEntry::Healing {
+                    effective_heal,
+                    overheal,
+                    ..
+                } = e
+                {
+                    Some((*effective_heal, *overheal))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(heals.len(), 2);
+        assert_eq!(heals[0], (2800, 0), "First heal: fully effective");
+        assert_eq!(
+            heals[1],
+            (200, 2600),
+            "Second heal: 200 effective, 2600 overheal"
+        );
+    }
+
+    #[test]
+    fn test_effective_healing_no_damage() {
+        // Heal with no prior damage = 100% overheal
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Priest&PRIEST&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Priest 's Greater Heal heals Warrior for 2800.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let stats = data.player_stats.get("Priest").expect("Priest stats");
+        assert_eq!(stats.healing, 2800);
+        assert_eq!(stats.effective_healing, 0, "No damage taken = 0 effective");
+        assert_eq!(stats.overhealing, 2800, "All healing is overheal");
+    }
+
+    #[test]
+    fn test_effective_healing_hot_ticks() {
+        // HoT ticks (gains N health from) should also track effective heal
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Druid&DRUID&NightElf&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Boss hits Warrior for 500.".to_string(),
+            "1/27 12:24:02.000  Warrior gains 148 health from Druid 's Rejuvenation.".to_string(),
+            "1/27 12:24:04.000  Warrior gains 148 health from Druid 's Rejuvenation.".to_string(),
+            "1/27 12:24:06.000  Warrior gains 148 health from Druid 's Rejuvenation.".to_string(),
+            "1/27 12:24:08.000  Warrior gains 148 health from Druid 's Rejuvenation.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let stats = data.player_stats.get("Druid").expect("Druid stats");
+        assert_eq!(stats.healing, 148 * 4, "Raw healing = 4 ticks of 148");
+        // 500 damage deficit, first 3 ticks: 148 + 148 + 148 = 444 (deficit down to 56)
+        // 4th tick: 148 but only 56 deficit remains → 56 effective, 92 overheal
+        assert_eq!(
+            stats.effective_healing, 500,
+            "Effective = total damage taken"
+        );
+        assert_eq!(
+            stats.overhealing,
+            148 * 4 - 500,
+            "Overheal = raw - effective"
+        );
+    }
+
+    // ── Damage Mitigation Tests ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_trailer_resisted() {
+        let line = "Boss 's Shadow Bolt hits Warrior for 2000 Shadow damage. (500 resisted)";
+        let trailer = parse_trailer(line);
+        assert_eq!(trailer.resisted, 500);
+        assert_eq!(trailer.absorbed, 0);
+        assert_eq!(trailer.blocked, 0);
+        assert!(!trailer.is_glancing);
+        assert!(!trailer.is_crushing);
+    }
+
+    #[test]
+    fn test_parse_trailer_multiple() {
+        let line =
+            "Boss hits Warrior for 3000. (800 resisted) (200 blocked) (100 absorbed) (crushing)";
+        let trailer = parse_trailer(line);
+        assert_eq!(trailer.resisted, 800);
+        assert_eq!(trailer.blocked, 200);
+        assert_eq!(trailer.absorbed, 100);
+        assert!(!trailer.is_glancing);
+        assert!(trailer.is_crushing);
+    }
+
+    #[test]
+    fn test_parse_trailer_glancing() {
+        let line = "Boss hits Warrior for 1500. (glancing)";
+        let trailer = parse_trailer(line);
+        assert!(trailer.is_glancing);
+        assert!(!trailer.is_crushing);
+        assert_eq!(trailer.resisted, 0);
+    }
+
+    #[test]
+    fn test_damage_mitigation_integration() {
+        // Full integration: damage line with resisted + absorbed in a parse_log context
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Boss 's Shadow Bolt hits Tank for 2000 Shadow damage. (500 resisted) (100 absorbed)".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let dmg_entry = data
+            .entries
+            .iter()
+            .find(|e| matches!(e, LogEntry::Damage { .. }));
+        assert!(dmg_entry.is_some(), "Should have a damage entry");
+        if let Some(LogEntry::Damage {
+            resisted,
+            absorbed,
+            school,
+            ..
+        }) = dmg_entry
+        {
+            assert_eq!(*resisted, 500, "Should parse 500 resisted");
+            assert_eq!(*absorbed, 100, "Should parse 100 absorbed");
+            assert_eq!(
+                school.as_deref(),
+                Some("Shadow"),
+                "Should parse Shadow school"
+            );
+        }
+    }
+
+    // ── Damage School Tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_school_fire() {
+        let line = "Boss hits Tank for 5000 Fire damage.";
+        assert_eq!(parse_school(line).as_deref(), Some("Fire"));
+    }
+
+    #[test]
+    fn test_parse_school_none() {
+        // Auto-attack: no school word
+        let line = "Boss hits Tank for 500.";
+        assert_eq!(parse_school(line), None);
+    }
+
+    #[test]
+    fn test_parse_school_all_types() {
+        for school in &[
+            "Physical", "Holy", "Fire", "Nature", "Frost", "Shadow", "Arcane",
+        ] {
+            let line = format!("Boss hits Tank for 100 {school} damage.");
+            assert_eq!(
+                parse_school(&line).as_deref(),
+                Some(*school),
+                "Should parse {school}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_damage_school_suffer_format() {
+        // "suffers N School damage from" format
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Tank suffers 300 Nature damage from Boss 's Poison Bolt.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let dmg_entry = data
+            .entries
+            .iter()
+            .find(|e| matches!(e, LogEntry::Damage { .. }));
+        assert!(dmg_entry.is_some());
+        if let Some(LogEntry::Damage { school, .. }) = dmg_entry {
+            assert_eq!(
+                school.as_deref(),
+                Some("Nature"),
+                "Should parse Nature from suffer line"
+            );
+        }
     }
 }

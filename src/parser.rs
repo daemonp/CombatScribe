@@ -52,8 +52,10 @@ pub struct PlayerEntry {
 }
 
 /// Known raid zones with their boss counts for session detection.
+///
+/// Counts sourced from Turtle Archives encounter database (`manual_database_edits.sql`).
 const RAID_ZONES: &[(&str, usize)] = &[
-    ("molten core", 10),
+    ("molten core", 13), // 10 vanilla + 3 Turtle custom (Incindis, Twin Giants, Sorcerer-Thane)
     ("blackwing lair", 8),
     ("naxxramas", 15),
     ("ahn'qiraj", 9),
@@ -61,16 +63,24 @@ const RAID_ZONES: &[(&str, usize)] = &[
     ("temple of ahn'qiraj", 9),
     ("onyxia's lair", 1),
     ("zul'gurub", 10),
-    ("karazhan", 12),
-    ("emerald sanctum", 2),
-    ("the black morass", 5),
+    ("lower karazhan", 5), // 10-man: Araxxna, Blackwald II, Howlfang, Grizikil, Moroes
+    ("upper karazhan", 9), // 40-man: Gnarlmoon, Incantagos, Anomalus, Chess, Medivh, Sanv, Kruul, Rupturan, Mephistroth
+    ("karazhan", 14),      // Fallback if zone reports as generic "Karazhan"
+    ("emerald sanctum", 1), // Only Solnius is an encounter (Erennius is not a boss)
 ];
 
 /// Known boss names.
+///
+/// Sourced from Turtle Archives encounter database (`manual_database_edits.sql`)
+/// and standard vanilla raid content. Entries are matched case-insensitively.
 const KNOWN_BOSSES: &[&str] = &[
-    // Molten Core
+    // ── Molten Core (13 bosses: 10 vanilla + 3 Turtle custom) ───────
+    "Incindis", // Turtle custom — encounter 80
     "Lucifron",
     "Magmadar",
+    "Smoldaris",                 // Turtle custom — Twin Giants encounter 81
+    "Basalthar",                 // Turtle custom — Twin Giants encounter 81
+    "Sorcerer-Thane Thaurissan", // Turtle custom — encounter 82
     "Gehennas",
     "Garr",
     "Shazzrah",
@@ -79,7 +89,7 @@ const KNOWN_BOSSES: &[&str] = &[
     "Golemagg the Incinerator",
     "Majordomo Executus",
     "Ragnaros",
-    // Blackwing Lair
+    // ── Blackwing Lair (8 bosses) ───────────────────────────────────
     "Razorgore the Untamed",
     "Vaelastrasz the Corrupt",
     "Broodlord Lashlayer",
@@ -88,9 +98,9 @@ const KNOWN_BOSSES: &[&str] = &[
     "Flamegor",
     "Chromaggus",
     "Nefarian",
-    // Onyxia
+    // ── Onyxia's Lair (1 boss) ─────────────────────────────────────
     "Onyxia",
-    // Zul'Gurub
+    // ── Zul'Gurub (10 bosses + 4 Edge of Madness) ──────────────────
     "High Priestess Jeklik",
     "High Priest Venoxis",
     "High Priestess Mar'li",
@@ -100,18 +110,18 @@ const KNOWN_BOSSES: &[&str] = &[
     "Jin'do the Hexxer",
     "Hakkar",
     "Gahz'ranka",
-    "Wushoolay",
-    "Renataki",
-    "Gri'lek",
-    "Hazza'rah",
-    // AQ20
+    "Wushoolay", // Edge of Madness
+    "Renataki",  // Edge of Madness
+    "Gri'lek",   // Edge of Madness
+    "Hazza'rah", // Edge of Madness
+    // ── Ruins of Ahn'Qiraj / AQ20 (6 bosses) ──────────────────────
     "Kurinnaxx",
     "General Rajaxx",
     "Moam",
     "Buru the Gorger",
     "Ayamiss the Hunter",
     "Ossirian the Unscarred",
-    // AQ40
+    // ── Temple of Ahn'Qiraj / AQ40 (9 bosses) ─────────────────────
     "The Prophet Skeram",
     "The Bug Family",
     "Battleguard Sartura",
@@ -121,7 +131,7 @@ const KNOWN_BOSSES: &[&str] = &[
     "The Twin Emperors",
     "Ouro",
     "C'Thun",
-    // Naxxramas
+    // ── Naxxramas (15 bosses) ──────────────────────────────────────
     "Anub'Rekhan",
     "Grand Widow Faerlina",
     "Maexxna",
@@ -137,20 +147,19 @@ const KNOWN_BOSSES: &[&str] = &[
     "Thaddius",
     "Sapphiron",
     "Kel'Thuzad",
-    // UBRS
+    // ── Upper Blackrock Spire (5 bosses) ───────────────────────────
     "Pyroguard Emberseer",
     "Solakar Flamewreath",
     "Warchief Rend Blackhand",
     "The Beast",
     "General Drakkisath",
-    // Karazhan (Lower)
+    // ── Lower Karazhan — 10-man (5 bosses) ─────────────────────────
     "Moroes",
     "Brood Queen Araxxna",
     "Clawlord Howlfang",
-    "Dark Rider Champion",
     "Grizikil",
     "Lord Blackwald II",
-    // Karazhan (Upper)
+    // ── Upper Karazhan — 40-man (9 bosses) ─────────────────────────
     "Keeper Gnarlmoon",
     "Anomalus",
     "Echo of Medivh",
@@ -159,16 +168,14 @@ const KNOWN_BOSSES: &[&str] = &[
     "Mephistroth",
     "Rupturan the Broken",
     "Sanv Tas'dal",
-    // Emerald Sanctum
-    "Erennius",
+    // Chess Fight encounter — uses generic piece names as boss NPCs
+    // Not added individually since "Bishop"/"Knight"/"King"/"Rook" would cause
+    // false positives on player/NPC names. The encounter is detected via combat
+    // heuristics (longest non-player name) rather than the known boss list.
+    // ── Emerald Sanctum (1 boss) ───────────────────────────────────
+    // Note: Erennius is an NPC (is_boss=0), not an encounter.
     "Solnius",
-    // The Black Morass
-    "Chronar",
-    "Epidamu",
-    "Mossheart",
-    "Rotmaw",
-    "Time-Lord Epochronos",
-    // World Bosses
+    // ── World Bosses ───────────────────────────────────────────────
     "Azuregos",
     "Lord Kazzak",
     "Emeriss",
@@ -176,7 +183,7 @@ const KNOWN_BOSSES: &[&str] = &[
     "Taerar",
     "Ysondre",
     "Twilight Corrupter",
-    // Dire Maul
+    // ── Dire Maul ──────────────────────────────────────────────────
     "Captain Kromcrush",
     "King Gordok",
 ];

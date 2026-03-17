@@ -49,6 +49,7 @@ pub struct ViewerState {
 
     // Damage/Healing tab
     pub damage_type: DamageType,
+    pub healing_type: HealingType,
 
     // Utility tab
     pub dispel_type: DispelSubType,
@@ -107,6 +108,23 @@ impl std::fmt::Display for DamageType {
             Self::Damage => write!(f, "Damage done"),
             Self::DamageWithPets => write!(f, "Damage done (incl. pets)"),
             Self::DamageTaken => write!(f, "Damage taken"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealingType {
+    Effective,
+    Raw,
+    Overhealing,
+}
+
+impl std::fmt::Display for HealingType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Effective => write!(f, "Effective healing"),
+            Self::Raw => write!(f, "Raw healing"),
+            Self::Overhealing => write!(f, "Overhealing"),
         }
     }
 }
@@ -174,6 +192,7 @@ pub enum ViewerMessage {
     SwitchTab(ViewerTab),
     SelectEncounter(String),
     SetDamageType(DamageType),
+    SetHealingType(HealingType),
     SetDispelType(DispelSubType),
     SetDeathType(DeathSubType),
     ShowDetail(String, DetailType),
@@ -216,6 +235,7 @@ impl ViewerState {
             encounter_names,
             selected_encounter_name: selected,
             damage_type: DamageType::Damage,
+            healing_type: HealingType::Effective,
             dispel_type: DispelSubType::Dispels,
             death_type: DeathSubType::Deaths,
             loot_search: String::new(),
@@ -262,6 +282,7 @@ impl ViewerState {
                 self.alive_cache.clear();
             }
             ViewerMessage::SetDamageType(dt) => self.damage_type = dt,
+            ViewerMessage::SetHealingType(ht) => self.healing_type = ht,
             ViewerMessage::SetDispelType(dt) => self.dispel_type = dt,
             ViewerMessage::SetDeathType(dt) => self.death_type = dt,
             ViewerMessage::ShowDetail(name, dtype) => {
@@ -567,13 +588,21 @@ impl ViewerState {
         let mut healing_players: Vec<(String, String, u64)> = stats
             .iter()
             .filter_map(|(name, ps)| {
-                if !self.log_data.combatants.contains_key(name) || ps.healing == 0 {
+                if !self.log_data.combatants.contains_key(name) {
+                    return None;
+                }
+                let value = match self.healing_type {
+                    HealingType::Effective => ps.effective_healing,
+                    HealingType::Raw => ps.healing,
+                    HealingType::Overhealing => ps.overhealing,
+                };
+                if value == 0 {
                     return None;
                 }
                 Some((
                     name.clone(),
                     self.log_data.player_class(name).to_string(),
-                    ps.healing,
+                    value,
                 ))
             })
             .collect();
@@ -628,11 +657,20 @@ impl ViewerState {
         .into();
 
         // Build healing panel
+        let healing_types_list = vec![
+            HealingType::Effective,
+            HealingType::Raw,
+            HealingType::Overhealing,
+        ];
+
+        let heal_type_picker = pick_list(healing_types_list, Some(self.healing_type), |ht| {
+            ViewerMessage::SetHealingType(ht)
+        })
+        .width(Fill)
+        .padding(4);
+
         let heal_header = row![
-            text("Effective healing done")
-                .size(13)
-                .color(theme::TEXT_SECONDARY),
-            horizontal_space(),
+            heal_type_picker,
             text(heal_total_text).size(12).color(theme::TEXT_SECONDARY),
         ]
         .spacing(8)
@@ -1577,11 +1615,33 @@ impl ViewerState {
                 spell,
                 amount,
                 absorbed,
+                resisted,
+                blocked,
+                is_glancing,
+                is_crushing,
+                school,
                 ..
             } => {
-                let mut s = format!("{source}'s {spell} hits {target} for {amount}");
+                let school_str = school.as_deref().unwrap_or("");
+                let mut s = if school_str.is_empty() {
+                    format!("{source}'s {spell} hits {target} for {amount}")
+                } else {
+                    format!("{source}'s {spell} hits {target} for {amount} {school_str}")
+                };
+                if *resisted > 0 {
+                    let _ = write!(s, " ({resisted} resisted)");
+                }
+                if *blocked > 0 {
+                    let _ = write!(s, " ({blocked} blocked)");
+                }
                 if *absorbed > 0 {
                     let _ = write!(s, " ({absorbed} absorbed)");
+                }
+                if *is_glancing {
+                    s.push_str(" (glancing)");
+                }
+                if *is_crushing {
+                    s.push_str(" (crushing)");
                 }
                 (s, Color::from_rgb8(200, 200, 200))
             }
@@ -1590,11 +1650,19 @@ impl ViewerState {
                 target,
                 spell,
                 amount,
+                effective_heal,
+                overheal,
                 ..
-            } => (
-                format!("{source}'s {spell} heals {target} for {amount}"),
-                Color::from_rgb8(100, 255, 100),
-            ),
+            } => {
+                let mut s = format!("{source}'s {spell} heals {target} for {effective_heal}");
+                if *overheal > 0 {
+                    let _ = write!(s, " ({overheal} overheal)");
+                }
+                if *effective_heal != *amount {
+                    // Only show raw total if different from effective (i.e. there was overheal)
+                }
+                (s, Color::from_rgb8(100, 255, 100))
+            }
             LogEntry::Death { player, .. } => {
                 (format!("{player} has died"), Color::from_rgb8(255, 68, 68))
             }
@@ -1639,7 +1707,9 @@ impl ViewerState {
 
         let title = match &detail.detail_type {
             DetailType::Damage => format!("{} - Damage Breakdown", detail.player_name),
-            DetailType::Healing => format!("{} - Healing Breakdown", detail.player_name),
+            DetailType::Healing => {
+                format!("{} - {} Breakdown", detail.player_name, self.healing_type)
+            }
             DetailType::Dispels => format!("{} - Dispel Breakdown", detail.player_name),
             DetailType::Interrupts => format!("{} - Interrupt Breakdown", detail.player_name),
             DetailType::Resurrects => format!("{} - Resurrection Breakdown", detail.player_name),
@@ -1695,7 +1765,14 @@ impl ViewerState {
 
         let (abilities, total) = match dtype {
             DetailType::Damage => (&ps.abilities, ps.damage),
-            DetailType::Healing => (&ps.healing_abilities, ps.healing),
+            DetailType::Healing => {
+                let heal_total = match self.healing_type {
+                    HealingType::Effective => ps.effective_healing,
+                    HealingType::Raw => ps.healing,
+                    HealingType::Overhealing => ps.overhealing,
+                };
+                (&ps.healing_abilities, heal_total)
+            }
             _ => return text("Invalid detail type").size(14).into(),
         };
 
@@ -1719,17 +1796,43 @@ impl ViewerState {
             0.0
         };
 
-        let summary = text(format!(
-            "Total: {} | Per Second: {}/s | Duration: {} | Hits: {} | Crits: {} | Crit Rate: {:.1}%",
-            theme::format_number(total),
-            theme::format_number_f64(pps),
-            theme::format_duration(duration),
-            total_hits,
-            total_crits,
-            crit_rate,
-        ))
-        .size(12)
-        .color([0.5, 0.5, 0.5]);
+        let heal_value_label = match self.healing_type {
+            HealingType::Effective => "Effective",
+            HealingType::Raw => "Raw",
+            HealingType::Overhealing => "Overheal",
+        };
+
+        let summary_str = if dtype == DetailType::Healing {
+            let overheal_pct = if ps.healing > 0 {
+                #[allow(clippy::cast_precision_loss)] // healing values never approach 2^52
+                let pct = ps.overhealing as f64 / ps.healing as f64 * 100.0;
+                pct
+            } else {
+                0.0
+            };
+            format!(
+                "{}: {} | Per Second: {}/s | Duration: {} | Overheal: {:.1}% | Hits: {} | Crits: {} | Crit Rate: {:.1}%",
+                heal_value_label,
+                theme::format_number(total),
+                theme::format_number_f64(pps),
+                theme::format_duration(duration),
+                overheal_pct,
+                total_hits,
+                total_crits,
+                crit_rate,
+            )
+        } else {
+            format!(
+                "Total: {} | Per Second: {}/s | Duration: {} | Hits: {} | Crits: {} | Crit Rate: {:.1}%",
+                theme::format_number(total),
+                theme::format_number_f64(pps),
+                theme::format_duration(duration),
+                total_hits,
+                total_crits,
+                crit_rate,
+            )
+        };
+        let summary = text(summary_str).size(12).color([0.5, 0.5, 0.5]);
 
         // Opener
         let event_type = match dtype {
@@ -1786,18 +1889,36 @@ impl ViewerState {
             opener_section = opener_section.push(opener_row);
         }
 
-        // Ability table
-        let table_header = row![
-            text("Ability").size(12).width(Length::FillPortion(3)),
-            text("Total").size(12).width(Length::FillPortion(1)),
-            text("Hits").size(12).width(Length::FillPortion(1)),
-            text("Crits").size(12).width(Length::FillPortion(1)),
-            text("Crit%").size(12).width(Length::FillPortion(1)),
-            text("Avg").size(12).width(Length::FillPortion(1)),
-            text("%").size(12).width(Length::FillPortion(1)),
-        ]
-        .spacing(4)
-        .width(Fill);
+        // Ability table — healing gets an extra "OH%" column
+        let is_healing = dtype == DetailType::Healing;
+        let table_header = if is_healing {
+            row![
+                text("Ability").size(12).width(Length::FillPortion(3)),
+                text(heal_value_label)
+                    .size(12)
+                    .width(Length::FillPortion(1)),
+                text("OH%").size(12).width(Length::FillPortion(1)),
+                text("Hits").size(12).width(Length::FillPortion(1)),
+                text("Crits").size(12).width(Length::FillPortion(1)),
+                text("Crit%").size(12).width(Length::FillPortion(1)),
+                text("Avg").size(12).width(Length::FillPortion(1)),
+                text("%").size(12).width(Length::FillPortion(1)),
+            ]
+            .spacing(4)
+            .width(Fill)
+        } else {
+            row![
+                text("Ability").size(12).width(Length::FillPortion(3)),
+                text("Total").size(12).width(Length::FillPortion(1)),
+                text("Hits").size(12).width(Length::FillPortion(1)),
+                text("Crits").size(12).width(Length::FillPortion(1)),
+                text("Crit%").size(12).width(Length::FillPortion(1)),
+                text("Avg").size(12).width(Length::FillPortion(1)),
+                text("%").size(12).width(Length::FillPortion(1)),
+            ]
+            .spacing(4)
+            .width(Fill)
+        };
 
         let mut table = Column::new().spacing(2);
         table = table.push(text("Ability Breakdown").size(13).color([0.6, 0.6, 0.6]));
@@ -1805,43 +1926,95 @@ impl ViewerState {
         table = table.push(horizontal_rule(1));
 
         for (spell, ab) in &sorted {
+            let display_total = if is_healing {
+                match self.healing_type {
+                    HealingType::Effective => ab.effective,
+                    HealingType::Raw => ab.total,
+                    HealingType::Overhealing => ab.overheal,
+                }
+            } else {
+                ab.total
+            };
             let percent = if total > 0 {
-                (ab.total as f64 / total as f64) * 100.0
+                #[allow(clippy::cast_precision_loss)] // ability totals never approach 2^52
+                let pct = display_total as f64 / total as f64 * 100.0;
+                pct
             } else {
                 0.0
             };
-            let avg = ab.total.checked_div(ab.hits).unwrap_or(0);
+            let avg = display_total.checked_div(ab.hits).unwrap_or(0);
             let crit_pct = if ab.hits > 0 {
-                (ab.crits as f64 / ab.hits as f64) * 100.0
+                #[allow(clippy::cast_precision_loss)] // hit counts never approach 2^52
+                let pct = ab.crits as f64 / ab.hits as f64 * 100.0;
+                pct
             } else {
                 0.0
             };
 
-            table = table.push(
-                row![
-                    text(spell.clone()).size(12).width(Length::FillPortion(3)),
-                    text(theme::format_number(ab.total))
-                        .size(12)
-                        .width(Length::FillPortion(1)),
-                    text(ab.hits.to_string())
-                        .size(12)
-                        .width(Length::FillPortion(1)),
-                    text(ab.crits.to_string())
-                        .size(12)
-                        .width(Length::FillPortion(1)),
-                    text(format!("{crit_pct:.1}%"))
-                        .size(12)
-                        .width(Length::FillPortion(1)),
-                    text(theme::format_number(avg))
-                        .size(12)
-                        .width(Length::FillPortion(1)),
-                    text(format!("{percent:.1}%"))
-                        .size(12)
-                        .width(Length::FillPortion(1)),
-                ]
-                .spacing(4)
-                .width(Fill),
-            );
+            if is_healing {
+                let oh_pct = if ab.total > 0 {
+                    #[allow(clippy::cast_precision_loss)] // ability totals never approach 2^52
+                    let pct = ab.overheal as f64 / ab.total as f64 * 100.0;
+                    pct
+                } else {
+                    0.0
+                };
+                table = table.push(
+                    row![
+                        text(spell.clone()).size(12).width(Length::FillPortion(3)),
+                        text(theme::format_number(display_total))
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(format!("{oh_pct:.1}%"))
+                            .size(12)
+                            .color(theme::TEXT_SECONDARY)
+                            .width(Length::FillPortion(1)),
+                        text(ab.hits.to_string())
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(ab.crits.to_string())
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(format!("{crit_pct:.1}%"))
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(theme::format_number(avg))
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(format!("{percent:.1}%"))
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                    ]
+                    .spacing(4)
+                    .width(Fill),
+                );
+            } else {
+                table = table.push(
+                    row![
+                        text(spell.clone()).size(12).width(Length::FillPortion(3)),
+                        text(theme::format_number(display_total))
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(ab.hits.to_string())
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(ab.crits.to_string())
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(format!("{crit_pct:.1}%"))
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(theme::format_number(avg))
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(format!("{percent:.1}%"))
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                    ]
+                    .spacing(4)
+                    .width(Fill),
+                );
+            }
         }
 
         column![summary, opener_section, table,]
@@ -3284,16 +3457,22 @@ fn format_log_entry(entry: &LogEntry) -> (Color, String) {
             source,
             target,
             spell,
-            amount,
+            effective_heal,
+            overheal,
             is_crit,
             ..
         } => {
             let crit = if *is_crit { " (crit)" } else { "" };
+            let oh = if *overheal > 0 {
+                format!(" ({} OH)", theme::format_number(*overheal))
+            } else {
+                String::new()
+            };
             (
                 theme::TIMELINE_HPS,
                 format!(
-                    "{source}'s {spell} heals {target} for {}{crit}",
-                    theme::format_number(*amount)
+                    "{source}'s {spell} heals {target} for {}{crit}{oh}",
+                    theme::format_number(*effective_heal)
                 ),
             )
         }

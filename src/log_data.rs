@@ -49,7 +49,12 @@ pub enum LogEntry {
         spell: String,
         amount: u64,
         absorbed: u64,
+        resisted: u64,
+        blocked: u64,
         is_crit: bool,
+        is_glancing: bool,
+        is_crushing: bool,
+        school: Option<String>,
     },
     Healing {
         timestamp: f64,
@@ -57,6 +62,8 @@ pub enum LogEntry {
         target: String,
         spell: String,
         amount: u64,
+        effective_heal: u64,
+        overheal: u64,
         is_crit: bool,
     },
     Death {
@@ -173,6 +180,8 @@ pub struct Encounter {
 pub struct PlayerStats {
     pub damage: u64,
     pub healing: u64,
+    pub effective_healing: u64,
+    pub overhealing: u64,
     pub damage_taken: u64,
     pub pet_damage: u64,
     pub abilities: HashMap<String, AbilityStats>,
@@ -184,6 +193,8 @@ pub struct AbilityStats {
     pub total: u64,
     pub hits: u64,
     pub crits: u64,
+    pub effective: u64,
+    pub overheal: u64,
     #[allow(dead_code)]
     pub is_pet: bool,
 }
@@ -596,13 +607,19 @@ impl LogData {
                     source,
                     spell,
                     amount,
+                    effective_heal,
+                    overheal,
                     is_crit,
                     ..
                 } => {
                     let ps = stats.entry(source.clone()).or_default();
                     ps.healing += amount;
+                    ps.effective_healing += effective_heal;
+                    ps.overhealing += overheal;
                     let ab = ps.healing_abilities.entry(spell.clone()).or_default();
                     ab.total += amount;
+                    ab.effective += effective_heal;
+                    ab.overheal += overheal;
                     ab.hits += 1;
                     if *is_crit {
                         ab.crits += 1;
@@ -816,9 +833,13 @@ impl LogData {
                             }
                         }
                     }
-                    LogEntry::Healing { source, amount, .. } => {
+                    LogEntry::Healing {
+                        source,
+                        effective_heal,
+                        ..
+                    } => {
                         if self.combatants.contains_key(source.as_str()) {
-                            buckets[bucket_idx].healing += amount;
+                            buckets[bucket_idx].healing += effective_heal;
                         }
                     }
                     LogEntry::Death { player, .. } => {
