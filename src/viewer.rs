@@ -391,7 +391,7 @@ impl ViewerState {
             .iter()
             .filter(|e| e.is_boss)
             .find_map(|e| e.zone.as_deref());
-        let zone = instance_zone
+        let zone_raw = instance_zone
             .or_else(|| {
                 let z = self.log_data.zone_name.as_str();
                 if z.is_empty() {
@@ -401,6 +401,7 @@ impl ViewerState {
                 }
             })
             .unwrap_or("Combat Log");
+        let zone = crate::parser::format_zone_name(zone_raw);
 
         let mut header_row = Row::new().spacing(8).align_y(Center).width(Fill);
         header_row = header_row.push(text(zone).size(20).color(Color::WHITE));

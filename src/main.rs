@@ -2,6 +2,7 @@ mod formatter;
 mod log_data;
 mod log_parser;
 mod parser;
+mod raid_data;
 mod theme;
 mod viewer;
 

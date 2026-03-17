@@ -2,13 +2,13 @@
 //!
 //! Scans log lines to identify raid sessions, boss kills, zone changes,
 //! and which player `You`/`Your` refers to at each timestamp.
+//!
+//! All raid/boss/NPC data comes from `raid_data` (compiled from `data/raids.toml`
+//! at build time). No hardcoded boss or zone lists in this file.
 
 use std::collections::HashSet;
-use std::sync::LazyLock;
 
-/// Pre-lowercased set of known boss names for O(1) lookup.
-static KNOWN_BOSSES_SET: LazyLock<HashSet<String>> =
-    LazyLock::new(|| KNOWN_BOSSES.iter().map(|b| b.to_lowercase()).collect());
+use crate::raid_data;
 
 /// Represents a detected session (segment) in the combat log.
 #[derive(Debug, Clone)]
@@ -51,172 +51,41 @@ pub struct PlayerEntry {
     pub name: String,
 }
 
-/// Known raid zones with their boss counts for session detection.
-///
-/// Counts sourced from Turtle Archives encounter database (`manual_database_edits.sql`).
-const RAID_ZONES: &[(&str, usize)] = &[
-    ("molten core", 13), // 10 vanilla + 3 Turtle custom (Incindis, Twin Giants, Sorcerer-Thane)
-    ("blackwing lair", 8),
-    ("naxxramas", 15),
-    ("ahn'qiraj", 9),
-    ("ruins of ahn'qiraj", 6),
-    ("temple of ahn'qiraj", 9),
-    ("onyxia's lair", 1),
-    ("zul'gurub", 10),
-    ("lower karazhan", 5), // 10-man: Araxxna, Blackwald II, Howlfang, Grizikil, Moroes
-    ("upper karazhan", 9), // 40-man: Gnarlmoon, Incantagos, Anomalus, Chess, Medivh, Sanv, Kruul, Rupturan, Mephistroth
-    ("karazhan", 14),      // Fallback if zone reports as generic "Karazhan"
-    ("emerald sanctum", 1), // Only Solnius is an encounter (Erennius is not a boss)
-];
-
-/// Known boss names.
-///
-/// Sourced from Turtle Archives encounter database (`manual_database_edits.sql`)
-/// and standard vanilla raid content. Entries are matched case-insensitively.
-const KNOWN_BOSSES: &[&str] = &[
-    // ── Molten Core (13 bosses: 10 vanilla + 3 Turtle custom) ───────
-    "Incindis", // Turtle custom — encounter 80
-    "Lucifron",
-    "Magmadar",
-    "Smoldaris",                 // Turtle custom — Twin Giants encounter 81
-    "Basalthar",                 // Turtle custom — Twin Giants encounter 81
-    "Sorcerer-Thane Thaurissan", // Turtle custom — encounter 82
-    "Gehennas",
-    "Garr",
-    "Shazzrah",
-    "Baron Geddon",
-    "Sulfuron Harbinger",
-    "Golemagg the Incinerator",
-    "Majordomo Executus",
-    "Ragnaros",
-    // ── Blackwing Lair (8 bosses) ───────────────────────────────────
-    "Razorgore the Untamed",
-    "Vaelastrasz the Corrupt",
-    "Broodlord Lashlayer",
-    "Firemaw",
-    "Ebonroc",
-    "Flamegor",
-    "Chromaggus",
-    "Nefarian",
-    // ── Onyxia's Lair (1 boss) ─────────────────────────────────────
-    "Onyxia",
-    // ── Zul'Gurub (10 bosses + 4 Edge of Madness) ──────────────────
-    "High Priestess Jeklik",
-    "High Priest Venoxis",
-    "High Priestess Mar'li",
-    "High Priest Thekal",
-    "High Priestess Arlokk",
-    "Bloodlord Mandokir",
-    "Jin'do the Hexxer",
-    "Hakkar",
-    "Gahz'ranka",
-    "Wushoolay", // Edge of Madness
-    "Renataki",  // Edge of Madness
-    "Gri'lek",   // Edge of Madness
-    "Hazza'rah", // Edge of Madness
-    // ── Ruins of Ahn'Qiraj / AQ20 (6 bosses) ──────────────────────
-    "Kurinnaxx",
-    "General Rajaxx",
-    "Moam",
-    "Buru the Gorger",
-    "Ayamiss the Hunter",
-    "Ossirian the Unscarred",
-    // ── Temple of Ahn'Qiraj / AQ40 (9 bosses) ─────────────────────
-    "The Prophet Skeram",
-    "The Bug Family",
-    "Battleguard Sartura",
-    "Fankriss the Unyielding",
-    "Viscidus",
-    "Princess Huhuran",
-    "The Twin Emperors",
-    "Ouro",
-    "C'Thun",
-    // ── Naxxramas (15 bosses) ──────────────────────────────────────
-    "Anub'Rekhan",
-    "Grand Widow Faerlina",
-    "Maexxna",
-    "Noth the Plaguebringer",
-    "Heigan the Unclean",
-    "Loatheb",
-    "Instructor Razuvious",
-    "Gothik the Harvester",
-    "The Four Horsemen",
-    "Patchwerk",
-    "Grobbulus",
-    "Gluth",
-    "Thaddius",
-    "Sapphiron",
-    "Kel'Thuzad",
-    // ── Upper Blackrock Spire (5 bosses) ───────────────────────────
-    "Pyroguard Emberseer",
-    "Solakar Flamewreath",
-    "Warchief Rend Blackhand",
-    "The Beast",
-    "General Drakkisath",
-    // ── Lower Karazhan — 10-man (5 bosses) ─────────────────────────
-    "Moroes",
-    "Brood Queen Araxxna",
-    "Clawlord Howlfang",
-    "Grizikil",
-    "Lord Blackwald II",
-    // ── Upper Karazhan — 40-man (9 bosses) ─────────────────────────
-    "Keeper Gnarlmoon",
-    "Anomalus",
-    "Echo of Medivh",
-    "Kruul",
-    "Ley-Watcher Incantagos",
-    "Mephistroth",
-    "Rupturan the Broken",
-    "Sanv Tas'dal",
-    // Chess Fight encounter — uses generic piece names as boss NPCs
-    // Not added individually since "Bishop"/"Knight"/"King"/"Rook" would cause
-    // false positives on player/NPC names. The encounter is detected via combat
-    // heuristics (longest non-player name) rather than the known boss list.
-    // ── Emerald Sanctum (1 boss) ───────────────────────────────────
-    // Note: Erennius is an NPC (is_boss=0), not an encounter.
-    "Solnius",
-    // ── World Bosses ───────────────────────────────────────────────
-    "Azuregos",
-    "Lord Kazzak",
-    "Emeriss",
-    "Lethon",
-    "Taerar",
-    "Ysondre",
-    "Twilight Corrupter",
-    // ── Dire Maul ──────────────────────────────────────────────────
-    "Captain Kromcrush",
-    "King Gordok",
-];
-
 /// Session gap threshold (30 minutes in seconds).
 const SESSION_GAP_SECS: f64 = 30.0 * 60.0;
 
+// ── Delegates to raid_data ──────────────────────────────────────────────────
+// These thin wrappers keep the call sites in this file concise while all
+// actual data lives in the build-time-generated raid_data module.
+
 pub(crate) fn is_known_boss(name: &str) -> bool {
-    // Boss names are ASCII — lowercase on the stack to avoid heap allocation.
-    // Max boss name is ~30 chars; use a fixed buffer.
-    if name.len() > 64 {
-        return false;
-    }
-    let mut buf = [0u8; 64];
-    let bytes = name.as_bytes();
-    buf[..bytes.len()].copy_from_slice(bytes);
-    buf[..bytes.len()].make_ascii_lowercase();
-    // SAFETY: input was valid UTF-8 and make_ascii_lowercase preserves that
-    let lowered = std::str::from_utf8(&buf[..bytes.len()]).unwrap_or("");
-    KNOWN_BOSSES_SET.contains(lowered)
+    raid_data::is_boss(name)
 }
 
-/// Return the known boss name list (original casing) for substring scanning.
+/// Return the known boss name list (lowercased) for substring scanning.
 pub(crate) fn known_boss_names() -> &'static [&'static str] {
-    KNOWN_BOSSES
+    raid_data::all_boss_names()
 }
 
 fn is_raid_zone(zone: &str) -> bool {
-    RAID_ZONES.iter().any(|(z, _)| *z == zone)
+    raid_data::is_raid_zone(zone)
 }
 
 fn get_boss_count(zone: &str) -> Option<usize> {
-    RAID_ZONES.iter().find(|(z, _)| *z == zone).map(|(_, c)| *c)
+    raid_data::encounter_count(zone)
+}
+
+/// Normalize an addon-reported zone name to its canonical form.
+pub(crate) fn normalize_zone_name(zone: &str) -> String {
+    raid_data::normalize_zone(zone)
+}
+
+fn is_overworld_zone(zone: &str) -> bool {
+    raid_data::is_overworld_zone(zone)
+}
+
+fn instance_from_boss_kills(boss_kills: &[String]) -> Option<&'static str> {
+    raid_data::instance_from_bosses(boss_kills)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -541,9 +410,9 @@ fn scan_events(lines: &[String]) -> (Vec<String>, Vec<ScanEvent>) {
 
         if trimmed.contains("ZONE_INFO:") {
             if let Some(zone) = extract_zone(trimmed) {
-                let zone_lower = zone.to_lowercase();
+                let canonical = normalize_zone_name(zone);
                 let idx = names.len() as u32;
-                names.push(zone_lower);
+                names.push(canonical);
                 events.push(ScanEvent {
                     timestamp_secs: ts_secs,
                     line_index: i,
@@ -628,7 +497,26 @@ struct SessionBuilder {
     boss_kills: Vec<String>,
 }
 
+/// Determine the established raid instance for a session from its boss kills.
+///
+/// Returns `Some(instance_name)` if all boss kills so far belong to one instance.
+fn session_instance(boss_kills: &[String]) -> Option<&'static str> {
+    raid_data::instance_from_bosses(boss_kills)
+}
+
 /// Second phase: group sorted events into sessions.
+///
+/// Session boundaries are determined by:
+/// 1. **Time gaps** > 30 minutes between events → new session.
+/// 2. **Entering a raid zone** from a non-raid session → new session starts.
+/// 3. **Entering a *different* raid zone** while already in a raid → new session.
+/// 4. **Boss kill from a different instance** than the current session → new session.
+///    This handles back-to-back raids (BWL → AQ40 → Onyxia) without zone events.
+///
+/// Once a session has a raid zone, it is "sticky" — overworld/city zone blips
+/// (e.g. `deadwind pass` between Karazhan boss attempts) do NOT split the session.
+/// This is critical because zone events from raid members interleave with
+/// overworld zones as players zone in/out.
 #[allow(clippy::cast_possible_truncation)] // name_idx indexing
 fn build_sessions(names: &[String], mut events: Vec<ScanEvent>) -> Vec<Session> {
     events.sort_unstable_by(|a, b| a.timestamp_secs.total_cmp(&b.timestamp_secs));
@@ -637,12 +525,54 @@ fn build_sessions(names: &[String], mut events: Vec<ScanEvent>) -> Vec<Session> 
     let mut current: Option<SessionBuilder> = None;
 
     for event in &events {
-        let should_start_new = current.as_ref().is_none_or(|cur| {
-            (event.timestamp_secs - cur.end_time_secs > SESSION_GAP_SECS)
-                || matches!(event.event_type, EventType::Zone
-                    if is_raid_zone(&names[event.name_idx as usize])
-                        && !cur.primary_zone.as_ref().is_some_and(|pz| is_raid_zone(pz)))
-        });
+        let zone_name = match event.event_type {
+            EventType::Zone => Some(names[event.name_idx as usize].as_str()),
+            _ => None,
+        };
+
+        // Check if this boss kill belongs to a different instance than the current session
+        let boss_splits = matches!(event.event_type, EventType::BossKill)
+            && current.as_ref().is_some_and(|cur| {
+                let boss = &names[event.name_idx as usize];
+                if let Some(boss_inst) = raid_data::boss_raid(boss) {
+                    // If the current session already has boss kills from a specific instance,
+                    // and this new boss is from a DIFFERENT instance → split
+                    if let Some(cur_inst) = session_instance(&cur.boss_kills) {
+                        return cur_inst != boss_inst;
+                    }
+                    // If the session has a raid zone set and boss is from a different raid → split
+                    if let Some(pz) = cur.primary_zone.as_ref() {
+                        if is_raid_zone(pz) && pz != boss_inst {
+                            return true;
+                        }
+                    }
+                }
+                false
+            });
+
+        let should_start_new = boss_splits
+            || current.as_ref().is_none_or(|cur| {
+                // Time gap exceeds threshold
+                if event.timestamp_secs - cur.end_time_secs > SESSION_GAP_SECS {
+                    return true;
+                }
+                if let Some(zone) = zone_name {
+                    if is_raid_zone(zone) {
+                        let cur_is_raid =
+                            cur.primary_zone.as_ref().is_some_and(|pz| is_raid_zone(pz));
+                        if !cur_is_raid {
+                            // Entering a raid zone from a non-raid session → split
+                            return true;
+                        }
+                        // Already in a raid — only split if it's a DIFFERENT raid
+                        let same_raid = cur.primary_zone.as_ref().is_some_and(|pz| pz == zone);
+                        if !same_raid {
+                            return true;
+                        }
+                    }
+                }
+                false
+            });
 
         if should_start_new {
             if let Some(session) = current.take() {
@@ -663,14 +593,18 @@ fn build_sessions(names: &[String], mut events: Vec<ScanEvent>) -> Vec<Session> 
 
         let cur = current
             .as_mut()
-            .expect("current always Some after should_start_new");
+            .expect("current always Some after session init");
         cur.end_time_secs = event.timestamp_secs;
         cur.end_line = event.line_index;
 
         match event.event_type {
             EventType::Zone => {
                 let zone = &names[event.name_idx as usize];
-                if cur.primary_zone.is_none() || is_raid_zone(zone) {
+                // Raid zones always take priority and are sticky — once set,
+                // only a different raid zone can replace them.
+                // Non-raid zones only apply if the current zone is also non-raid.
+                let cur_is_raid = cur.primary_zone.as_ref().is_some_and(|pz| is_raid_zone(pz));
+                if is_raid_zone(zone) || !cur_is_raid {
                     cur.primary_zone = Some(zone.clone());
                 }
             }
@@ -703,14 +637,39 @@ fn build_sessions(names: &[String], mut events: Vec<ScanEvent>) -> Vec<Session> 
 }
 
 /// Convert `SessionBuilder`s into final `Session` structs.
+///
+/// Uses a two-tier zone resolution strategy:
+/// 1. If boss kills are present and all belong to one instance, use that instance name
+///    (boss-to-instance mapping is the most reliable signal).
+/// 2. Otherwise, use the `ZONE_INFO`-derived zone (already normalized by aliases).
 fn finalize_sessions(sessions: Vec<SessionBuilder>) -> Vec<Session> {
     sessions
         .into_iter()
         .filter(|s| s.combat_count > 0)
         .map(|s| {
-            let zone = s.primary_zone.as_deref().unwrap_or("unknown");
-            let zone_display = format_zone_name(zone);
             let duration = s.end_time_secs - s.start_time_secs;
+
+            // Try to determine instance from boss kills first (most reliable).
+            // Fall back to the zone reported by ZONE_INFO.
+            let boss_zone = instance_from_boss_kills(&s.boss_kills);
+            let zone_info = s.primary_zone.as_deref().unwrap_or("unknown");
+
+            // Use boss-derived zone if:
+            //  - Boss kills unambiguously identify an instance, AND
+            //  - The ZONE_INFO zone is not a raid OR is an overworld zone
+            //    (i.e., boss mapping overrides non-raid/overworld zones but
+            //     doesn't override a correct raid zone)
+            let zone = if let Some(bz) = boss_zone {
+                if !is_raid_zone(zone_info) || is_overworld_zone(zone_info) {
+                    bz
+                } else {
+                    zone_info
+                }
+            } else {
+                zone_info
+            };
+
+            let zone_display = raid_data::format_zone_name(zone);
 
             let name = if is_raid_zone(zone) {
                 let total_bosses = get_boss_count(zone).unwrap_or(0);
@@ -745,17 +704,8 @@ fn finalize_sessions(sessions: Vec<SessionBuilder>) -> Vec<Session> {
         .collect()
 }
 
-fn format_zone_name(zone: &str) -> String {
-    zone.split_whitespace()
-        .map(|word| {
-            let mut chars = word.chars();
-            chars.next().map_or_else(String::new, |c| {
-                let upper: String = c.to_uppercase().collect();
-                format!("{upper}{}", chars.as_str())
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+pub fn format_zone_name(zone: &str) -> String {
+    raid_data::format_zone_name(zone)
 }
 
 /// Extract the "You" player name from `COMBATANT_INFO` by splitting on `&`.

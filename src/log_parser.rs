@@ -310,8 +310,9 @@ fn parse_metadata(trimmed: &str, timestamp: f64, data: &mut LogData, state: &mut
 
     if trimmed.contains("ZONE_INFO:") {
         if let Some(zone) = parser::extract_zone(trimmed) {
-            data.zone_name = zone.to_string();
-            state.current_zone = Some(zone.to_string());
+            let canonical = parser::normalize_zone_name(zone);
+            data.zone_name.clone_from(&canonical);
+            state.current_zone = Some(canonical);
         }
     }
 
@@ -490,8 +491,12 @@ fn detect_boss_from_combat(trimmed: &str, data: &LogData, state: &mut ParseState
             || trimmed.contains("suffers ")
             || trimmed.contains("resisted")
         {
+            // Boss names from raid_data are lowercased; lowercase the line for matching.
+            let line_lower = trimmed.to_lowercase();
             for boss in parser::known_boss_names() {
-                if contains_word(trimmed, boss) {
+                if contains_word(&line_lower, boss) {
+                    // Store the boss name as-is (lowercased) — `is_known_boss` is
+                    // case-insensitive so downstream checks will still work.
                     state.current_boss = Some(boss.to_string());
                     return;
                 }
@@ -1708,8 +1713,8 @@ mod tests {
         let enc = &data.encounters[0];
         assert_eq!(
             enc.name.as_deref(),
-            Some("Garr"),
-            "Should detect Garr from resist line"
+            Some("garr"),
+            "Should detect Garr from resist line (lowercased from raid_data)"
         );
         assert!(enc.is_boss, "Garr should be marked as boss");
         assert!(!enc.is_kill, "Wipe should not be marked as kill");

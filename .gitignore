@@ -13,4 +13,9 @@ Cargo.lock
 Thumbs.db
 
 # Project-specific
-VIEWER.md
+*.md
+*.txt
+*.zip
+
+# Reference source
+source-2-26-2026/
