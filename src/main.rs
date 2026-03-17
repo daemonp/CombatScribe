@@ -7,10 +7,10 @@ mod theme;
 mod viewer;
 
 use iced::widget::{
-    button, checkbox, column, container, horizontal_rule, horizontal_space, pick_list,
-    progress_bar, row, scrollable, text, Column,
+    button, center, checkbox, column, container, horizontal_rule, horizontal_space, row, stack,
+    text, Column,
 };
-use iced::{Center, Element, Fill, Task, Theme};
+use iced::{Center, Color, Element, Fill, Length, Task, Theme};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -101,18 +101,14 @@ fn run_bench(path: &str) {
 
 #[derive(Debug)]
 enum AppState {
-    /// Waiting for user to select a file.
-    Idle,
-    /// File loaded, showing sessions to pick from.
-    FileLoaded,
-    /// Processing the log.
-    Processing,
-    /// Done.
-    Done(DoneInfo),
-    /// Error.
-    Error(String),
+    /// No data loaded — shows welcome screen with Load button.
+    Empty,
+    /// Loading/parsing a file or switching sessions.
+    Loading,
     /// Viewing parsed log data.
     Viewing(Box<viewer::ViewerState>),
+    /// Error occurred.
+    Error(String),
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +129,7 @@ struct ExportOptions {
     rename_output: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)] // export options are independent toggles
 struct App {
     state: AppState,
     file_path: Option<PathBuf>,
@@ -141,17 +138,21 @@ struct App {
     sessions: Vec<parser::Session>,
     session_names: Vec<String>,
     selected_session: Option<String>,
+
+    // Export options
     create_zip: bool,
     zero_log: bool,
     rename_output: bool,
-    progress: f32,
-    status_message: String,
+
+    // Export modal
+    show_export_modal: bool,
+    export_result: Option<Result<DoneInfo, String>>,
 }
 
 impl App {
     fn new() -> Self {
         Self {
-            state: AppState::Idle,
+            state: AppState::Empty,
             file_path: None,
             file_name: String::new(),
             lines: Arc::new(Vec::new()),
@@ -161,24 +162,35 @@ impl App {
             create_zip: true,
             zero_log: false,
             rename_output: true,
-            progress: 0.0,
-            status_message: String::from("Select a WoW combat log file to begin."),
+            show_export_modal: false,
+            export_result: None,
         }
     }
 
-    /// Get the `you_players` for the currently selected session (if any).
-    fn selected_you_players(&self) -> Option<&[String]> {
-        let sel = self.selected_session.as_ref()?;
-        let idx = self.session_names.iter().position(|n| n == sel)?;
-        if idx == 0 {
-            return None; // "Entire Log" — no specific session
-        }
-        let session = self.sessions.get(idx - 1)?;
-        if session.you_players.is_empty() {
-            None
-        } else {
-            Some(&session.you_players)
-        }
+    /// Parse the selected session (or the first session if none selected).
+    /// Returns a Task that yields `Message::ViewerParsed`.
+    fn parse_session(&self) -> Task<Message> {
+        let lines = Arc::clone(&self.lines);
+        let sessions = self.sessions.clone();
+        let selected_name = self.selected_session.clone();
+        let session_names = self.session_names.clone();
+
+        Task::perform(
+            async move {
+                // Find which session to extract
+                let lines_to_extract = selected_name
+                    .and_then(|sel| session_names.iter().position(|n| n == &sel))
+                    .map_or_else(
+                        || lines.as_ref().clone(),
+                        |idx| parser::extract_session_lines(&lines, &sessions[idx]),
+                    );
+                // Format lines (You/Your replacement, pet attribution,
+                // apostrophe normalization) before parsing
+                let (formatted_lines, _player_names) = formatter::format_log(lines_to_extract);
+                Box::new(log_parser::parse_log(&formatted_lines))
+            },
+            Message::ViewerParsed,
+        )
     }
 }
 
@@ -186,19 +198,25 @@ impl App {
 
 #[derive(Debug, Clone)]
 enum Message {
+    // File loading
     OpenFile,
     FileSelected(Option<PathBuf>),
     FileLoaded(Result<Arc<Vec<String>>, String>),
     SessionsDetected(Vec<parser::Session>),
-    SessionSelected(String),
+
+    // Viewer parsed result
+    ViewerParsed(Box<log_data::LogData>),
+
+    // Export modal
+    CloseExportModal,
     ToggleZip(bool),
     ToggleZeroLog(bool),
     ToggleRename(bool),
     Export,
     ExportComplete(Result<DoneInfo, String>),
-    Reset,
-    ViewLog,
-    ViewerParsed(Box<log_data::LogData>),
+    DismissExportResult,
+
+    // Viewer messages
     Viewer(viewer::ViewerMessage),
 }
 
@@ -216,9 +234,8 @@ impl App {
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    self.status_message = format!("Loading {}...", self.file_name);
-                    self.progress = 0.1;
                     self.file_path = Some(p.clone());
+                    self.state = AppState::Loading;
 
                     Task::perform(async move { load_file(p).await }, Message::FileLoaded)
                 }
@@ -228,12 +245,7 @@ impl App {
             Message::FileLoaded(result) => match result {
                 Ok(lines) => {
                     self.lines = Arc::clone(&lines);
-                    self.status_message = format!(
-                        "Loaded {} ({} lines). Detecting sessions...",
-                        self.file_name,
-                        self.lines.len()
-                    );
-                    self.progress = 0.3;
+                    self.state = AppState::Loading;
 
                     Task::perform(
                         async move { parser::detect_sessions(&lines) },
@@ -241,47 +253,56 @@ impl App {
                     )
                 }
                 Err(e) => {
-                    self.state = AppState::Error(e.clone());
-                    self.status_message = format!("Error: {e}");
+                    self.state = AppState::Error(e);
                     Task::none()
                 }
             },
 
             Message::SessionsDetected(sessions) => {
                 self.sessions = sessions;
-                self.session_names = Vec::new();
+                self.session_names = self
+                    .sessions
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
 
-                // Always include "Entire Log" option
-                self.session_names
-                    .push(format!("Entire Log ({} lines)", self.lines.len()));
-
-                for s in &self.sessions {
-                    self.session_names.push(s.to_string());
+                // Auto-select first session (preferring raid sessions)
+                if let Some(first) = self.session_names.first() {
+                    self.selected_session = Some(first.clone());
                 }
 
-                // Default to "Entire Log"
-                self.selected_session = Some(self.session_names[0].clone());
+                if self.session_names.is_empty() {
+                    // No sessions detected — parse entire log as one session
+                    let lines = Arc::clone(&self.lines);
+                    self.state = AppState::Loading;
+                    return Task::perform(
+                        async move {
+                            let (formatted_lines, _player_names) =
+                                formatter::format_log(lines.as_ref().clone());
+                            Box::new(log_parser::parse_log(&formatted_lines))
+                        },
+                        Message::ViewerParsed,
+                    );
+                }
 
-                self.state = AppState::FileLoaded;
-                self.progress = 0.5;
+                // Parse the first session automatically
+                self.state = AppState::Loading;
+                self.parse_session()
+            }
 
-                self.status_message = if self.sessions.is_empty() {
-                    format!(
-                        "Loaded {}. No sessions detected - will process entire log.",
-                        self.file_name
-                    )
-                } else {
-                    format!(
-                        "Found {} session(s). Select a segment and options, then export.",
-                        self.sessions.len()
-                    )
-                };
-
+            Message::ViewerParsed(log_data) => {
+                let mut vs = viewer::ViewerState::new(*log_data);
+                // Provide session list to the viewer for the header dropdown
+                vs.session_names.clone_from(&self.session_names);
+                vs.selected_session_name.clone_from(&self.selected_session);
+                self.state = AppState::Viewing(Box::new(vs));
                 Task::none()
             }
 
-            Message::SessionSelected(session) => {
-                self.selected_session = Some(session);
+            // ── Export modal ────────────────────────────────────────────
+            Message::CloseExportModal | Message::DismissExportResult => {
+                self.show_export_modal = false;
+                self.export_result = None;
                 Task::none()
             }
 
@@ -302,14 +323,9 @@ impl App {
 
             Message::Export => {
                 let Some(file_path) = self.file_path.clone() else {
-                    self.state = AppState::Error("No file selected".to_string());
-                    self.status_message = "Error: No file selected".to_string();
+                    self.export_result = Some(Err("No file selected".to_string()));
                     return Task::none();
                 };
-
-                self.state = AppState::Processing;
-                self.status_message = "Processing log...".to_string();
-                self.progress = 0.6;
 
                 let lines = Arc::clone(&self.lines);
                 let sessions = self.sessions.clone();
@@ -337,97 +353,38 @@ impl App {
             }
 
             Message::ExportComplete(result) => {
-                match result {
-                    Ok(info) => {
-                        self.progress = 1.0;
-                        let mut msg =
-                            format!("Exported {} lines to {}", info.line_count, info.output_path);
-                        if !info.player_names.is_empty() {
-                            use std::fmt::Write;
-                            let _ = write!(msg, ". Players: {}", info.player_names.join(", "));
-                        }
-                        if info.zipped {
-                            msg.push_str(". Zip created.");
-                        }
-                        if info.zeroed {
-                            msg.push_str(". Original log zeroed.");
-                        }
-                        self.status_message = msg;
-                        self.state = AppState::Done(info);
-                    }
-                    Err(e) => {
-                        self.status_message = format!("Export error: {e}");
-                        self.state = AppState::Error(e);
-                    }
-                }
+                self.export_result = Some(result);
                 Task::none()
             }
 
-            Message::Reset => {
-                *self = Self::new();
-                Task::none()
-            }
-
-            Message::ViewLog => {
-                let lines = Arc::clone(&self.lines);
-                let sessions = self.sessions.clone();
-                let selected = self.selected_session.clone();
-                let session_names = self.session_names.clone();
-
-                self.state = AppState::Processing;
-                self.status_message = "Parsing log for viewer...".to_string();
-                self.progress = 0.6;
-
-                Task::perform(
-                    async move {
-                        // Extract the session lines
-                        let lines_to_extract = selected
-                            .and_then(|sel| session_names.iter().position(|n| n == &sel))
-                            .map_or_else(
-                                || lines.as_ref().clone(),
-                                |idx| {
-                                    if idx == 0 {
-                                        lines.as_ref().clone()
-                                    } else {
-                                        parser::extract_session_lines(&lines, &sessions[idx - 1])
-                                    }
-                                },
-                            );
-                        // Format lines (You/Your replacement, pet attribution,
-                        // apostrophe normalization) before parsing
-                        let (formatted_lines, _player_names) =
-                            formatter::format_log(lines_to_extract);
-                        Box::new(log_parser::parse_log(&formatted_lines))
-                    },
-                    Message::ViewerParsed,
-                )
-            }
-
-            Message::ViewerParsed(log_data) => {
-                self.state = AppState::Viewing(Box::new(viewer::ViewerState::new(*log_data)));
-                self.progress = 1.0;
-                self.status_message = "Log parsed. Viewing.".to_string();
-                Task::none()
-            }
-
+            // ── Viewer messages ─────────────────────────────────────────
             Message::Viewer(viewer_msg) => {
-                if matches!(viewer_msg, viewer::ViewerMessage::BackToMain) {
-                    self.state = AppState::FileLoaded;
-                    self.status_message = format!(
-                        "Found {} session(s). Select a segment and options, then export or view.",
-                        self.sessions.len()
-                    );
-                    return Task::none();
+                // Intercept viewer messages that need app-level handling
+                match viewer_msg {
+                    viewer::ViewerMessage::LoadFile => {
+                        Task::perform(pick_file(), Message::FileSelected)
+                    }
+                    viewer::ViewerMessage::ShowExport => {
+                        self.show_export_modal = true;
+                        self.export_result = None;
+                        Task::none()
+                    }
+                    viewer::ViewerMessage::SwitchSession(name) => {
+                        self.selected_session = Some(name);
+                        self.state = AppState::Loading;
+                        self.parse_session()
+                    }
+                    viewer::ViewerMessage::Quit => {
+                        iced::window::get_latest().and_then(iced::window::close)
+                    }
+                    other => {
+                        if let AppState::Viewing(ref mut viewer_state) = self.state {
+                            viewer_state.update(other).map(Message::Viewer)
+                        } else {
+                            Task::none()
+                        }
+                    }
                 }
-
-                if matches!(viewer_msg, viewer::ViewerMessage::Quit) {
-                    return iced::window::get_latest().and_then(iced::window::close);
-                }
-
-                if let AppState::Viewing(ref mut viewer_state) = self.state {
-                    return viewer_state.update(viewer_msg).map(Message::Viewer);
-                }
-                Task::none()
             }
         }
     }
@@ -435,111 +392,164 @@ impl App {
     // ── View ────────────────────────────────────────────────────────────────
 
     fn view(&self) -> Element<'_, Message> {
-        let header = text("WoW Log Formatter").size(28);
-
-        let subtitle = text("Format combat logs for upload")
-            .size(14)
-            .color([0.6, 0.6, 0.6]);
-
-        let header_section = column![header, subtitle].spacing(4).align_x(Center);
-
         let content: Element<Message> = match &self.state {
-            AppState::Idle => self.view_idle(),
-            AppState::FileLoaded => self.view_file_loaded(),
-            AppState::Processing => self.view_processing(),
-            AppState::Done(info) => self.view_done(info),
+            AppState::Empty => self.view_empty(),
+            AppState::Loading => self.view_loading(),
+            AppState::Viewing(viewer_state) => viewer_state.view().map(Message::Viewer),
             AppState::Error(err) => self.view_error(err),
-            AppState::Viewing(viewer_state) => {
-                return viewer_state.view().map(Message::Viewer);
-            }
         };
 
-        let status_bar =
-            container(text(&self.status_message).size(12).color([0.5, 0.5, 0.5])).padding(8);
+        // Wrap with export modal overlay if needed
+        if self.show_export_modal {
+            stack![content, self.view_export_modal()]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else {
+            content
+        }
+    }
 
-        let layout = column![
-            header_section,
-            horizontal_rule(1),
-            content,
-            horizontal_rule(1),
-            status_bar,
+    // ── Empty State (Welcome Screen) ────────────────────────────────────
+
+    #[allow(clippy::unused_self)] // iced view pattern
+    fn view_empty(&self) -> Element<'_, Message> {
+        let header_row = row![
+            button(text("Load File").size(12).color(Color::WHITE))
+                .on_press(Message::OpenFile)
+                .padding([6, 16])
+                .style(header_button_style),
+            horizontal_space(),
+            button(text("Quit").size(11).color(theme::TEXT_SECONDARY))
+                .on_press(Message::Viewer(viewer::ViewerMessage::Quit))
+                .style(viewer::transparent_button_style)
+                .padding([5, 14]),
         ]
-        .spacing(16)
-        .padding(24)
+        .spacing(8)
+        .align_y(Center)
         .width(Fill);
 
-        container(layout)
+        let welcome = column![
+            text("CombatScribe").size(32).color(Color::WHITE),
+            text("WoW Vanilla Combat Log Viewer")
+                .size(14)
+                .color(theme::TEXT_SECONDARY),
+            container(
+                button(
+                    text("Load Combat Log")
+                        .size(16)
+                        .center()
+                        .color(Color::WHITE)
+                )
+                .on_press(Message::OpenFile)
+                .padding([14, 40])
+                .style(primary_button_style)
+            )
+            .padding([20, 0]),
+            text("Supports WoWCombatLog.txt and .zip files")
+                .size(12)
+                .color(theme::TEXT_MUTED),
+        ]
+        .spacing(8)
+        .align_x(Center);
+
+        column![header_row, center(welcome).width(Fill).height(Fill),]
+            .spacing(10)
+            .padding(20)
             .width(Fill)
             .height(Fill)
-            .center_x(Fill)
             .into()
     }
 
+    // ── Loading State ───────────────────────────────────────────────────
+
     #[allow(clippy::unused_self)] // iced view pattern
-    fn view_idle(&self) -> Element<'_, Message> {
-        let open_btn = button(text("Select Log File").size(16).center())
-            .on_press(Message::OpenFile)
-            .padding([12, 32])
-            .width(Fill);
-
-        let hint = text("Supports WoWCombatLog.txt files")
-            .size(12)
-            .color([0.5, 0.5, 0.5]);
-
-        column![container(
-            column![
-                text("No file selected").size(16).color([0.6, 0.6, 0.6]),
-                open_btn,
-                hint,
-            ]
-            .spacing(16)
-            .align_x(Center)
-            .width(Fill)
-        )
-        .padding(40)
-        .center_x(Fill)
-        .width(Fill),]
-        .spacing(16)
-        .into()
-    }
-
-    fn view_file_loaded(&self) -> Element<'_, Message> {
-        let file_label = row![
-            text("File:").size(14),
-            text(&self.file_name).size(14).color([0.3, 0.8, 0.5]),
+    fn view_loading(&self) -> Element<'_, Message> {
+        let header_row = row![
+            button(text("Load File").size(12).color(theme::TEXT_MUTED))
+                .padding([6, 16])
+                .style(header_button_style),
             horizontal_space(),
-            button(text("Change").size(12))
-                .on_press(Message::OpenFile)
-                .padding([4, 12]),
         ]
         .spacing(8)
-        .align_y(Center);
+        .align_y(Center)
+        .width(Fill);
 
-        // Session picker
-        let mut session_section = Column::new().spacing(6);
-        session_section = session_section.push(text("Session / Segment").size(14));
-        session_section = session_section.push(
-            pick_list(
-                self.session_names.clone(),
-                self.selected_session.clone(),
-                Message::SessionSelected,
-            )
+        let loading = column![
+            text("Loading...").size(20).color(Color::WHITE),
+            text("Parsing combat log data...")
+                .size(13)
+                .color(theme::TEXT_SECONDARY),
+        ]
+        .spacing(8)
+        .align_x(Center);
+
+        column![header_row, center(loading).width(Fill).height(Fill),]
+            .spacing(10)
+            .padding(20)
             .width(Fill)
-            .padding(8),
-        );
+            .height(Fill)
+            .into()
+    }
 
-        // Show which player(s) "You/Your" maps to for the selected session
-        if let Some(players) = self.selected_you_players() {
-            session_section = session_section.push(
-                text(format!("You/Your: {}", players.join(", ")))
-                    .size(12)
-                    .color([0.4, 0.7, 1.0]),
-            );
-        }
+    // ── Error State ─────────────────────────────────────────────────────
 
-        // Options
-        let options_section = column![
-            text("Export Options").size(14),
+    #[allow(clippy::unused_self)] // iced view pattern
+    fn view_error<'a>(&self, err: &'a str) -> Element<'a, Message> {
+        let header_row = row![
+            button(text("Load File").size(12).color(Color::WHITE))
+                .on_press(Message::OpenFile)
+                .padding([6, 16])
+                .style(header_button_style),
+            horizontal_space(),
+            button(text("Quit").size(11).color(theme::TEXT_SECONDARY))
+                .on_press(Message::Viewer(viewer::ViewerMessage::Quit))
+                .style(viewer::transparent_button_style)
+                .padding([5, 14]),
+        ]
+        .spacing(8)
+        .align_y(Center)
+        .width(Fill);
+
+        let error_content = column![
+            text("Error").size(24).color(Color::from_rgb(1.0, 0.3, 0.3)),
+            text(err).size(14).color(Color::from_rgb(1.0, 0.5, 0.5)),
+            button(
+                text("Load Another File")
+                    .size(14)
+                    .center()
+                    .color(Color::WHITE)
+            )
+            .on_press(Message::OpenFile)
+            .padding([10, 28])
+            .style(primary_button_style),
+        ]
+        .spacing(12)
+        .align_x(Center);
+
+        column![header_row, center(error_content).width(Fill).height(Fill),]
+            .spacing(10)
+            .padding(20)
+            .width(Fill)
+            .height(Fill)
+            .into()
+    }
+
+    // ── Export Modal Overlay ─────────────────────────────────────────────
+
+    #[allow(clippy::too_many_lines)] // iced UI layout — modal with conditional result display
+    fn view_export_modal(&self) -> Element<'_, Message> {
+        let title = text("Export Session").size(18).color(Color::WHITE);
+
+        let session_label = if let Some(ref sel) = self.selected_session {
+            text(sel.as_str()).size(12).color(theme::TEXT_SECONDARY)
+        } else {
+            text("No session selected")
+                .size(12)
+                .color(theme::TEXT_SECONDARY)
+        };
+
+        let options = column![
             checkbox("Create ZIP archive", self.create_zip)
                 .on_toggle(Message::ToggleZip)
                 .size(18),
@@ -555,138 +565,177 @@ impl App {
         ]
         .spacing(10);
 
-        // Action buttons
-        let view_btn = button(text("View Log").size(16).center())
-            .on_press(Message::ViewLog)
-            .padding([12, 32])
-            .width(Fill);
-
-        let export_btn = button(text("Export").size(16).center())
-            .on_press(Message::Export)
-            .padding([12, 32])
-            .width(Fill);
-
-        let action_row = row![view_btn, export_btn].spacing(12).width(Fill);
-
         let warning: Element<Message> = if self.zero_log {
             text("The original log file will be emptied after export.")
                 .size(12)
-                .color([1.0, 0.6, 0.2])
+                .color(Color::from_rgb(1.0, 0.6, 0.2))
                 .into()
         } else {
             column![].into()
         };
 
-        scrollable(
-            column![
-                file_label,
-                horizontal_rule(1),
-                session_section,
-                horizontal_rule(1),
-                options_section,
-                warning,
-                horizontal_rule(1),
-                action_row,
-            ]
-            .spacing(16)
-            .width(Fill),
-        )
-        .into()
-    }
-
-    fn view_processing(&self) -> Element<'_, Message> {
-        column![
-            text("Processing...").size(18),
-            progress_bar(0.0..=1.0, self.progress).width(Fill),
-            text("Formatting log entries and applying replacements...")
-                .size(12)
-                .color([0.5, 0.5, 0.5]),
-        ]
-        .spacing(16)
-        .padding(40)
-        .align_x(Center)
-        .width(Fill)
-        .into()
-    }
-
-    #[allow(clippy::unused_self)] // iced view pattern
-    fn view_done<'a>(&self, info: &'a DoneInfo) -> Element<'a, Message> {
-        let mut details = Column::new().spacing(6);
-
-        details = details.push(
-            row![
-                text("Output:").size(14),
-                text(&info.output_path).size(14).color([0.3, 0.8, 0.5]),
-            ]
-            .spacing(8),
-        );
-
-        details = details.push(
-            row![
-                text("Lines:").size(14),
-                text(info.line_count.to_string()).size(14),
-            ]
-            .spacing(8),
-        );
-
-        if !info.player_names.is_empty() {
-            details = details.push(
-                row![
-                    text("Players:").size(14),
-                    text(info.player_names.join(", "))
-                        .size(14)
-                        .color([0.4, 0.7, 1.0]),
+        // Show export result or action buttons
+        let bottom_section: Element<Message> = if let Some(ref result) = self.export_result {
+            match result {
+                Ok(info) => {
+                    let mut details = Column::new().spacing(4);
+                    details = details.push(
+                        text(format!("Exported {} lines", info.line_count))
+                            .size(13)
+                            .color(Color::from_rgb(0.3, 0.8, 0.5)),
+                    );
+                    details = details.push(
+                        text(&info.output_path)
+                            .size(11)
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                    if !info.player_names.is_empty() {
+                        details = details.push(
+                            text(format!("Players: {}", info.player_names.join(", ")))
+                                .size(11)
+                                .color(theme::TEXT_SECONDARY),
+                        );
+                    }
+                    if info.zipped {
+                        details = details.push(
+                            text("ZIP archive created")
+                                .size(11)
+                                .color(theme::TEXT_SECONDARY),
+                        );
+                    }
+                    if info.zeroed {
+                        details = details.push(
+                            text("Original log file cleared")
+                                .size(11)
+                                .color(Color::from_rgb(1.0, 0.6, 0.2)),
+                        );
+                    }
+                    column![
+                        details,
+                        button(text("Done").size(14).center().color(Color::WHITE))
+                            .on_press(Message::DismissExportResult)
+                            .padding([8, 24])
+                            .width(Fill)
+                            .style(primary_button_style),
+                    ]
+                    .spacing(12)
+                    .into()
+                }
+                Err(e) => column![
+                    text(format!("Export failed: {e}"))
+                        .size(13)
+                        .color(Color::from_rgb(1.0, 0.3, 0.3)),
+                    row![
+                        button(text("Cancel").size(14).center())
+                            .on_press(Message::CloseExportModal)
+                            .padding([8, 24])
+                            .width(Fill),
+                        button(text("Retry").size(14).center().color(Color::WHITE))
+                            .on_press(Message::Export)
+                            .padding([8, 24])
+                            .width(Fill)
+                            .style(primary_button_style),
+                    ]
+                    .spacing(8),
                 ]
-                .spacing(8),
-            );
-        }
+                .spacing(12)
+                .into(),
+            }
+        } else {
+            row![
+                button(text("Cancel").size(14).center())
+                    .on_press(Message::CloseExportModal)
+                    .padding([8, 24])
+                    .width(Fill),
+                button(text("Export").size(14).center().color(Color::WHITE))
+                    .on_press(Message::Export)
+                    .padding([8, 24])
+                    .width(Fill)
+                    .style(primary_button_style),
+            ]
+            .spacing(8)
+            .into()
+        };
 
-        if info.zipped {
-            details = details.push(text("ZIP archive created").size(14).color([0.3, 0.8, 0.5]));
-        }
-
-        if info.zeroed {
-            details = details.push(
-                text("Original log file cleared")
-                    .size(14)
-                    .color([1.0, 0.6, 0.2]),
-            );
-        }
-
-        let reset_btn = button(text("Process Another File").size(16).center())
-            .on_press(Message::Reset)
-            .padding([12, 32])
-            .width(Fill);
-
-        column![
-            text("Export Complete!").size(22).color([0.3, 0.8, 0.5]),
+        let modal_content = column![
+            title,
+            session_label,
             horizontal_rule(1),
-            details,
+            options,
+            warning,
             horizontal_rule(1),
-            reset_btn,
+            bottom_section,
         ]
-        .spacing(16)
-        .padding(20)
-        .width(Fill)
-        .into()
+        .spacing(12)
+        .padding(24)
+        .width(Length::Fixed(420.0));
+
+        let modal_card = container(modal_content).style(|_theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgb(0.12, 0.13, 0.15))),
+            border: iced::Border {
+                color: theme::SURFACE_BORDER,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        });
+
+        // Semi-transparent backdrop
+        let backdrop = button(container("").width(Fill).height(Fill))
+            .on_press(Message::CloseExportModal)
+            .width(Fill)
+            .height(Fill)
+            .style(|_theme, _status| button::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.0, 0.0, 0.0, 0.6,
+                ))),
+                text_color: Color::TRANSPARENT,
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+            });
+
+        stack![backdrop, center(modal_card).width(Fill).height(Fill),]
+            .width(Fill)
+            .height(Fill)
+            .into()
     }
+}
 
-    #[allow(clippy::unused_self)] // iced view pattern
-    fn view_error<'a>(&self, err: &'a str) -> Element<'a, Message> {
-        let reset_btn = button(text("Start Over").size(16).center())
-            .on_press(Message::Reset)
-            .padding([12, 32])
-            .width(Fill);
+// ── Button Styles ───────────────────────────────────────────────────────────
 
-        column![
-            text("Error").size(22).color([1.0, 0.3, 0.3]),
-            text(err).size(14).color([1.0, 0.5, 0.5]),
-            reset_btn,
-        ]
-        .spacing(16)
-        .padding(20)
-        .width(Fill)
-        .into()
+/// Header action button style (subtle background with hover).
+fn header_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 0.10),
+        _ => Color::from_rgba(1.0, 1.0, 1.0, 0.05),
+    };
+    button::Style {
+        background: Some(iced::Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: iced::Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.08),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+/// Primary action button style (blue).
+fn primary_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgb(0.30, 0.45, 0.90),
+        _ => Color::from_rgb(0.25, 0.40, 0.85),
+    };
+    button::Style {
+        background: Some(iced::Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: iced::Border {
+            color: Color::from_rgba(0.35, 0.50, 1.0, 0.3),
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        shadow: iced::Shadow::default(),
     }
 }
 
@@ -760,20 +809,12 @@ fn do_export(
     session_names: &[String],
     opts: &ExportOptions,
 ) -> Result<DoneInfo, String> {
-    // Determine which lines to process — format_log takes ownership
+    // Determine which lines to process
     let lines_to_process = selected
         .and_then(|sel| session_names.iter().position(|n| n == sel))
         .map_or_else(
             || all_lines.to_vec(),
-            |idx| {
-                if idx == 0 {
-                    // "Entire Log" selected
-                    all_lines.to_vec()
-                } else {
-                    // Session index is idx - 1 — only copies the session's lines
-                    parser::extract_session_lines(all_lines, &sessions[idx - 1])
-                }
-            },
+            |idx| parser::extract_session_lines(all_lines, &sessions[idx]),
         );
 
     // Format the log (takes ownership, applies all replacements)

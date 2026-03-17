@@ -47,6 +47,10 @@ pub struct ViewerState {
     pub encounter_names: Vec<String>,
     pub selected_encounter_name: Option<String>,
 
+    // Session switching (populated by App after construction)
+    pub session_names: Vec<String>,
+    pub selected_session_name: Option<String>,
+
     // Damage/Healing tab
     pub damage_type: DamageType,
     pub healing_type: HealingType,
@@ -210,7 +214,12 @@ pub enum ViewerMessage {
     SetEventLogMode(EventLogMode),
     ToggleEventLogType(EventLogTypeKind),
     SetEventLogPlayer(String),
-    BackToMain,
+    /// Request to load a new file (handled by App).
+    LoadFile,
+    /// Request to open the export modal (handled by App).
+    ShowExport,
+    /// Request to switch to a different session (handled by App).
+    SwitchSession(String),
     Quit,
 }
 
@@ -234,6 +243,8 @@ impl ViewerState {
             encounter_filter: EncounterFilter::All,
             encounter_names,
             selected_encounter_name: selected,
+            session_names: Vec::new(),
+            selected_session_name: None,
             damage_type: DamageType::Damage,
             healing_type: HealingType::Effective,
             dispel_type: DispelSubType::Dispels,
@@ -348,7 +359,11 @@ impl ViewerState {
                     );
                 }
             }
-            ViewerMessage::BackToMain | ViewerMessage::Quit => {} // handled by main.rs
+            // These are intercepted and handled by App::update() in main.rs
+            ViewerMessage::LoadFile
+            | ViewerMessage::ShowExport
+            | ViewerMessage::SwitchSession(_)
+            | ViewerMessage::Quit => {}
         }
         iced::Task::none()
     }
@@ -383,8 +398,35 @@ impl ViewerState {
     // ── Header ──────────────────────────────────────────────────────────
 
     fn view_header(&self) -> Element<'_, ViewerMessage> {
-        // Prefer the zone from the first boss encounter (= the raid instance),
-        // falling back to the session-level zone_name (which may just be a city).
+        // ── Left side: action buttons + session dropdown ────────────
+        let load_btn = button(text("Load File").size(12).color(Color::WHITE))
+            .on_press(ViewerMessage::LoadFile)
+            .padding([6, 16])
+            .style(header_action_button_style);
+
+        let export_btn = button(text("Export").size(12).color(Color::WHITE))
+            .on_press(ViewerMessage::ShowExport)
+            .padding([6, 16])
+            .style(header_action_button_style);
+
+        let mut left_row = Row::new().spacing(6).align_y(Center);
+        left_row = left_row.push(load_btn);
+        left_row = left_row.push(export_btn);
+
+        // Session dropdown (only if multiple sessions)
+        if self.session_names.len() > 1 {
+            left_row = left_row.push(
+                pick_list(
+                    self.session_names.clone(),
+                    self.selected_session_name.clone(),
+                    ViewerMessage::SwitchSession,
+                )
+                .padding(4)
+                .text_size(12),
+            );
+        }
+
+        // ── Right side: zone info + quit ────────────────────────────
         let instance_zone = self
             .log_data
             .encounters
@@ -403,13 +445,13 @@ impl ViewerState {
             .unwrap_or("Combat Log");
         let zone = crate::parser::format_zone_name(zone_raw);
 
-        let mut header_row = Row::new().spacing(8).align_y(Center).width(Fill);
-        header_row = header_row.push(text(zone).size(20).color(Color::WHITE));
+        let mut right_row = Row::new().spacing(8).align_y(Center);
+        right_row = right_row.push(text(zone).size(20).color(Color::WHITE));
 
         // Raid size badge
         if let Some((_, total)) = self.log_data.raid_size {
             let player_count = self.log_data.combatants.len();
-            header_row = header_row.push(
+            right_row = right_row.push(
                 text(format!("{player_count}/{total} players"))
                     .size(12)
                     .color(theme::TEXT_MUTED),
@@ -417,7 +459,7 @@ impl ViewerState {
         } else {
             let player_count = self.log_data.combatants.len();
             if player_count > 0 {
-                header_row = header_row.push(
+                right_row = right_row.push(
                     text(format!("{player_count} players"))
                         .size(12)
                         .color(theme::TEXT_MUTED),
@@ -425,7 +467,7 @@ impl ViewerState {
             }
         }
 
-        // Encounter count
+        // Boss kill count
         let boss_kills = self
             .log_data
             .encounters
@@ -439,27 +481,26 @@ impl ViewerState {
             .filter(|e| e.is_boss)
             .count();
         if total_bosses > 0 {
-            header_row = header_row.push(
+            right_row = right_row.push(
                 text(format!("{boss_kills}/{total_bosses} bosses"))
                     .size(12)
                     .color(theme::TEXT_MUTED),
             );
         }
 
-        header_row = header_row.push(horizontal_space());
-        header_row = header_row.push(
-            button(text("Change Session").size(11).color(theme::TEXT_SECONDARY))
-                .on_press(ViewerMessage::BackToMain)
-                .style(transparent_button_style)
-                .padding([5, 14]),
-        );
-        header_row = header_row.push(
+        right_row = right_row.push(
             button(text("Quit").size(11).color(theme::TEXT_SECONDARY))
                 .on_press(ViewerMessage::Quit)
                 .style(transparent_button_style)
                 .padding([5, 14]),
         );
-        header_row.into()
+
+        // ── Assemble header row ─────────────────────────────────────
+        row![left_row, horizontal_space(), right_row,]
+            .spacing(12)
+            .align_y(Center)
+            .width(Fill)
+            .into()
     }
 
     // ── Controls ────────────────────────────────────────────────────────
@@ -2679,8 +2720,26 @@ fn build_meter_row<'a>(
     }
 }
 
+/// Header action button style (subtle background with hover).
+fn header_action_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 0.10),
+        _ => Color::from_rgba(1.0, 1.0, 1.0, 0.05),
+    };
+    button::Style {
+        background: Some(iced::Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: iced::Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.08),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
 /// Transparent button style with subtle hover highlight.
-fn transparent_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+pub fn transparent_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
     let hover_bg = match status {
         button::Status::Hovered => Some(iced::Background::Color(Color {
             r: 1.0,
