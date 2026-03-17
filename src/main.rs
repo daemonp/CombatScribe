@@ -7,15 +7,16 @@ mod raid_data;
 mod theme;
 mod viewer;
 
+use std::fs;
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use iced::widget::{
     button, center, checkbox, column, container, horizontal_rule, horizontal_space, row, stack,
     text, Column,
 };
 use iced::{Center, Color, Element, Fill, Length, Task, Theme};
-use std::fs;
-use std::io::{Read, Write};
-use std::path::PathBuf;
-use std::sync::Arc;
 
 fn main() -> iced::Result {
     let args: Vec<String> = std::env::args().collect();
@@ -319,6 +320,11 @@ struct ExportOptions {
     create_zip: bool,
     zero_log: bool,
     rename_output: bool,
+    /// Session metadata for descriptive filename (empty when exporting entire log).
+    session_player_names: Vec<String>,
+    session_zone_name: String,
+    session_start_time: f64,
+    session_start_year: Option<i32>,
 }
 
 #[allow(clippy::struct_excessive_bools)] // export options are independent toggles
@@ -500,6 +506,8 @@ impl App {
                 // Provide session list to the viewer for the header dropdown
                 vs.session_names.clone_from(&self.session_names);
                 vs.selected_session_name.clone_from(&self.selected_session);
+                // Restore tracked auras from config
+                vs.tracked_auras.clone_from(&self.config.tracked_auras);
                 self.state = AppState::Viewing(Box::new(vs));
                 Task::none()
             }
@@ -535,11 +543,34 @@ impl App {
                 let lines = Arc::clone(&self.lines);
                 let sessions = self.sessions.clone();
                 let selected = self.selected_session.clone();
+
+                // Look up session metadata for descriptive filename.
+                let session_idx = self
+                    .selected_session
+                    .as_ref()
+                    .and_then(|sel| self.session_names.iter().position(|n| n == sel));
+                let (players, zone, start_time, start_year) = session_idx.map_or_else(
+                    || (Vec::new(), String::new(), 0.0, None),
+                    |idx| {
+                        let s = &self.sessions[idx];
+                        (
+                            s.you_players.clone(),
+                            s.name.clone(),
+                            s.start_time,
+                            s.start_year,
+                        )
+                    },
+                );
+
                 let opts = ExportOptions {
                     file_path,
                     create_zip: self.create_zip,
                     zero_log: self.zero_log,
                     rename_output: self.rename_output,
+                    session_player_names: players,
+                    session_zone_name: zone,
+                    session_start_time: start_time,
+                    session_start_year: start_year,
                 };
 
                 Task::perform(
@@ -573,6 +604,21 @@ impl App {
                     }
                     viewer::ViewerMessage::Quit => {
                         iced::window::get_latest().and_then(iced::window::close)
+                    }
+                    viewer::ViewerMessage::ToggleAura(_)
+                    | viewer::ViewerMessage::ApplyAuraPreset(_)
+                    | viewer::ViewerMessage::ClearAuras => {
+                        if let AppState::Viewing(ref mut viewer_state) = self.state {
+                            let task = viewer_state.update(viewer_msg).map(Message::Viewer);
+                            // Persist tracked auras to config after change
+                            self.config
+                                .tracked_auras
+                                .clone_from(&viewer_state.tracked_auras);
+                            self.config.save();
+                            task
+                        } else {
+                            Task::none()
+                        }
                     }
                     other => {
                         if let AppState::Viewing(ref mut viewer_state) = self.state {
@@ -732,6 +778,33 @@ impl App {
             .into()
     }
 
+    /// Build a preview string for the rename checkbox label.
+    fn export_filename_preview(&self) -> String {
+        let session_idx = self
+            .selected_session
+            .as_ref()
+            .and_then(|sel| self.session_names.iter().position(|n| n == sel));
+
+        if let Some(idx) = session_idx {
+            let s = &self.sessions[idx];
+            let player_part = if s.you_players.is_empty() {
+                "Unknown".to_string()
+            } else {
+                s.you_players.join("-")
+            };
+            let raid_part = sanitize_zone_for_filename(&s.name);
+            let raid_part = if raid_part.is_empty() {
+                "Export".to_string()
+            } else {
+                raid_part
+            };
+            let date_part = parser::date_from_session_timestamp(s.start_time, s.start_year);
+            format!("Rename to {player_part}-{raid_part}-{date_part}-export.txt")
+        } else {
+            "Rename output to Player-Raid-Date-export.txt".to_string()
+        }
+    }
+
     // ── Export Modal Overlay ─────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)] // iced UI layout — modal with conditional result display
@@ -746,16 +819,15 @@ impl App {
                 .color(theme::TEXT_SECONDARY)
         };
 
+        let rename_label = self.export_filename_preview();
+
         let options = column![
             checkbox("Create ZIP archive", self.create_zip)
                 .on_toggle(Message::ToggleZip)
                 .size(18),
-            checkbox(
-                "Rename output to TurtLog-{timestamp}.txt",
-                self.rename_output
-            )
-            .on_toggle(Message::ToggleRename)
-            .size(18),
+            checkbox(rename_label.as_str(), self.rename_output)
+                .on_toggle(Message::ToggleRename)
+                .size(18),
             checkbox("Zero (clear) original log file after export", self.zero_log)
                 .on_toggle(Message::ToggleZeroLog)
                 .size(18),
@@ -1000,6 +1072,23 @@ fn read_text_from_zip_bytes(bytes: &[u8]) -> Result<String, String> {
     Ok(content)
 }
 
+/// Strip session name qualifiers and make it filename-safe.
+///
+/// Removes trailing ` Full Clear`, ` (3/10)`, ` (wipes)` added by
+/// `finalize_sessions()`, then drops spaces and non-alphanumeric characters.
+fn sanitize_zone_for_filename(session_name: &str) -> String {
+    let base = session_name
+        .trim_end_matches(" Full Clear")
+        .split(" (")
+        .next()
+        .unwrap_or(session_name)
+        .trim();
+
+    base.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
 /// Export pipeline — runs synchronous I/O (no async needed).
 fn do_export(
     all_lines: &[String],
@@ -1038,8 +1127,23 @@ fn do_export(
 
     // Determine output filename
     let output_path = if opts.rename_output {
-        let ts = chrono::Local::now().format("%Y-%m-%dT%H-%M").to_string();
-        parent.join(format!("TurtLog-{ts}.txt"))
+        let player_part = if opts.session_player_names.is_empty() {
+            "Unknown".to_string()
+        } else {
+            opts.session_player_names.join("-")
+        };
+
+        let raid_part = sanitize_zone_for_filename(&opts.session_zone_name);
+        let raid_part = if raid_part.is_empty() {
+            "Export".to_string()
+        } else {
+            raid_part
+        };
+
+        let date_part =
+            parser::date_from_session_timestamp(opts.session_start_time, opts.session_start_year);
+
+        parent.join(format!("{player_part}-{raid_part}-{date_part}-export.txt"))
     } else {
         opts.file_path.clone()
     };

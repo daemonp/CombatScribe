@@ -3,6 +3,7 @@
 //! Stored at `{config_dir}/combatscribe/config.toml`.  All load/save errors
 //! are silently swallowed — config is best-effort and must never crash the app.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,9 @@ fn config_path() -> Option<PathBuf> {
 pub struct AppConfig {
     /// The directory the user last successfully opened a file from.
     pub last_directory: Option<PathBuf>,
+    /// Aura names the user has selected for display on the timeline waterfall.
+    #[serde(default)]
+    pub tracked_auras: HashSet<String>,
 }
 
 impl AppConfig {

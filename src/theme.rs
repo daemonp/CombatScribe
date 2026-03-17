@@ -179,6 +179,47 @@ pub const TIMELINE_ALIVE: Color = Color {
     a: 1.0,
 };
 
+/// Color palette for aura overlay bars on the timeline.
+/// Cycles through these for different tracked auras.
+pub const AURA_COLORS: [Color; 6] = [
+    Color {
+        r: 0.71,
+        g: 0.55,
+        b: 1.0,
+        a: 1.0,
+    }, // lavender
+    Color {
+        r: 1.0,
+        g: 0.55,
+        b: 0.55,
+        a: 1.0,
+    }, // soft red
+    Color {
+        r: 0.55,
+        g: 0.9,
+        b: 1.0,
+        a: 1.0,
+    }, // cyan
+    Color {
+        r: 1.0,
+        g: 0.82,
+        b: 0.35,
+        a: 1.0,
+    }, // gold
+    Color {
+        r: 0.55,
+        g: 1.0,
+        b: 0.65,
+        a: 1.0,
+    }, // mint green
+    Color {
+        r: 1.0,
+        g: 0.55,
+        b: 0.82,
+        a: 1.0,
+    }, // pink
+];
+
 // ── Surface & Text Colors ───────────────────────────────────────────────────
 
 /// Slightly elevated card/panel background.

@@ -105,6 +105,10 @@ static RE_BUFF_GAIN: LazyLock<Regex> =
 static RE_BUFF_FADE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([A-Za-z\s':]+?) fades from ([A-Za-z]+)\.").unwrap());
 
+static RE_AFFLICTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"([A-Za-z]+) is afflicted by ([A-Za-z\s':]+?)(?:\s+\((\d+)\))?\.").unwrap()
+});
+
 static RE_LOOT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"LOOT:.*?&([A-Za-z]+) receives (?:loot|item): \|cff([a-f0-9]{6})\|Hitem:(\d+):[^|]+\|h\[([^\]]+)\]\|h\|rx?(\d+)",
@@ -270,8 +274,11 @@ pub fn parse_log(lines: &[String]) -> LogData {
             parse_avoidance(trimmed, &mut data);
         }
 
-        // Buff events: "gains " or " fades from "
-        if trimmed.contains(" gains ") || trimmed.contains(" fades from ") {
+        // Buff/debuff events: "gains " / " fades from " / "is afflicted by "
+        if trimmed.contains(" gains ")
+            || trimmed.contains(" fades from ")
+            || trimmed.contains(" is afflicted by ")
+        {
             parse_buff_events(trimmed, timestamp, &mut data);
         }
 
@@ -306,7 +313,7 @@ fn parse_metadata(trimmed: &str, data: &mut LogData, state: &mut ParseState) {
                 pet_name: info.pet_name.map(str::to_string),
             };
             // Track ALL combatant sightings for full roster preservation
-            data.all_combatants.insert(name_str, combatant.clone());
+            data.all_combatants.insert(name_str, combatant);
         } else if let Some((name, class)) = parser::extract_combatant(trimmed) {
             // Fallback: minimal extraction if full parse fails
             let name_str = name.to_string();
@@ -314,7 +321,7 @@ fn parse_metadata(trimmed: &str, data: &mut LogData, state: &mut ParseState) {
                 class: class.to_string(),
                 ..Combatant::default()
             };
-            data.all_combatants.insert(name_str, combatant.clone());
+            data.all_combatants.insert(name_str, combatant);
         }
     }
 
@@ -1091,15 +1098,26 @@ fn parse_buff_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
         if let Some(player) = caps.get(1).map(|m| m.as_str()) {
             if let Some(buff) = caps.get(2).map(|m| m.as_str().trim().to_string()) {
                 if data.all_combatants.contains_key(player) {
+                    let stacks: u32 = caps
+                        .get(3)
+                        .and_then(|m| m.as_str().parse().ok())
+                        .unwrap_or(1);
                     let buffs = data.buffs.entry(player.to_string()).or_default();
-                    let stats = buffs.entry(buff).or_default();
+                    let stats = buffs.entry(buff.clone()).or_default();
                     stats.gains += 1;
                     if stats.first_gain.is_none() {
                         stats.first_gain = Some(timestamp);
                     }
+                    data.entries.push(LogEntry::AuraGain {
+                        timestamp,
+                        player: player.to_string(),
+                        aura: buff,
+                        stacks,
+                    });
                 }
             }
         }
+        return;
     }
 
     if let Some(caps) = RE_BUFF_FADE.captures(trimmed) {
@@ -1107,9 +1125,41 @@ fn parse_buff_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
             if let Some(player) = caps.get(2).map(|m| m.as_str()) {
                 if data.all_combatants.contains_key(player) {
                     let buffs = data.buffs.entry(player.to_string()).or_default();
-                    let stats = buffs.entry(buff).or_default();
+                    let stats = buffs.entry(buff.clone()).or_default();
                     stats.fades += 1;
                     stats.last_fade = Some(timestamp);
+                    data.entries.push(LogEntry::AuraFade {
+                        timestamp,
+                        player: player.to_string(),
+                        aura: buff,
+                    });
+                }
+            }
+        }
+        return;
+    }
+
+    // "is afflicted by" — debuff application with optional stack count
+    if let Some(caps) = RE_AFFLICTED.captures(trimmed) {
+        if let Some(player) = caps.get(1).map(|m| m.as_str()) {
+            if let Some(debuff) = caps.get(2).map(|m| m.as_str().trim().to_string()) {
+                if data.all_combatants.contains_key(player) {
+                    let stacks: u32 = caps
+                        .get(3)
+                        .and_then(|m| m.as_str().parse().ok())
+                        .unwrap_or(1);
+                    let buffs = data.buffs.entry(player.to_string()).or_default();
+                    let stats = buffs.entry(debuff.clone()).or_default();
+                    stats.gains += 1;
+                    if stats.first_gain.is_none() {
+                        stats.first_gain = Some(timestamp);
+                    }
+                    data.entries.push(LogEntry::AuraGain {
+                        timestamp,
+                        player: player.to_string(),
+                        aura: debuff,
+                        stacks,
+                    });
                 }
             }
         }
@@ -2149,5 +2199,182 @@ mod tests {
                 "Should parse Nature from suffer line"
             );
         }
+    }
+
+    // ── Aura Event Tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_regex_afflicted() {
+        // Without stack count
+        let line = "Acedica is afflicted by War Stomp.";
+        let caps = RE_AFFLICTED.captures(line).expect("should match");
+        assert_eq!(caps.get(1).unwrap().as_str(), "Acedica");
+        assert_eq!(caps.get(2).unwrap().as_str().trim(), "War Stomp");
+        assert!(caps.get(3).is_none(), "No stack count");
+
+        // With stack count (the common addon format)
+        let line2 = "Tinjarro is afflicted by Arcane Overload (1).";
+        let caps2 = RE_AFFLICTED
+            .captures(line2)
+            .expect("should match with stack count");
+        assert_eq!(caps2.get(1).unwrap().as_str(), "Tinjarro");
+        assert_eq!(caps2.get(2).unwrap().as_str().trim(), "Arcane Overload");
+        assert_eq!(caps2.get(3).unwrap().as_str(), "1");
+
+        // Higher stack count
+        let line3 = "Tank is afflicted by Sunder Armor (5).";
+        let caps3 = RE_AFFLICTED.captures(line3).expect("should match stacks");
+        assert_eq!(caps3.get(2).unwrap().as_str().trim(), "Sunder Armor");
+        assert_eq!(caps3.get(3).unwrap().as_str(), "5");
+
+        // Debuff with colon
+        let line4 = "Tank is afflicted by Shadow Word: Pain.";
+        let caps4 = RE_AFFLICTED
+            .captures(line4)
+            .expect("should match debuff with colon");
+        assert_eq!(caps4.get(1).unwrap().as_str(), "Tank");
+        assert_eq!(caps4.get(2).unwrap().as_str().trim(), "Shadow Word: Pain");
+    }
+
+    #[test]
+    fn test_aura_entries_emitted() {
+        // Buff gains, debuff afflictions, and fades should all produce LogEntry events
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Acedica&PALADIN&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Acedica gains Power Word: Fortitude (1).".to_string(),
+            "1/27 12:24:05.000  Acedica is afflicted by Arcane Overload.".to_string(),
+            "1/27 12:24:10.000  Power Word: Fortitude fades from Acedica.".to_string(),
+            "1/27 12:24:12.000  Arcane Overload fades from Acedica.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let aura_gains: Vec<_> = data
+            .entries
+            .iter()
+            .filter(|e| matches!(e, LogEntry::AuraGain { .. }))
+            .collect();
+        let aura_fades: Vec<_> = data
+            .entries
+            .iter()
+            .filter(|e| matches!(e, LogEntry::AuraFade { .. }))
+            .collect();
+
+        assert_eq!(
+            aura_gains.len(),
+            2,
+            "Should have 2 AuraGain entries (buff + afflicted)"
+        );
+        assert_eq!(aura_fades.len(), 2, "Should have 2 AuraFade entries");
+
+        // Verify the afflicted entry
+        if let LogEntry::AuraGain {
+            player,
+            aura,
+            stacks,
+            ..
+        } = &aura_gains[1]
+        {
+            assert_eq!(player, "Acedica");
+            assert_eq!(aura, "Arcane Overload");
+            assert_eq!(*stacks, 1);
+        } else {
+            panic!("Expected AuraGain");
+        }
+    }
+
+    #[test]
+    fn test_aura_intervals_built() {
+        // Build timeline and verify aura intervals are correctly paired
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 19:39:51.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 19:39:52.000  Tank gains Power Word: Fortitude (1).".to_string(),
+            "1/27 19:39:55.000  Tank is afflicted by Arcane Overload.".to_string(),
+            "1/27 19:39:58.000  Arcane Overload fades from Tank.".to_string(),
+            "1/27 19:40:02.000  Power Word: Fortitude fades from Tank.".to_string(),
+            "1/27 19:41:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let filter = crate::log_data::EncounterFilter::All;
+        let timeline = data.build_timeline(&filter, 5000);
+
+        // Should have both auras available
+        assert!(
+            timeline
+                .available_auras
+                .contains(&"Arcane Overload".to_string()),
+            "Arcane Overload should be in available auras"
+        );
+        assert!(
+            timeline
+                .available_auras
+                .contains(&"Power Word: Fortitude".to_string()),
+            "PW:F should be in available auras"
+        );
+
+        // Verify Arcane Overload interval: gain at +4s, fade at +7s
+        let ao_intervals = timeline
+            .aura_intervals
+            .get("Arcane Overload")
+            .expect("Should have Arcane Overload intervals");
+        assert_eq!(
+            ao_intervals.len(),
+            1,
+            "Should have 1 Arcane Overload interval"
+        );
+        assert_eq!(ao_intervals[0].player, "Tank");
+        // Timestamps: enc_start = 19:39:51, gain = 19:39:55 (+4s), fade = 19:39:58 (+7s)
+        assert!(
+            (ao_intervals[0].start - 4.0).abs() < 0.1,
+            "Start should be ~4s"
+        );
+        assert!((ao_intervals[0].end - 7.0).abs() < 0.1, "End should be ~7s");
+
+        // Verify PW:F interval: gain at +1s, fade at +11s
+        let pwf_intervals = timeline
+            .aura_intervals
+            .get("Power Word: Fortitude")
+            .expect("Should have PW:F intervals");
+        assert_eq!(pwf_intervals.len(), 1);
+        assert!(
+            (pwf_intervals[0].start - 1.0).abs() < 0.1,
+            "PW:F start should be ~1s"
+        );
+        assert!(
+            (pwf_intervals[0].end - 11.0).abs() < 0.1,
+            "PW:F end should be ~11s"
+        );
+    }
+
+    #[test]
+    fn test_aura_interval_unclosed_clamped() {
+        // Aura gained but never faded — should be clamped to encounter end
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 19:39:51.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 19:39:55.000  Tank is afflicted by Burning Adrenaline.".to_string(),
+            // No fade — boss kill or player death
+            "1/27 19:40:21.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let filter = crate::log_data::EncounterFilter::All;
+        let timeline = data.build_timeline(&filter, 5000);
+
+        let ba_intervals = timeline
+            .aura_intervals
+            .get("Burning Adrenaline")
+            .expect("Should have Burning Adrenaline intervals");
+        assert_eq!(ba_intervals.len(), 1);
+        assert_eq!(ba_intervals[0].player, "Tank");
+        // Gained at +4s, never faded — should be clamped to encounter duration (~30s)
+        assert!((ba_intervals[0].start - 4.0).abs() < 0.1);
+        assert!(
+            ba_intervals[0].end > 25.0,
+            "Unclosed aura end should be clamped to encounter end"
+        );
     }
 }

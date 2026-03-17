@@ -4,7 +4,7 @@
 //! encounter filtering helpers.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── Core Data ───────────────────────────────────────────────────────────────
 
@@ -89,6 +89,19 @@ pub enum LogEntry {
         target: String,
         spell: String,
     },
+    /// Buff or debuff applied to a player ("gains" / "is afflicted by").
+    AuraGain {
+        timestamp: f64,
+        player: String,
+        aura: String,
+        stacks: u32,
+    },
+    /// Buff or debuff removed from a player ("fades from").
+    AuraFade {
+        timestamp: f64,
+        player: String,
+        aura: String,
+    },
 }
 
 impl LogEntry {
@@ -100,7 +113,9 @@ impl LogEntry {
             | Self::Death { timestamp, .. }
             | Self::Dispel { timestamp, .. }
             | Self::Resurrect { timestamp, .. }
-            | Self::Interrupt { timestamp, .. } => *timestamp,
+            | Self::Interrupt { timestamp, .. }
+            | Self::AuraGain { timestamp, .. }
+            | Self::AuraFade { timestamp, .. } => *timestamp,
         }
     }
 
@@ -108,7 +123,9 @@ impl LogEntry {
     pub fn source(&self) -> &str {
         match self {
             Self::Damage { source, .. } | Self::Healing { source, .. } => source,
-            Self::Death { player, .. } => player,
+            Self::Death { player, .. }
+            | Self::AuraGain { player, .. }
+            | Self::AuraFade { player, .. } => player,
             Self::Dispel { caster, .. }
             | Self::Resurrect { caster, .. }
             | Self::Interrupt { caster, .. } => caster,
@@ -118,7 +135,7 @@ impl LogEntry {
     /// Return the target name (if applicable).
     pub fn target(&self) -> Option<&str> {
         match self {
-            Self::Death { .. } => None,
+            Self::Death { .. } | Self::AuraGain { .. } | Self::AuraFade { .. } => None,
             Self::Damage { target, .. }
             | Self::Healing { target, .. }
             | Self::Dispel { target, .. }
@@ -158,9 +175,10 @@ pub struct Combatant {
     pub gear: Vec<Option<GearSlot>>,
     /// Talent summary like `"31/20/0"`.
     pub talent_summary: Option<String>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Data model — stored for future gear inspection display
     pub guid: Option<String>,
-    #[allow(dead_code)]
+    /// Pet name from `COMBATANT_INFO` — used by `is_pet_target()` in timeline
+    /// to distinguish pet heals from MC'd-mob heals.
     pub pet_name: Option<String>,
 }
 
@@ -377,6 +395,37 @@ pub enum TimelineEventKind {
     Interrupt,
 }
 
+/// A single aura interval (gain→fade) for rendering on the `AuraChart`.
+///
+/// Times are encounter-relative offsets (seconds from encounter start).
+#[derive(Debug, Clone)]
+pub struct AuraInterval {
+    /// Player who received the aura.
+    pub player: String,
+    /// Start offset (seconds into the encounter).
+    pub start: f64,
+    /// End offset (seconds). If the aura never faded during the encounter,
+    /// this is clamped to the encounter duration.
+    pub end: f64,
+}
+
+/// A single dispel event positioned on the encounter timeline.
+///
+/// Used by `DispelChart` to render per-caster waterfall lanes with tick marks.
+#[derive(Debug, Clone)]
+pub struct DispelMark {
+    /// Player who cast the dispel.
+    pub caster: String,
+    /// Player who was dispelled.
+    #[allow(dead_code)] // Stored for future hover tooltip display
+    pub target: String,
+    /// Dispel spell used (e.g. "Remove Curse", "Cleanse").
+    #[allow(dead_code)] // Stored for future hover tooltip display
+    pub spell: String,
+    /// Encounter-relative offset in seconds.
+    pub offset: f64,
+}
+
 /// Precomputed timeline data for the currently selected encounter(s).
 #[derive(Debug, Clone, Default)]
 pub struct TimelineData {
@@ -394,6 +443,16 @@ pub struct TimelineData {
     pub duration: f64,
     /// Total raid member count at start.
     pub raid_count: u32,
+    /// Aura intervals for tracked auras, keyed by aura name.
+    ///
+    /// Built lazily when the user selects auras to display.
+    pub aura_intervals: HashMap<String, Vec<AuraInterval>>,
+    /// Unique aura names seen in this encounter, sorted alphabetically.
+    pub available_auras: Vec<String>,
+    /// Dispel marks for the waterfall chart, ordered by offset.
+    pub dispel_marks: Vec<DispelMark>,
+    /// Unique dispel casters sorted by count descending (most active first).
+    pub dispel_casters: Vec<String>,
 }
 
 /// Which timeline data series a toggle controls.
@@ -406,6 +465,7 @@ pub enum TimelineSeriesKind {
     Death,
     BigHit,
     Alive,
+    Dispel,
 }
 
 /// Visibility toggles for each timeline data series.
@@ -419,6 +479,7 @@ pub struct TimelineVisibility {
     pub show_deaths: bool,
     pub show_big_hits: bool,
     pub show_alive: bool,
+    pub show_dispels: bool,
 }
 
 impl Default for TimelineVisibility {
@@ -431,6 +492,7 @@ impl Default for TimelineVisibility {
             show_deaths: true,
             show_big_hits: true,
             show_alive: true,
+            show_dispels: false,
         }
     }
 }
@@ -446,6 +508,7 @@ impl TimelineVisibility {
             TimelineSeriesKind::Death => self.show_deaths = !self.show_deaths,
             TimelineSeriesKind::BigHit => self.show_big_hits = !self.show_big_hits,
             TimelineSeriesKind::Alive => self.show_alive = !self.show_alive,
+            TimelineSeriesKind::Dispel => self.show_dispels = !self.show_dispels,
         }
     }
 
@@ -454,7 +517,8 @@ impl TimelineVisibility {
     pub fn is_event_visible(&self, kind: TimelineEventKind) -> bool {
         match kind {
             TimelineEventKind::BigHit => self.show_big_hits,
-            TimelineEventKind::Dispel | TimelineEventKind::Interrupt => true,
+            TimelineEventKind::Dispel => self.show_dispels,
+            TimelineEventKind::Interrupt => true,
             // Deaths and resurrects are grouped under the same toggle
             TimelineEventKind::Death | TimelineEventKind::Resurrect => self.show_deaths,
         }
@@ -481,6 +545,47 @@ impl std::fmt::Display for EventLogMode {
             Self::AllEvents => write!(f, "All Events"),
             Self::KeyEvents => write!(f, "Key Events"),
             Self::DeathLog => write!(f, "Death Log"),
+        }
+    }
+}
+
+/// Selectable lookback window for Death Log mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeathLogWindow {
+    #[default]
+    Seconds10,
+    Seconds15,
+    Seconds20,
+    Seconds30,
+}
+
+impl DeathLogWindow {
+    /// All selectable window sizes (for pick list).
+    pub const ALL: &[Self] = &[
+        Self::Seconds10,
+        Self::Seconds15,
+        Self::Seconds20,
+        Self::Seconds30,
+    ];
+
+    /// Window duration in seconds.
+    pub fn as_secs(self) -> f64 {
+        match self {
+            Self::Seconds10 => 10.0,
+            Self::Seconds15 => 15.0,
+            Self::Seconds20 => 20.0,
+            Self::Seconds30 => 30.0,
+        }
+    }
+}
+
+impl std::fmt::Display for DeathLogWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Seconds10 => write!(f, "10s"),
+            Self::Seconds15 => write!(f, "15s"),
+            Self::Seconds20 => write!(f, "20s"),
+            Self::Seconds30 => write!(f, "30s"),
         }
     }
 }
@@ -517,6 +622,9 @@ impl EventLogTypeFilter {
             LogEntry::Death { .. } | LogEntry::Resurrect { .. } => self.show_deaths,
             LogEntry::Dispel { .. } => self.show_dispels,
             LogEntry::Interrupt { .. } => self.show_interrupts,
+            // Aura events are not shown in the event log — they are rendered
+            // on the dedicated AuraChart canvas as horizontal bars.
+            LogEntry::AuraGain { .. } | LogEntry::AuraFade { .. } => false,
         }
     }
 }
@@ -617,6 +725,7 @@ impl LogData {
                 }
                 LogEntry::Healing {
                     source,
+                    target,
                     spell,
                     amount,
                     effective_heal,
@@ -624,6 +733,13 @@ impl LogData {
                     is_crit,
                     ..
                 } => {
+                    // Only credit player healing stats when the target is a
+                    // known player.  Boss-targeted heals (Shadow of Ebonroc,
+                    // Blood Siphon, etc.) are excluded — matching the gate
+                    // in parse_healing_events().
+                    if !self.all_combatants.contains_key(target.as_str()) {
+                        continue;
+                    }
                     let ps = stats.entry(source.clone()).or_default();
                     ps.healing += amount;
                     ps.effective_healing += effective_heal;
@@ -785,6 +901,7 @@ impl LogData {
             })
             .collect();
         let mut events: Vec<TimelineEvent> = Vec::new();
+        let mut dispel_marks: Vec<DispelMark> = Vec::new();
 
         // Track alive count: start with all combatants, decrement on death,
         // increment on resurrect.
@@ -882,6 +999,12 @@ impl LogData {
                             kind: TimelineEventKind::Dispel,
                             label: format!("{caster} dispels {spell} on {target}"),
                         });
+                        dispel_marks.push(DispelMark {
+                            caster: caster.clone(),
+                            target: target.clone(),
+                            spell: spell.clone(),
+                            offset: relative,
+                        });
                     }
                     LogEntry::Resurrect { caster, target, .. } => {
                         if self.combatants.contains_key(target.as_str()) {
@@ -905,6 +1028,8 @@ impl LogData {
                             label: format!("{caster} interrupts {target} with {spell}"),
                         });
                     }
+                    // Aura events are rendered by AuraChart, not the main timeline.
+                    LogEntry::AuraGain { .. } | LogEntry::AuraFade { .. } => {}
                 }
 
                 buckets[bucket_idx].alive_count = alive;
@@ -932,6 +1057,23 @@ impl LogData {
         let max_hps = buckets.iter().map(|b| b.healing).max().unwrap_or(0);
         let max_boss_hps = buckets.iter().map(|b| b.boss_healing).max().unwrap_or(0);
 
+        // ── Collect aura intervals ──────────────────────────────────
+        let (aura_intervals, available_auras) =
+            self.build_aura_intervals(&encounters, total_duration);
+
+        // ── Compute dispel casters sorted by count descending ───────
+        let mut caster_counts: HashMap<&str, usize> = HashMap::new();
+        for mark in &dispel_marks {
+            *caster_counts.entry(mark.caster.as_str()).or_default() += 1;
+        }
+        let mut dispel_casters: Vec<String> =
+            caster_counts.keys().map(|s| (*s).to_owned()).collect();
+        dispel_casters.sort_by(|a, b| {
+            caster_counts[b.as_str()]
+                .cmp(&caster_counts[a.as_str()])
+                .then_with(|| a.cmp(b))
+        });
+
         TimelineData {
             buckets,
             events,
@@ -941,9 +1083,199 @@ impl LogData {
             max_boss_hps,
             duration: total_duration,
             raid_count,
+            aura_intervals,
+            available_auras,
+            dispel_marks,
+            dispel_casters,
         }
     }
+
+    /// Build aura intervals and a sorted list of available aura names for the
+    /// selected encounter(s).
+    ///
+    /// Scans `AuraGain`/`AuraFade` entries within encounter windows, pairing
+    /// gains with their corresponding fades per player. Unclosed auras are
+    /// clamped to the encounter segment end.
+    fn build_aura_intervals(
+        &self,
+        encounters: &[&Encounter],
+        total_duration: f64,
+    ) -> (HashMap<String, Vec<AuraInterval>>, Vec<String>) {
+        // Key: (player, aura) → stack of unclosed gain offsets
+        let mut open: HashMap<(String, String), Vec<f64>> = HashMap::new();
+        let mut intervals: HashMap<String, Vec<AuraInterval>> = HashMap::new();
+        let mut aura_names: HashSet<String> = HashSet::new();
+
+        let mut offset_base: f64 = 0.0;
+
+        for enc in encounters {
+            let enc_start = enc.start;
+            let enc_duration = enc.duration;
+
+            for entry in &self.entries {
+                let ts = entry.timestamp();
+                if ts < enc_start || ts > enc.end {
+                    continue;
+                }
+                let relative = ts - enc_start + offset_base;
+
+                match entry {
+                    LogEntry::AuraGain { player, aura, .. } => {
+                        aura_names.insert(aura.clone());
+                        open.entry((player.clone(), aura.clone()))
+                            .or_default()
+                            .push(relative);
+                    }
+                    LogEntry::AuraFade { player, aura, .. } => {
+                        aura_names.insert(aura.clone());
+                        // Pop the most recent open gain for this player+aura
+                        if let Some(starts) = open.get_mut(&(player.clone(), aura.clone())) {
+                            if let Some(start) = starts.pop() {
+                                intervals
+                                    .entry(aura.clone())
+                                    .or_default()
+                                    .push(AuraInterval {
+                                        player: player.clone(),
+                                        start,
+                                        end: relative,
+                                    });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Close any unclosed auras at the end of this encounter segment
+            let segment_end = offset_base + enc_duration;
+            for ((player, aura), starts) in &mut open {
+                for start in starts.drain(..) {
+                    intervals
+                        .entry(aura.clone())
+                        .or_default()
+                        .push(AuraInterval {
+                            player: player.clone(),
+                            start,
+                            end: segment_end.min(total_duration),
+                        });
+                }
+            }
+
+            offset_base += enc_duration;
+        }
+
+        // Sort intervals within each aura by start time
+        for ivs in intervals.values_mut() {
+            ivs.sort_by(|a, b| a.start.total_cmp(&b.start));
+        }
+
+        let mut sorted_names: Vec<String> = aura_names.into_iter().collect();
+        sorted_names.sort_by_key(|n| n.to_lowercase());
+
+        (intervals, sorted_names)
+    }
 }
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+// ── Aura Presets ────────────────────────────────────────────────────────────
+
+/// A named preset of aura/buff names for quick selection.
+pub struct AuraPreset {
+    /// Display name shown in the UI.
+    pub label: &'static str,
+    /// Buff names as they appear in the combat log.
+    pub auras: &'static [&'static str],
+}
+
+/// All available aura presets.
+///
+/// Buff names match the exact strings emitted by the vanilla 1.12 combat log
+/// (and the Turtle addon format).  Verified against real log data.
+pub const AURA_PRESETS: &[AuraPreset] = &[
+    AuraPreset {
+        label: "Consumes: Tank",
+        auras: &[
+            "Spirit of Zanza",
+            "Elixir of the Mongoose",
+            "Ground Scorpok Assay",
+            "Elixir of Giants",
+            "Juju Power",
+            "Juju Might",
+            "Winterfall Firewater",
+            "Elixir of Fortitude",
+            "Elixir of Superior Defense",
+            "Gift of Arthas",
+            "Rumsey Rum Black Label",
+            "Medivh's Merlot",
+        ],
+    },
+    AuraPreset {
+        label: "Consumes: Melee",
+        auras: &[
+            "Spirit of Zanza",
+            "Elixir of the Mongoose",
+            "Ground Scorpok Assay",
+            "R.O.I.D.S.",
+            "Elixir of Giants",
+            "Juju Power",
+            "Juju Might",
+            "Winterfall Firewater",
+            "Juju Flurry",
+            "Potion of Quickness",
+            "Mighty Rage",
+        ],
+    },
+    AuraPreset {
+        label: "Consumes: Caster",
+        auras: &[
+            "Spirit of Zanza",
+            "Elixir of Fortitude",
+            "Mageblood Potion",
+            "Greater Arcane Elixir",
+            "Elixir of Greater Firepower",
+            "Elixir of Frost Power",
+            "Elixir of Shadow Power",
+            "Dreamshard Elixir",
+            "Dreamtonic",
+            "Cerebral Cortex Compound",
+            "Medivh's Merlot Blue Label",
+        ],
+    },
+    AuraPreset {
+        label: "Consumes: Healer",
+        auras: &[
+            "Spirit of Zanza",
+            "Dreamshard Elixir",
+            "Cerebral Cortex Compound",
+            "Mageblood Potion",
+            "Medivh's Merlot Blue Label",
+        ],
+    },
+    AuraPreset {
+        label: "Protection Potions",
+        auras: &[
+            "Fire Protection",
+            "Nature Protection",
+            "Shadow Protection",
+            "Frost Protection",
+            "Arcane Protection",
+            "Free Action",
+        ],
+    },
+    AuraPreset {
+        label: "World Buffs",
+        auras: &[
+            "Rallying Cry of the Dragonslayer",
+            "Spirit of Zandalar",
+            "Songflower Serenade",
+            "Warchief's Blessing",
+            "Mol'dar's Moxie",
+            "Fengus' Ferocity",
+            "Slip'kik's Savvy",
+        ],
+    },
+];
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

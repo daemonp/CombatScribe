@@ -24,6 +24,9 @@ pub struct Session {
     pub duration_secs: f64,
     /// Whether this session takes place in a known raid/instance zone.
     pub is_raid: bool,
+    /// Calendar year extracted from the `COMBATANT_INFO` date field (e.g. 2026).
+    /// `None` if no `COMBATANT_INFO` line was found in the log.
+    pub start_year: Option<i32>,
     /// Player names detected from `COMBATANT_INFO` with full talent data (2 `}` chars).
     /// These are the names that "You/Your" will be replaced with.
     pub you_players: Vec<String>,
@@ -217,6 +220,23 @@ pub(crate) fn extract_combatant(line: &str) -> Option<(&str, &str)> {
     Some((name, class))
 }
 
+/// Extract the calendar year from a `COMBATANT_INFO` date field.
+///
+/// The date is at `parts[0]` (before the first `&`), format: `DD.MM.YY HH:MM:SS`.
+/// Returns the full 4-digit year (e.g. 2026 from `YY=26`).
+fn extract_combatant_year(line: &str) -> Option<i32> {
+    let idx = line.find("COMBATANT_INFO:")? + "COMBATANT_INFO:".len();
+    let rest = &line[idx..];
+    let amp = rest.find('&')?;
+    let date_field = rest[..amp].trim();
+    // Expected: "DD.MM.YY ..." — the year is at bytes 6..8
+    if date_field.len() < 8 {
+        return None;
+    }
+    let yy: i32 = date_field[6..8].parse().ok()?;
+    Some(if yy >= 90 { 1900 + yy } else { 2000 + yy })
+}
+
 /// Rich combatant info extracted from a `COMBATANT_INFO` line.
 ///
 /// All fields after `&`-split:
@@ -390,20 +410,24 @@ struct ScanEvent {
 ///
 /// Avoids regex entirely — uses manual byte-level parsing for maximum speed.
 pub fn detect_sessions(lines: &[String]) -> Vec<Session> {
-    let (names, events) = scan_events(lines);
+    let (names, events, log_year) = scan_events(lines);
 
     if events.is_empty() {
         return vec![];
     }
 
-    build_sessions(&names, events, lines.len())
+    build_sessions(&names, events, lines.len(), log_year)
 }
 
 /// First phase: scan all lines and extract structured events.
+///
+/// Returns `(names, events, log_year)` where `log_year` is the calendar year
+/// extracted from the first `COMBATANT_INFO` date field (e.g. 2026).
 #[allow(clippy::cast_possible_truncation)] // name_idx will never exceed u32::MAX for real logs
-fn scan_events(lines: &[String]) -> (Vec<String>, Vec<ScanEvent>) {
+fn scan_events(lines: &[String]) -> (Vec<String>, Vec<ScanEvent>, Option<i32>) {
     let mut names: Vec<String> = Vec::new();
     let mut events: Vec<ScanEvent> = Vec::with_capacity(lines.len() / 20);
+    let mut log_year: Option<i32> = None;
 
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
@@ -431,6 +455,12 @@ fn scan_events(lines: &[String]) -> (Vec<String>, Vec<ScanEvent>) {
         }
 
         if trimmed.contains("COMBATANT_INFO:") {
+            // Extract calendar year from the first COMBATANT_INFO date field.
+            // Format: "COMBATANT_INFO:DD.MM.YY HH:MM:SS&name&..."
+            if log_year.is_none() {
+                log_year = extract_combatant_year(trimmed);
+            }
+
             if let Some((name, _class)) = extract_combatant(trimmed) {
                 let idx = names.len() as u32;
                 names.push(name.to_string());
@@ -490,7 +520,7 @@ fn scan_events(lines: &[String]) -> (Vec<String>, Vec<ScanEvent>) {
         }
     }
 
-    (names, events)
+    (names, events, log_year)
 }
 
 struct SessionBuilder {
@@ -503,6 +533,7 @@ struct SessionBuilder {
     you_players: HashSet<String>,
     combat_count: usize,
     boss_kills: Vec<String>,
+    start_year: Option<i32>,
 }
 
 /// Determine the established raid instance for a session from its boss kills.
@@ -530,6 +561,7 @@ fn build_sessions(
     names: &[String],
     mut events: Vec<ScanEvent>,
     total_lines: usize,
+    log_year: Option<i32>,
 ) -> Vec<Session> {
     events.sort_unstable_by(|a, b| a.timestamp_secs.total_cmp(&b.timestamp_secs));
 
@@ -606,6 +638,7 @@ fn build_sessions(
                 you_players: HashSet::new(),
                 combat_count: 0,
                 boss_kills: Vec::new(),
+                start_year: log_year,
             });
         }
 
@@ -776,6 +809,7 @@ fn finalize_sessions(sessions: Vec<SessionBuilder>) -> Vec<Session> {
                 combat_count: s.combat_count,
                 duration_secs: duration,
                 is_raid: is_raid_zone(zone),
+                start_year: s.start_year,
                 you_players,
             }
         })
@@ -784,6 +818,29 @@ fn finalize_sessions(sessions: Vec<SessionBuilder>) -> Vec<Session> {
 
 pub fn format_zone_name(zone: &str) -> String {
     raid_data::format_zone_name(zone)
+}
+
+/// Convert a synthetic session timestamp to a `YYYY-MM-DD` date string.
+///
+/// The synthetic encoding is `(month*31 + day) * 86400 + time_of_day` from
+/// `parse_timestamp_fast`. We reverse-decode month/day from this and combine
+/// with the session's year. Falls back to `Local::now()` if year is unknown.
+#[allow(clippy::cast_possible_truncation)] // month/day values are small integers
+#[allow(clippy::cast_sign_loss)] // month/day are always positive
+pub fn date_from_session_timestamp(ts: f64, year: Option<i32>) -> String {
+    let total_days = (ts / 86400.0).floor() as u32;
+    let month = total_days / 31;
+    let day = total_days % 31;
+
+    let y = year.unwrap_or_else(|| {
+        chrono::Local::now()
+            .format("%Y")
+            .to_string()
+            .parse()
+            .unwrap_or(2026)
+    });
+
+    format!("{y:04}-{month:02}-{day:02}")
 }
 
 /// Extract the "You" player name from `COMBATANT_INFO` by splitting on `&`.

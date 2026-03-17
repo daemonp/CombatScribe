@@ -24,10 +24,12 @@ use iced::{mouse, Center, Color, Element, Fill, Length, Point, Rectangle, Render
 
 use std::sync::LazyLock;
 
+use crate::log_data;
 use crate::log_data::{
-    AbilityStats, AvoidanceStats, BuffStats, Encounter, EncounterFilter, EventLogMode,
-    EventLogTypeFilter, EventLogTypeKind, LogData, LogEntry, LootEvent, PlayerEventType,
-    ResurrectEvent, TimelineData, TimelineEventKind, TimelineSeriesKind, TimelineVisibility,
+    AbilityStats, AvoidanceStats, BuffStats, Combatant, DeathLogWindow, Encounter, EncounterFilter,
+    EventLogMode, EventLogTypeFilter, EventLogTypeKind, LogData, LogEntry, LootEvent,
+    PlayerEventType, ResurrectEvent, TimelineData, TimelineEventKind, TimelineSeriesKind,
+    TimelineVisibility,
 };
 use crate::theme;
 
@@ -78,6 +80,8 @@ pub struct ViewerState {
     pub timeline_clicked_second: Option<usize>,
     /// Event log facet mode (All Events, Key Events, Death Log).
     pub event_log_mode: EventLogMode,
+    /// Lookback window for Death Log mode.
+    pub death_log_window: DeathLogWindow,
     /// Event type toggles for the log panel.
     pub event_log_types: EventLogTypeFilter,
     /// Player filter for the event log (empty string = all players).
@@ -85,6 +89,18 @@ pub struct ViewerState {
     /// Canvas geometry caches — cleared when data or visibility changes.
     pub timeline_cache: canvas::Cache,
     pub alive_cache: canvas::Cache,
+    pub aura_cache: canvas::Cache,
+    pub dispel_cache: canvas::Cache,
+
+    // Aura overlay on the timeline chart
+    /// Which aura names the user has checked for display.
+    pub tracked_auras: HashSet<String>,
+    /// Whether the aura picker dropdown is open.
+    pub aura_picker_open: bool,
+    /// Search text for filtering the aura picker list.
+    pub aura_search: String,
+    /// Hovered second offset on the aura chart (for tooltip).
+    pub aura_hover_second: Option<f64>,
 
     // Detail overlay
     pub detail: Option<DetailView>,
@@ -212,10 +228,23 @@ pub enum ViewerMessage {
     /// Click on the chart canvas jumps the event log to that second.
     TimelineClick(usize),
     SetEventLogMode(EventLogMode),
+    SetDeathLogWindow(DeathLogWindow),
     ToggleEventLogType(EventLogTypeKind),
     SetEventLogPlayer(String),
     /// Copy the current event log contents to the system clipboard.
     CopyEventLog,
+    /// Toggle an aura name on/off for display on the `AuraChart`.
+    ToggleAura(String),
+    /// Open/close the aura picker dropdown.
+    ToggleAuraPicker,
+    /// Update the aura picker search text.
+    SetAuraSearch(String),
+    /// Hover on the aura chart — stores the hovered second offset.
+    AuraHover(Option<f64>),
+    /// Apply an aura preset (adds all auras from the preset to tracked set).
+    ApplyAuraPreset(usize),
+    /// Clear all tracked auras.
+    ClearAuras,
     /// Request to load a new file (handled by App).
     LoadFile,
     /// Request to open the export modal (handled by App).
@@ -262,10 +291,17 @@ impl ViewerState {
             timeline_hover: None,
             timeline_clicked_second: None,
             event_log_mode: EventLogMode::default(),
+            death_log_window: DeathLogWindow::default(),
             event_log_types: EventLogTypeFilter::default(),
             event_log_player: String::new(),
             timeline_cache: canvas::Cache::default(),
             alive_cache: canvas::Cache::default(),
+            aura_cache: canvas::Cache::default(),
+            dispel_cache: canvas::Cache::default(),
+            tracked_auras: HashSet::new(),
+            aura_picker_open: false,
+            aura_search: String::new(),
+            aura_hover_second: None,
         }
     }
 
@@ -294,6 +330,8 @@ impl ViewerState {
                 self.timeline_clicked_second = None;
                 self.timeline_cache.clear();
                 self.alive_cache.clear();
+                self.aura_cache.clear();
+                self.dispel_cache.clear();
             }
             ViewerMessage::SetDamageType(dt) => self.damage_type = dt,
             ViewerMessage::SetHealingType(ht) => self.healing_type = ht,
@@ -325,6 +363,7 @@ impl ViewerState {
                 self.timeline_visibility.toggle(kind);
                 self.timeline_cache.clear();
                 self.alive_cache.clear();
+                self.dispel_cache.clear();
             }
             ViewerMessage::ToggleTimelineYAxis => {
                 self.timeline_shared_y = !self.timeline_shared_y;
@@ -335,6 +374,7 @@ impl ViewerState {
                 // Don't clear cache — hover is drawn as an overlay
             }
             ViewerMessage::SetEventLogMode(mode) => self.event_log_mode = mode,
+            ViewerMessage::SetDeathLogWindow(w) => self.death_log_window = w,
             ViewerMessage::ToggleEventLogType(kind) => {
                 let t = &mut self.event_log_types;
                 match kind {
@@ -358,6 +398,7 @@ impl ViewerState {
                     &self.event_log_types,
                     self.event_log_mode,
                     player_filter,
+                    self.death_log_window.as_secs(),
                 );
                 match arboard::Clipboard::new() {
                     Ok(mut clipboard) => {
@@ -383,6 +424,34 @@ impl ViewerState {
                         },
                     );
                 }
+            }
+            ViewerMessage::ToggleAura(name) => {
+                if self.tracked_auras.contains(&name) {
+                    self.tracked_auras.remove(&name);
+                } else {
+                    self.tracked_auras.insert(name);
+                }
+                self.aura_cache.clear();
+            }
+            ViewerMessage::ToggleAuraPicker => {
+                self.aura_picker_open = !self.aura_picker_open;
+                if !self.aura_picker_open {
+                    self.aura_search.clear();
+                }
+            }
+            ViewerMessage::SetAuraSearch(s) => self.aura_search = s,
+            ViewerMessage::AuraHover(second) => self.aura_hover_second = second,
+            ViewerMessage::ApplyAuraPreset(idx) => {
+                if let Some(preset) = log_data::AURA_PRESETS.get(idx) {
+                    for &aura_name in preset.auras {
+                        self.tracked_auras.insert(aura_name.to_string());
+                    }
+                    self.aura_cache.clear();
+                }
+            }
+            ViewerMessage::ClearAuras => {
+                self.tracked_auras.clear();
+                self.aura_cache.clear();
             }
             // These are intercepted and handled by App::update() in main.rs
             ViewerMessage::LoadFile
@@ -1320,6 +1389,56 @@ impl ViewerState {
                 vis.show_alive,
                 TimelineSeriesKind::Alive,
             ),
+            legend_toggle(
+                theme::TIMELINE_DISPEL,
+                "Dispels",
+                vis.show_dispels,
+                TimelineSeriesKind::Dispel,
+            ),
+            {
+                let aura_count = self.tracked_auras.len();
+                let aura_label = if aura_count > 0 {
+                    format!("Auras ({aura_count})")
+                } else {
+                    "Auras".to_string()
+                };
+                let label_color = if self.aura_picker_open || aura_count > 0 {
+                    Color::from_rgb8(180, 140, 255)
+                } else {
+                    theme::TEXT_MUTED
+                };
+                button(text(aura_label).size(10).color(label_color))
+                    .on_press(ViewerMessage::ToggleAuraPicker)
+                    .padding([3, 8])
+                    .style(move |_theme: &iced::Theme, status| {
+                        let bg = if aura_count > 0 {
+                            Some(iced::Background::Color(Color::from_rgba8(
+                                180, 140, 255, 0.1,
+                            )))
+                        } else {
+                            match status {
+                                button::Status::Hovered => Some(iced::Background::Color(
+                                    Color::from_rgba8(255, 255, 255, 0.06),
+                                )),
+                                _ => None,
+                            }
+                        };
+                        button::Style {
+                            background: bg,
+                            text_color: label_color,
+                            border: iced::Border {
+                                radius: 4.0.into(),
+                                color: if aura_count > 0 {
+                                    Color::from_rgba8(180, 140, 255, 0.4)
+                                } else {
+                                    Color::TRANSPARENT
+                                },
+                                width: if aura_count > 0 { 1.0 } else { 0.0 },
+                            },
+                            shadow: iced::Shadow::default(),
+                        }
+                    })
+            },
             horizontal_space(),
             button(text(y_axis_label).size(10).color(theme::TEXT_SECONDARY))
                 .on_press(ViewerMessage::ToggleTimelineYAxis)
@@ -1409,15 +1528,291 @@ impl ViewerState {
             column![].into()
         };
 
+        // ── Aura picker dropdown ───────────────────────────────────────
+        let aura_picker: Element<ViewerMessage> = if self.aura_picker_open {
+            let search_input = text_input("Search auras...", &self.aura_search)
+                .on_input(ViewerMessage::SetAuraSearch)
+                .size(11)
+                .padding(4)
+                .width(Fill);
+
+            let search_lower = self.aura_search.to_lowercase();
+            let filtered_auras: Vec<&String> = td
+                .available_auras
+                .iter()
+                .filter(|name| {
+                    search_lower.is_empty() || name.to_lowercase().contains(&search_lower)
+                })
+                .collect();
+
+            let mut aura_list = Column::new().spacing(1);
+            for aura_name in filtered_auras {
+                let is_tracked = self.tracked_auras.contains(aura_name);
+                let name_clone = aura_name.clone();
+                let check_label = if is_tracked {
+                    format!("[x] {aura_name}")
+                } else {
+                    format!("[ ] {aura_name}")
+                };
+                let text_color = if is_tracked {
+                    Color::WHITE
+                } else {
+                    theme::TEXT_SECONDARY
+                };
+                aura_list = aura_list.push(
+                    button(text(check_label).size(10).color(text_color))
+                        .on_press(ViewerMessage::ToggleAura(name_clone))
+                        .padding([2, 6])
+                        .width(Fill)
+                        .style(move |_theme: &iced::Theme, status| {
+                            let bg = match status {
+                                button::Status::Hovered => Some(iced::Background::Color(
+                                    Color::from_rgba8(255, 255, 255, 0.08),
+                                )),
+                                _ => {
+                                    if is_tracked {
+                                        Some(iced::Background::Color(Color::from_rgba8(
+                                            180, 140, 255, 0.08,
+                                        )))
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
+                            button::Style {
+                                background: bg,
+                                text_color: if is_tracked {
+                                    Color::WHITE
+                                } else {
+                                    theme::TEXT_SECONDARY
+                                },
+                                border: iced::Border {
+                                    radius: 2.0.into(),
+                                    ..Default::default()
+                                },
+                                shadow: iced::Shadow::default(),
+                            }
+                        }),
+                );
+            }
+
+            let scrollable_list = scrollable(aura_list).height(Length::Fixed(200.0));
+
+            // Preset buttons
+            let preset_buttons: Vec<Element<ViewerMessage>> = log_data::AURA_PRESETS
+                .iter()
+                .enumerate()
+                .map(|(idx, preset)| {
+                    button(text(preset.label).size(9).color(theme::TEXT_SECONDARY))
+                        .on_press(ViewerMessage::ApplyAuraPreset(idx))
+                        .padding([2, 6])
+                        .style(|_theme: &iced::Theme, status| {
+                            let bg = match status {
+                                button::Status::Hovered => Some(iced::Background::Color(
+                                    Color::from_rgba8(180, 140, 255, 0.15),
+                                )),
+                                _ => Some(iced::Background::Color(Color::from_rgba8(
+                                    255, 255, 255, 0.04,
+                                ))),
+                            };
+                            button::Style {
+                                background: bg,
+                                text_color: theme::TEXT_SECONDARY,
+                                border: iced::Border {
+                                    radius: 3.0.into(),
+                                    color: Color::from_rgba8(180, 140, 255, 0.2),
+                                    width: 1.0,
+                                },
+                                shadow: iced::Shadow::default(),
+                            }
+                        })
+                        .into()
+                })
+                .collect();
+            let preset_row = Row::with_children(preset_buttons).spacing(4).wrap();
+
+            // Clear button (only show if auras are selected)
+            let clear_btn: Element<ViewerMessage> = if self.tracked_auras.is_empty() {
+                column![].into()
+            } else {
+                button(text("Clear All").size(9).color(theme::TEXT_MUTED))
+                    .on_press(ViewerMessage::ClearAuras)
+                    .padding([2, 6])
+                    .style(|_theme: &iced::Theme, status| {
+                        let bg = match status {
+                            button::Status::Hovered => Some(iced::Background::Color(
+                                Color::from_rgba8(255, 80, 80, 0.15),
+                            )),
+                            _ => None,
+                        };
+                        button::Style {
+                            background: bg,
+                            text_color: theme::TEXT_MUTED,
+                            border: iced::Border {
+                                radius: 3.0.into(),
+                                ..Default::default()
+                            },
+                            shadow: iced::Shadow::default(),
+                        }
+                    })
+                    .into()
+            };
+
+            container(
+                column![
+                    text("Presets").size(10).color(theme::TEXT_MUTED),
+                    preset_row,
+                    horizontal_rule(1),
+                    search_input,
+                    scrollable_list,
+                    clear_btn,
+                ]
+                .spacing(4)
+                .width(Fill),
+            )
+            .padding(8)
+            .width(Length::Fixed(300.0))
+            .style(|_theme: &iced::Theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba8(25, 27, 35, 0.95))),
+                border: iced::Border {
+                    color: Color::from_rgba8(180, 140, 255, 0.3),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+        } else {
+            column![].into()
+        };
+
+        // ── Aura waterfall chart ────────────────────────────────────────
+        let aura_layout = build_aura_layout(td, &self.tracked_auras);
+        let aura_section: Element<ViewerMessage> = if aura_layout.is_empty() {
+            column![].into()
+        } else {
+            let chart_height = aura_chart_height(&aura_layout);
+
+            // Hover tooltip: show which players have each aura at the hovered time
+            let aura_tooltip: Element<ViewerMessage> = if let Some(second) = self.aura_hover_second
+            {
+                let mut parts: Vec<String> = Vec::new();
+                for group in &aura_layout {
+                    if let Some(intervals) = td.aura_intervals.get(group.aura_name) {
+                        let active: Vec<&str> = intervals
+                            .iter()
+                            .filter(|iv| iv.start <= second && second <= iv.end)
+                            .map(|iv| iv.player.as_str())
+                            .collect();
+                        if !active.is_empty() {
+                            parts.push(format!("{}: {}", group.aura_name, active.join(", ")));
+                        }
+                    }
+                }
+                if parts.is_empty() {
+                    column![].into()
+                } else {
+                    container(text(parts.join("  |  ")).size(11).color(Color::WHITE))
+                        .padding([3, 8])
+                        .style(|_theme: &iced::Theme| container::Style {
+                            background: Some(iced::Background::Color(Color::from_rgba8(
+                                30, 30, 40, 0.9,
+                            ))),
+                            border: iced::Border {
+                                color: Color::from_rgba8(180, 140, 255, 0.3),
+                                width: 1.0,
+                                radius: 4.0.into(),
+                            },
+                            ..Default::default()
+                        })
+                        .into()
+                }
+            } else {
+                column![].into()
+            };
+
+            let aura_canvas = canvas::Canvas::new(AuraChart {
+                data: td,
+                layout: aura_layout,
+                hover_second: self.aura_hover_second,
+            })
+            .width(Fill)
+            .height(chart_height);
+
+            // Cap the aura waterfall height and make it scrollable when tall
+            let max_aura_height: f32 = 200.0;
+            let aura_content: Element<ViewerMessage> = if chart_height > max_aura_height {
+                scrollable(aura_canvas)
+                    .height(max_aura_height)
+                    .width(Fill)
+                    .into()
+            } else {
+                aura_canvas.into()
+            };
+
+            column![aura_content, aura_tooltip]
+                .spacing(2)
+                .width(Fill)
+                .into()
+        };
+
+        // ── Dispel waterfall chart ─────────────────────────────────────
+        let dispel_section: Element<ViewerMessage> =
+            if vis.show_dispels && !td.dispel_casters.is_empty() {
+                let caster_count = td.dispel_casters.len();
+                let chart_height = caster_count as f32 * DISPEL_LANE_HEIGHT;
+                let total_dispels = td.dispel_marks.len();
+
+                let dispel_header = row![
+                    text("Dispel Activity")
+                        .size(11)
+                        .color(theme::TIMELINE_DISPEL),
+                    horizontal_space(),
+                    text(format!("{total_dispels} total"))
+                        .size(10)
+                        .color(theme::TEXT_MUTED),
+                ]
+                .width(Fill);
+
+                let dispel_canvas = canvas::Canvas::new(DispelChart {
+                    data: td,
+                    combatants: &self.log_data.combatants,
+                    hover_second: self.aura_hover_second,
+                })
+                .width(Fill)
+                .height(chart_height);
+
+                // Cap height and make scrollable when many casters
+                let max_dispel_height: f32 = 200.0;
+                let dispel_content: Element<ViewerMessage> = if chart_height > max_dispel_height {
+                    scrollable(dispel_canvas)
+                        .height(max_dispel_height)
+                        .width(Fill)
+                        .into()
+                } else {
+                    dispel_canvas.into()
+                };
+
+                column![dispel_header, dispel_content]
+                    .spacing(4)
+                    .width(Fill)
+                    .into()
+            } else {
+                column![].into()
+            };
+
         // ── Fixed top section: charts ──────────────────────────────────
         let charts_panel = container(
             column![
                 header,
                 legend,
+                aura_picker,
                 horizontal_rule(1),
                 chart_canvas,
                 tooltip,
                 horizontal_rule(1),
+                aura_section,
+                dispel_section,
                 alive_section,
             ]
             .spacing(6)
@@ -1481,6 +1876,21 @@ impl ViewerState {
                 );
             }
             r.into()
+        };
+
+        // Death Log window-size picker — only visible in Death Log mode
+        let window_picker: Element<ViewerMessage> = if self.event_log_mode == EventLogMode::DeathLog
+        {
+            pick_list(
+                DeathLogWindow::ALL,
+                Some(self.death_log_window),
+                ViewerMessage::SetDeathLogWindow,
+            )
+            .text_size(11)
+            .padding(3)
+            .into()
+        } else {
+            horizontal_space().width(0).into()
         };
 
         let type_toggles: Element<ViewerMessage> = {
@@ -1584,6 +1994,7 @@ impl ViewerState {
         let filter_bar = container(
             row![
                 mode_buttons,
+                window_picker,
                 type_toggles,
                 horizontal_space(),
                 player_picker,
@@ -1619,6 +2030,7 @@ impl ViewerState {
             self.event_log_mode,
             player_filter,
             self.timeline_clicked_second,
+            self.death_log_window.as_secs(),
         );
 
         let event_scrollable = scrollable(container(event_log).padding([4, 12]).width(Fill))
@@ -1772,6 +2184,19 @@ impl ViewerState {
             } => (
                 format!("{caster} interrupts {target} with {spell}"),
                 Color::from_rgb8(255, 153, 51),
+            ),
+            LogEntry::AuraGain {
+                player,
+                aura,
+                stacks,
+                ..
+            } => (
+                format!("{player} gains {aura} ({stacks})"),
+                Color::from_rgb8(180, 140, 255),
+            ),
+            LogEntry::AuraFade { player, aura, .. } => (
+                format!("{aura} fades from {player}"),
+                Color::from_rgb8(140, 100, 200),
             ),
         };
 
@@ -3368,8 +3793,426 @@ impl canvas::Program<ViewerMessage> for AliveChart<'_> {
     }
 }
 
-/// Seconds before a death to show in Death Log mode.
-const DEATH_LOG_WINDOW: f64 = 10.0;
+// ── Dispel Waterfall Chart ──────────────────────────────────────────────────
+
+/// Height of each caster lane in the dispel waterfall.
+const DISPEL_LANE_HEIGHT: f32 = 18.0;
+
+/// Dispel waterfall chart — one lane per caster with class-colored diamond marks
+/// at each dispel timestamp.  Casters are pre-sorted by count descending so the
+/// most active dispeller appears on top.
+struct DispelChart<'a> {
+    data: &'a TimelineData,
+    combatants: &'a HashMap<String, Combatant>,
+    hover_second: Option<f64>,
+}
+
+/// Draw a small diamond marker on the canvas at (`cx`, `cy`) with the given
+/// radius and color.  Used for dispel tick marks on the waterfall chart.
+fn draw_diamond(frame: &mut canvas::Frame, cx: f32, cy: f32, r: f32, color: Color) {
+    let path = canvas::Path::new(|b| {
+        b.move_to(Point::new(cx, cy - r)); // top
+        b.line_to(Point::new(cx + r, cy)); // right
+        b.line_to(Point::new(cx, cy + r)); // bottom
+        b.line_to(Point::new(cx - r, cy)); // left
+        b.close();
+    });
+    frame.fill(&path, Color { a: 0.6, ..color });
+    frame.stroke(
+        &path,
+        canvas::Stroke::default().with_color(color).with_width(1.0),
+    );
+}
+
+impl canvas::Program<ViewerMessage> for DispelChart<'_> {
+    type State = ();
+
+    #[allow(clippy::many_single_char_names)] // x/y/w/h are standard 2D drawing variables
+    #[allow(clippy::too_many_lines)] // Canvas draw — waterfall with per-caster lanes
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let td = self.data;
+        let w = bounds.width;
+        let h = bounds.height;
+
+        if td.duration <= 0.0 || w < 2.0 || h < 2.0 || td.dispel_casters.is_empty() {
+            return vec![];
+        }
+
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+
+        // Background
+        frame.fill_rectangle(
+            Point::ORIGIN,
+            bounds.size(),
+            Color::from_rgba8(0, 0, 0, 0.2),
+        );
+
+        // Reserve margins: left for player names, right for count labels.
+        let left_margin: f32 = 80.0;
+        let right_margin: f32 = 30.0;
+        let chart_w = (w - left_margin - right_margin).max(1.0);
+
+        for (lane_idx, caster) in td.dispel_casters.iter().enumerate() {
+            let lane_y = lane_idx as f32 * DISPEL_LANE_HEIGHT;
+
+            // Alternating row background for readability
+            if lane_idx % 2 == 0 {
+                frame.fill_rectangle(
+                    Point::new(0.0, lane_y),
+                    iced::Size::new(w, DISPEL_LANE_HEIGHT),
+                    Color::from_rgba8(255, 255, 255, 0.02),
+                );
+            }
+
+            // Look up class color for this caster
+            let class_color = self
+                .combatants
+                .get(caster.as_str())
+                .map_or(Color::from_rgb8(128, 128, 128), |c| {
+                    theme::class_color(&c.class)
+                });
+
+            // Player name label on the left (class-colored)
+            frame.fill_text(canvas::Text {
+                content: caster.clone(),
+                position: Point::new(4.0, lane_y + 2.0),
+                color: Color {
+                    a: 0.8,
+                    ..class_color
+                },
+                size: 9.0.into(),
+                ..canvas::Text::default()
+            });
+
+            // Count the marks for this caster and draw diamonds
+            let mut count: usize = 0;
+            let lane_center_y = lane_y + DISPEL_LANE_HEIGHT / 2.0;
+            for mark in &td.dispel_marks {
+                if mark.caster == *caster {
+                    count += 1;
+                    let x = left_margin + (mark.offset as f32 / td.duration as f32) * chart_w;
+                    draw_diamond(&mut frame, x, lane_center_y, 3.0, class_color);
+                }
+            }
+
+            // Count label on the right edge
+            frame.fill_text(canvas::Text {
+                content: count.to_string(),
+                position: Point::new(w - right_margin + 6.0, lane_y + 2.0),
+                color: Color {
+                    a: 0.6,
+                    ..class_color
+                },
+                size: 9.0.into(),
+                ..canvas::Text::default()
+            });
+        }
+
+        // Hover line (shared time cursor with aura chart)
+        if let Some(second) = self.hover_second {
+            let x = left_margin + (second as f32 / td.duration as f32) * chart_w;
+            if x >= left_margin && x <= left_margin + chart_w {
+                let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
+                frame.stroke(
+                    &line,
+                    canvas::Stroke::default()
+                        .with_color(Color::from_rgba8(255, 255, 255, 0.6))
+                        .with_width(1.0),
+                );
+            }
+        }
+
+        vec![frame.into_geometry()]
+    }
+
+    fn update(
+        &self,
+        _state: &mut (),
+        event: canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<ViewerMessage>) {
+        // Match the same margins used in draw() for mouse→time mapping.
+        let left_margin: f32 = 80.0;
+        let right_margin: f32 = 30.0;
+        let chart_w = (bounds.width - left_margin - right_margin).max(1.0);
+        match event {
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    if self.data.duration > 0.0 {
+                        let second = f64::from((pos.x - left_margin) / chart_w).clamp(0.0, 1.0)
+                            * self.data.duration;
+                        return (
+                            canvas::event::Status::Captured,
+                            Some(ViewerMessage::AuraHover(Some(second))),
+                        );
+                    }
+                } else {
+                    return (
+                        canvas::event::Status::Ignored,
+                        Some(ViewerMessage::AuraHover(None)),
+                    );
+                }
+            }
+            canvas::Event::Mouse(mouse::Event::CursorLeft) => {
+                return (
+                    canvas::event::Status::Ignored,
+                    Some(ViewerMessage::AuraHover(None)),
+                );
+            }
+            _ => {}
+        }
+        (canvas::event::Status::Ignored, None)
+    }
+}
+
+// ── Aura Waterfall Chart ───────────────────────────────────────────────────
+
+///
+/// Waterfall layout: one lane per player per tracked aura, grouped under aura
+/// name headers.  Each player row shows horizontal bars for every gain→fade
+/// interval, colored per-aura.  Mouse hover reports the time offset for
+/// tooltip rendering.
+struct AuraChart<'a> {
+    data: &'a TimelineData,
+    /// Pre-computed layout: (`aura_name`, color, players) in display order.
+    layout: Vec<AuraLaneGroup<'a>>,
+    hover_second: Option<f64>,
+}
+
+/// A group of player lanes for one aura.
+struct AuraLaneGroup<'a> {
+    aura_name: &'a str,
+    color: Color,
+    /// Unique players (sorted) who have intervals for this aura.
+    players: Vec<&'a str>,
+}
+
+/// Height of the aura name header row.
+const AURA_HEADER_HEIGHT: f32 = 16.0;
+/// Height of each player lane within an aura group.
+const AURA_LANE_HEIGHT: f32 = 18.0;
+
+/// Compute the waterfall layout for the currently tracked auras.
+///
+/// Returns the layout groups and total canvas height. Extracted as a free
+/// function so both `view_timeline_tab` (for canvas height) and `AuraChart`
+/// (for rendering) use the same layout.
+fn build_aura_layout<'a>(
+    td: &'a TimelineData,
+    tracked: &'a HashSet<String>,
+) -> Vec<AuraLaneGroup<'a>> {
+    let mut aura_names: Vec<&String> = tracked
+        .iter()
+        .filter(|name| td.aura_intervals.contains_key(name.as_str()))
+        .collect();
+    aura_names.sort_by_key(|n| n.to_lowercase());
+
+    aura_names
+        .iter()
+        .enumerate()
+        .map(|(idx, aura_name)| {
+            let color = theme::AURA_COLORS[idx % theme::AURA_COLORS.len()];
+            let mut players: Vec<&str> = td.aura_intervals[aura_name.as_str()]
+                .iter()
+                .map(|iv| iv.player.as_str())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            players.sort_unstable();
+            AuraLaneGroup {
+                aura_name: aura_name.as_str(),
+                color,
+                players,
+            }
+        })
+        .collect()
+}
+
+/// Compute the total canvas height for the waterfall layout.
+fn aura_chart_height(layout: &[AuraLaneGroup<'_>]) -> f32 {
+    layout
+        .iter()
+        .map(|g| AURA_HEADER_HEIGHT + g.players.len() as f32 * AURA_LANE_HEIGHT)
+        .sum::<f32>()
+        .max(AURA_LANE_HEIGHT)
+}
+
+impl canvas::Program<ViewerMessage> for AuraChart<'_> {
+    type State = ();
+
+    #[allow(clippy::many_single_char_names)] // x/y/w/h are standard 2D drawing variables
+    #[allow(clippy::too_many_lines)] // Canvas draw — waterfall with grouped player lanes
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let td = self.data;
+        let w = bounds.width;
+        let h = bounds.height;
+
+        if td.duration <= 0.0 || w < 2.0 || h < 2.0 {
+            return vec![];
+        }
+
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+
+        // Background
+        frame.fill_rectangle(
+            Point::ORIGIN,
+            bounds.size(),
+            Color::from_rgba8(0, 0, 0, 0.2),
+        );
+
+        let mut y_cursor: f32 = 0.0;
+
+        for group in &self.layout {
+            let color = group.color;
+
+            // Aura name header
+            frame.fill_text(canvas::Text {
+                content: group.aura_name.to_string(),
+                position: Point::new(2.0, y_cursor + 1.0),
+                color: Color { a: 0.7, ..color },
+                size: 11.0.into(),
+                ..canvas::Text::default()
+            });
+
+            // Thin separator line under the header
+            let sep = canvas::Path::line(
+                Point::new(0.0, y_cursor + AURA_HEADER_HEIGHT - 1.0),
+                Point::new(w, y_cursor + AURA_HEADER_HEIGHT - 1.0),
+            );
+            frame.stroke(
+                &sep,
+                canvas::Stroke::default()
+                    .with_color(Color { a: 0.15, ..color })
+                    .with_width(1.0),
+            );
+
+            y_cursor += AURA_HEADER_HEIGHT;
+
+            // Player lanes
+            if let Some(intervals) = td.aura_intervals.get(group.aura_name) {
+                for (player_idx, &player) in group.players.iter().enumerate() {
+                    let lane_y = y_cursor + player_idx as f32 * AURA_LANE_HEIGHT;
+
+                    // Alternating row background for readability
+                    if player_idx % 2 == 0 {
+                        frame.fill_rectangle(
+                            Point::new(0.0, lane_y),
+                            iced::Size::new(w, AURA_LANE_HEIGHT),
+                            Color::from_rgba8(255, 255, 255, 0.02),
+                        );
+                    }
+
+                    // Player name label on the left
+                    frame.fill_text(canvas::Text {
+                        content: player.to_string(),
+                        position: Point::new(4.0, lane_y + 2.0),
+                        color: theme::TEXT_MUTED,
+                        size: 9.0.into(),
+                        ..canvas::Text::default()
+                    });
+
+                    // Draw bars for this player's intervals
+                    for interval in intervals.iter().filter(|iv| iv.player == player) {
+                        let x_start = (interval.start as f32 / td.duration as f32) * w;
+                        let x_end = (interval.end as f32 / td.duration as f32) * w;
+                        let bar_w = (x_end - x_start).max(2.0);
+
+                        // Filled bar
+                        frame.fill_rectangle(
+                            Point::new(x_start, lane_y + 2.0),
+                            iced::Size::new(bar_w, AURA_LANE_HEIGHT - 4.0),
+                            Color { a: 0.55, ..color },
+                        );
+
+                        // Border
+                        let bar_rect = canvas::Path::rectangle(
+                            Point::new(x_start, lane_y + 2.0),
+                            iced::Size::new(bar_w, AURA_LANE_HEIGHT - 4.0),
+                        );
+                        frame.stroke(
+                            &bar_rect,
+                            canvas::Stroke::default()
+                                .with_color(Color { a: 0.8, ..color })
+                                .with_width(1.0),
+                        );
+                    }
+                }
+            }
+
+            y_cursor += group.players.len() as f32 * AURA_LANE_HEIGHT;
+        }
+
+        // Hover line (shared time cursor with main chart)
+        if let Some(second) = self.hover_second {
+            let x = (second as f32 / td.duration as f32) * w;
+            let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
+            frame.stroke(
+                &line,
+                canvas::Stroke::default()
+                    .with_color(Color::from_rgba8(255, 255, 255, 0.6))
+                    .with_width(1.0),
+            );
+        }
+
+        vec![frame.into_geometry()]
+    }
+
+    fn update(
+        &self,
+        _state: &mut (),
+        event: canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<ViewerMessage>) {
+        match event {
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    if self.data.duration > 0.0 {
+                        let second = f64::from(pos.x / bounds.width) * self.data.duration;
+                        return (
+                            canvas::event::Status::Captured,
+                            Some(ViewerMessage::AuraHover(Some(second))),
+                        );
+                    }
+                } else {
+                    return (
+                        canvas::event::Status::Ignored,
+                        Some(ViewerMessage::AuraHover(None)),
+                    );
+                }
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    if self.data.duration > 0.0 {
+                        let second =
+                            (f64::from(pos.x / bounds.width) * self.data.duration) as usize;
+                        return (
+                            canvas::event::Status::Captured,
+                            Some(ViewerMessage::TimelineClick(second)),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        (canvas::event::Status::Ignored, None)
+    }
+}
 
 /// Big hit threshold for Key Events mode.
 const KEY_EVENT_BIG_HIT: u64 = 2000;
@@ -3380,7 +4223,7 @@ const KEY_EVENT_BIG_HIT: u64 = 2000;
 /// - `AllEvents`: every entry matching type filters
 /// - `KeyEvents`: deaths, big hits, dispels, interrupts, resurrects only
 /// - `DeathLog`: for each player death, all events involving that player
-///   in the 10 seconds before death
+///   in the configurable window before death
 #[allow(clippy::too_many_lines)] // Event log builder — single pass with mode dispatch
 #[allow(clippy::too_many_arguments)] // Will be refactored into a struct in future
 fn build_timeline_event_log<'a>(
@@ -3390,6 +4233,7 @@ fn build_timeline_event_log<'a>(
     mode: EventLogMode,
     player_filter: Option<&str>,
     clicked_second: Option<usize>,
+    death_window_secs: f64,
 ) -> Element<'a, ViewerMessage> {
     let encounters = log_data.selected_encounters(filter);
     if encounters.is_empty() {
@@ -3398,7 +4242,7 @@ fn build_timeline_event_log<'a>(
 
     // For Death Log mode, pre-compute death windows
     let death_windows: Vec<(f64, f64, &str)> = if mode == EventLogMode::DeathLog {
-        build_death_windows(log_data, &encounters)
+        build_death_windows(log_data, &encounters, death_window_secs)
     } else {
         Vec::new()
     };
@@ -3406,10 +4250,16 @@ fn build_timeline_event_log<'a>(
     let mut col = Column::new().spacing(1);
 
     // Header
+    #[allow(clippy::cast_possible_truncation)] // window seconds always ≤ 30
     let header_text = match mode {
-        EventLogMode::AllEvents => "Event Log — click chart to jump",
-        EventLogMode::KeyEvents => "Key Events — deaths, big hits, dispels, interrupts",
-        EventLogMode::DeathLog => "Death Log — 10s before each death",
+        EventLogMode::AllEvents => "Event Log — click chart to jump".to_string(),
+        EventLogMode::KeyEvents => "Key Events — deaths, big hits, dispels, interrupts".to_string(),
+        EventLogMode::DeathLog => {
+            format!(
+                "Death Log — {}s before each death",
+                death_window_secs as u32
+            )
+        }
     };
     col = col.push(
         row![
@@ -3455,6 +4305,8 @@ fn build_timeline_event_log<'a>(
             }
 
             // ── Mode-specific filter ───────────────────────────────────
+            // In DeathLog mode, track the death timestamp for time-to-death display
+            let mut current_death_ts: Option<f64> = None;
             match mode {
                 EventLogMode::AllEvents => {}
                 EventLogMode::KeyEvents => {
@@ -3472,6 +4324,7 @@ fn build_timeline_event_log<'a>(
                                 || entry.target().is_some_and(|t| t == *player))
                     });
                     if let Some((_, end_ts, dead_player)) = in_window {
+                        current_death_ts = Some(*end_ts);
                         // Insert a death header separator when entering a new window
                         let death_label = format!(
                             "{} — died at {}",
@@ -3515,7 +4368,17 @@ fn build_timeline_event_log<'a>(
             let is_highlighted = clicked_second.is_some_and(|cs| second == cs);
             let bg_alpha: f32 = if is_highlighted { 0.15 } else { 0.0 };
 
-            let time_str = format_encounter_time(relative);
+            // In Death Log mode, show time relative to death (e.g. "-8.2s", "0.0s")
+            let time_str = if let Some(death_ts) = current_death_ts {
+                let delta = ts - death_ts;
+                if delta.abs() < 0.05 {
+                    " 0.0s".to_string()
+                } else {
+                    format!("{delta:+.1}s")
+                }
+            } else {
+                format_encounter_time(relative)
+            };
 
             let event_row: Element<ViewerMessage> = container(
                 row![
@@ -3570,6 +4433,7 @@ fn build_timeline_event_log_text(
     type_filter: &EventLogTypeFilter,
     mode: EventLogMode,
     player_filter: Option<&str>,
+    death_window_secs: f64,
 ) -> String {
     let encounters = log_data.selected_encounters(filter);
     if encounters.is_empty() {
@@ -3577,7 +4441,7 @@ fn build_timeline_event_log_text(
     }
 
     let death_windows: Vec<(f64, f64, &str)> = if mode == EventLogMode::DeathLog {
-        build_death_windows(log_data, &encounters)
+        build_death_windows(log_data, &encounters, death_window_secs)
     } else {
         Vec::new()
     };
@@ -3612,6 +4476,7 @@ fn build_timeline_event_log_text(
                 }
             }
 
+            let mut current_death_ts: Option<f64> = None;
             match mode {
                 EventLogMode::AllEvents => {}
                 EventLogMode::KeyEvents => {
@@ -3627,6 +4492,7 @@ fn build_timeline_event_log_text(
                                 || entry.target().is_some_and(|t| t == *player))
                     });
                     if let Some((_, end_ts, dead_player)) = in_window {
+                        current_death_ts = Some(*end_ts);
                         let death_label = format!(
                             "{} — died at {}",
                             dead_player,
@@ -3645,7 +4511,17 @@ fn build_timeline_event_log_text(
                 }
             }
 
-            let time_str = format_encounter_time(relative);
+            // In Death Log mode, show time relative to death (e.g. "-8.2s", "0.0s")
+            let time_str = if let Some(death_ts) = current_death_ts {
+                let delta = ts - death_ts;
+                if delta.abs() < 0.05 {
+                    " 0.0s".to_string()
+                } else {
+                    format!("{delta:+.1}s")
+                }
+            } else {
+                format_encounter_time(relative)
+            };
             let (_color, label) = format_log_entry(entry);
             lines.push(format!("{time_str}  {label}"));
             row_count += 1;
@@ -3727,6 +4603,19 @@ fn format_log_entry(entry: &LogEntry) -> (Color, String) {
             theme::TIMELINE_INTERRUPT,
             format!("{caster} interrupts {target} with {spell}"),
         ),
+        LogEntry::AuraGain {
+            player,
+            aura,
+            stacks,
+            ..
+        } => (
+            Color::from_rgb8(180, 140, 255),
+            format!("{player} gains {aura} ({stacks})"),
+        ),
+        LogEntry::AuraFade { player, aura, .. } => (
+            Color::from_rgb8(140, 100, 200),
+            format!("{aura} fades from {player}"),
+        ),
     }
 }
 
@@ -3744,17 +4633,18 @@ fn is_key_event(
             // Big hits on raid members
             *amount >= KEY_EVENT_BIG_HIT && combatants.contains_key(target.as_str())
         }
-        LogEntry::Healing { .. } => false,
+        LogEntry::Healing { .. } | LogEntry::AuraGain { .. } | LogEntry::AuraFade { .. } => false,
     }
 }
 
 /// Build death windows for Death Log mode.
 ///
 /// For each player death within the selected encounters, creates a window
-/// of `(start_ts, death_ts, player_name)` covering the 10 seconds before death.
+/// of `(start_ts, death_ts, player_name)` covering `window_secs` before death.
 fn build_death_windows<'a>(
     log_data: &'a LogData,
     encounters: &[&Encounter],
+    window_secs: f64,
 ) -> Vec<(f64, f64, &'a str)> {
     let mut windows = Vec::new();
     for enc in encounters {
@@ -3764,7 +4654,7 @@ fn build_death_windows<'a>(
                     && *timestamp <= enc.end
                     && log_data.combatants.contains_key(player.as_str())
                 {
-                    let window_start = (timestamp - DEATH_LOG_WINDOW).max(enc.start);
+                    let window_start = (timestamp - window_secs).max(enc.start);
                     windows.push((window_start, *timestamp, player.as_str()));
                 }
             }

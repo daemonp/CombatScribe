@@ -14,7 +14,7 @@ include!(concat!(env!("OUT_DIR"), "/raid_data_generated.rs"));
 /// Returns `None` for NPCs not associated with any raid instance.
 #[allow(dead_code)] // Available for NPC-based instance detection
 pub(crate) fn npc_raid(name: &str) -> Option<&'static str> {
-    let lower = to_lower_stack(name)?;
+    let lower = to_lower_checked(name)?;
     binary_search_map(NPC_TO_RAID, &lower)
 }
 
@@ -22,13 +22,13 @@ pub(crate) fn npc_raid(name: &str) -> Option<&'static str> {
 ///
 /// Returns `None` if the name is not a known boss.
 pub(crate) fn boss_raid(name: &str) -> Option<&'static str> {
-    let lower = to_lower_stack(name)?;
+    let lower = to_lower_checked(name)?;
     binary_search_map(BOSS_TO_RAID, &lower)
 }
 
 /// Check if a name is a known boss.
 pub(crate) fn is_boss(name: &str) -> bool {
-    let Some(lower) = to_lower_stack(name) else {
+    let Some(lower) = to_lower_checked(name) else {
         return false;
     };
     ALL_BOSSES.binary_search(&&*lower).is_ok()
@@ -37,7 +37,7 @@ pub(crate) fn is_boss(name: &str) -> bool {
 /// Check if a name is any known raid NPC (boss or trash).
 #[allow(dead_code)] // Available for NPC-based instance detection
 pub(crate) fn is_raid_npc(name: &str) -> bool {
-    let Some(lower) = to_lower_stack(name) else {
+    let Some(lower) = to_lower_checked(name) else {
         return false;
     };
     NPC_TO_RAID
@@ -149,10 +149,11 @@ fn binary_search_map(table: &'static [(&str, &str)], key: &str) -> Option<&'stat
         .map(|i| table[i].1)
 }
 
-/// Lowercase a name on the stack to avoid heap allocation.
+/// Lowercase a name with a length guard.
 ///
-/// Returns `None` if the name exceeds the buffer size (not a valid NPC name).
-fn to_lower_stack(name: &str) -> Option<String> {
+/// Returns `None` if the name exceeds 128 bytes (not a valid NPC name),
+/// avoiding unnecessary work on long garbage strings.
+fn to_lower_checked(name: &str) -> Option<String> {
     // NPC names are all < 64 chars; skip anything longer
     if name.len() > 128 {
         return None;
