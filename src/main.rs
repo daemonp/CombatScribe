@@ -8,6 +8,7 @@ mod log_parser;
 mod parser;
 mod raid_data;
 mod theme;
+mod update;
 mod viewer;
 
 use std::path::PathBuf;
@@ -56,12 +57,18 @@ fn main() -> iced::Result {
         .window_size((1200.0, 800.0))
         .run_with(move || {
             let app = App::new();
-            if let Some(path) = initial_file {
+            // Always check for updates on startup (runs in background)
+            let update_task = Task::perform(
+                async { update::check_for_update() },
+                Message::UpdateCheckResult,
+            );
+            let init_task = if let Some(path) = initial_file {
                 let p = path.clone();
-                (app, Task::done(Message::FileSelected(Some(p))))
+                Task::done(Message::FileSelected(Some(p)))
             } else {
-                (app, Task::none())
-            }
+                Task::none()
+            };
+            (app, Task::batch([update_task, init_task]))
         })
 }
 
@@ -98,6 +105,9 @@ struct App {
     // Export modal
     show_export_modal: bool,
     export_result: Option<Result<DoneInfo, String>>,
+
+    // Update notification
+    update_available: Option<update::NewRelease>,
 }
 
 impl App {
@@ -116,6 +126,7 @@ impl App {
             rename_output: true,
             show_export_modal: false,
             export_result: None,
+            update_available: None,
         }
     }
 
@@ -168,6 +179,12 @@ enum Message {
     Export,
     ExportComplete(Result<DoneInfo, String>),
     DismissExportResult,
+
+    // Update notification
+    UpdateCheckResult(Option<update::NewRelease>),
+    OpenReleasePage,
+    DismissUpdate,
+    DismissUpdateForever,
 
     // Viewer messages
     Viewer(viewer::ViewerMessage),
@@ -337,6 +354,37 @@ impl App {
                 Task::none()
             }
 
+            // ── Update notification ──────────────────────────────────────
+            Message::UpdateCheckResult(release) => {
+                if let Some(ref info) = release {
+                    // Don't show if user dismissed this exact version
+                    if self.config.dismissed_version.as_deref() == Some(&info.version) {
+                        return Task::none();
+                    }
+                }
+                self.update_available = release;
+                Task::none()
+            }
+
+            Message::OpenReleasePage => {
+                update::open_release_page();
+                Task::none()
+            }
+
+            Message::DismissUpdate => {
+                self.update_available = None;
+                Task::none()
+            }
+
+            Message::DismissUpdateForever => {
+                if let Some(ref info) = self.update_available {
+                    self.config.dismissed_version = Some(info.version.clone());
+                    self.config.save();
+                }
+                self.update_available = None;
+                Task::none()
+            }
+
             // ── Viewer messages ─────────────────────────────────────────
             Message::Viewer(viewer_msg) => {
                 // Intercept viewer messages that need app-level handling
@@ -393,6 +441,16 @@ impl App {
             AppState::Loading => self.view_loading(),
             AppState::Viewing(viewer_state) => viewer_state.view().map(Message::Viewer),
             AppState::Error(err) => self.view_error(err),
+        };
+
+        // Prepend update banner if a new version is available
+        let content = if let Some(ref release) = self.update_available {
+            column![self.view_update_banner(release), content]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else {
+            content
         };
 
         // Wrap with export modal overlay if needed
@@ -528,6 +586,57 @@ impl App {
             .padding(20)
             .width(Fill)
             .height(Fill)
+            .into()
+    }
+
+    // ── Update Banner ────────────────────────────────────────────────────
+
+    #[allow(clippy::unused_self)] // iced view pattern — method for consistency
+    fn view_update_banner(&self, release: &update::NewRelease) -> Element<'_, Message> {
+        let label = text(format!(
+            "CombatScribe v{} is available  (you have v{})",
+            release.version,
+            update::CURRENT_VERSION,
+        ))
+        .size(13)
+        .color(Color::WHITE);
+
+        let download_btn = button(text("Download").size(12).color(Color::WHITE))
+            .on_press(Message::OpenReleasePage)
+            .padding([4, 14])
+            .style(update_download_button_style);
+
+        let dismiss_btn = button(text("Dismiss").size(11).color(theme::TEXT_SECONDARY))
+            .on_press(Message::DismissUpdate)
+            .style(viewer::transparent_button_style)
+            .padding([4, 10]);
+
+        let skip_btn = button(
+            text("Skip this version")
+                .size(11)
+                .color(theme::TEXT_MUTED),
+        )
+        .on_press(Message::DismissUpdateForever)
+        .style(viewer::transparent_button_style)
+        .padding([4, 10]);
+
+        let banner = row![label, horizontal_space(), download_btn, dismiss_btn, skip_btn,]
+            .spacing(8)
+            .align_y(Center)
+            .width(Fill);
+
+        container(banner)
+            .padding([8, 16])
+            .width(Fill)
+            .style(|_theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.15, 0.25, 0.45))),
+                border: iced::Border {
+                    color: Color::from_rgb(0.25, 0.40, 0.85),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
             .into()
     }
 
@@ -737,6 +846,24 @@ fn header_button_style(_theme: &iced::Theme, status: button::Status) -> button::
         text_color: Color::WHITE,
         border: iced::Border {
             color: Color::from_rgba(1.0, 1.0, 1.0, 0.08),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+    }
+}
+
+/// Download button style for the update banner (green accent).
+fn update_download_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgb(0.20, 0.65, 0.40),
+        _ => Color::from_rgb(0.15, 0.55, 0.35),
+    };
+    button::Style {
+        background: Some(iced::Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: iced::Border {
+            color: Color::from_rgba(0.20, 0.70, 0.45, 0.4),
             width: 1.0,
             radius: 4.0.into(),
         },

@@ -30,6 +30,11 @@ pub struct AppConfig {
     /// Aura names the user has selected for display on the timeline waterfall.
     #[serde(default)]
     pub tracked_auras: HashSet<String>,
+    /// Version string the user chose to dismiss (e.g. "0.9.0").
+    /// The update banner won't show for this version, but will reappear
+    /// when an even newer release is published.
+    #[serde(default)]
+    pub dismissed_version: Option<String>,
 }
 
 impl AppConfig {
