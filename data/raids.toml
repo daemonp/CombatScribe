@@ -1,19 +1,25 @@
-# Raid instance database for CombatScribe.
+# Instance database for CombatScribe.
 #
-# This file is the single source of truth for raid/instance detection.
+# This file is the single source of truth for raid and dungeon detection.
 # build.rs compiles it into optimised static lookup tables at build time.
 #
-# To add a new raid or update an existing one:
+# To add a new instance or update an existing one:
 #   1. Add/edit the [[raid]] section below
 #   2. Run `cargo build` — the lookup tables regenerate automatically
 #
-# Data originally extracted from Turtle WoW database (00073_fulldb.sql).
+# Data extracted from Turtle WoW database (00073_fulldb.sql) and
+# instance scripts at ~/src/turtle-wow/.../src/scripts/dungeons/.
 
 # ── Zone Aliases ─────────────────────────────────────────────────────────────
 # Maps addon-reported zone names to canonical raid names.
 [zone_aliases]
 "ahn'qiraj" = "Ahn'Qiraj Temple"
+"black morass" = "Black Morass"
 "karazhan" = "Lower Karazhan"
+"karazhan crypt" = "Karazhan Crypt"
+"scarlet citadel" = "Scarlet Citadel"
+"stormwind vault" = "Stormwind Vault"
+"the stockade" = "Stormwind Vault"
 "the upper necropolis" = "Naxxramas"
 "tower of karazhan" = "Upper Karazhan"
 
@@ -22,6 +28,7 @@
 [overworld]
 zones = [
     "blackrock mountain",
+    "blood ring",
     "burning steppes",
     "caverns of time",
     "darnassus",
@@ -136,7 +143,7 @@ trash = [
 # ─── Molten Core ─────────────────────────────────────────────────────────────
 [[raid]]
 name = "Molten Core"
-encounter_count = 13
+encounter_count = 12
 encounters = [
     "Baron Geddon",
     "Garr",
@@ -150,7 +157,7 @@ encounters = [
     "Shazzrah",
     "Sorcerer-Thane Thaurissan",
     "Sulfuron Harbinger",
-    "Twin Golems",
+    "Twin Giants",
 ]
 bosses = [
     "Baron Geddon",
@@ -678,6 +685,7 @@ trash = [
     "Pawn",
     "Queen",
     "Ralwen Ivon",
+    "Raven",
     "Red Affinity",
     "Red Owl",
     "Repository Assistant",
@@ -700,4 +708,373 @@ trash = [
     "Wilbert Astray",
     "Winston Selnate",
     "Withering Pawn",
+]
+
+# ─── Scarlet Citadel (Custom TW 40-man Raid) ────────────────────────────────
+[[raid]]
+name = "Scarlet Citadel"
+encounter_count = 6
+encounters = [
+    "Abbendis",
+    "Ardaeus",
+    "Daelus",
+    "Eric Vesper",
+    "Mariella",
+    "Rayn",
+]
+bosses = [
+    "Abbendis",
+    "Ardaeus",
+    "Daelus",
+    "Eric Vesper",
+    "Mariella",
+    "Rayn",
+]
+trash = [
+    "Citadel Footman",
+    "Citadel Inquisitor",
+    "Citadel Interrogator",
+    "Citadel Valiant",
+    "Scarlet Chaplain",
+    "Scarlet Sister",
+]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Level 60 Dungeons
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ─── Blackrock Depths ────────────────────────────────────────────────────────
+[[raid]]
+name = "Blackrock Depths"
+dungeon = true
+encounter_count = 14
+encounters = [
+    "Ambassador Flamelash",
+    "Emperor Dagran Thaurissan",
+    "General Angerforge",
+    "Golem Lord Argelmach",
+    "High Interrogator Gerstahn",
+    "Houndmaster Grebmar",
+    "Magmus",
+    "Plugger Spazzring",
+    "Princess Moira Bronzebeard",
+    "Ring of Law",
+    "Tomb of Seven",
+]
+bosses = [
+    "Ambassador Flamelash",
+    "Anub'shiah",
+    "Emperor Dagran Thaurissan",
+    "Eviscerator",
+    "General Angerforge",
+    "Golem Lord Argelmach",
+    "Gorosh the Dervish",
+    "Grizzle",
+    "Hedrum the Creeper",
+    "High Interrogator Gerstahn",
+    "Houndmaster Grebmar",
+    "Magmus",
+    "Ok'thor the Breaker",
+    "Plugger Spazzring",
+    "Princess Moira Bronzebeard",
+]
+trash = [
+    "Angerrel",
+    "Anvilrage Medic",
+    "Anvilrage Officer",
+    "Anvilrage Soldier",
+    "Burning Spirit",
+    "Doomrel",
+    "Doperel",
+    "Fireguard Destroyer",
+    "Gloomrel",
+    "Grimstone",
+    "Haterel",
+    "Mistress Nagmara",
+    "Phalanx",
+    "Private Rocknot",
+    "Ribbly Screwspigot",
+    "Ribbly's Crony",
+    "Seethrel",
+    "Shadowforge Senator",
+    "Vilerel",
+    "Watchman Doomgrip",
+    "Wrath Hammer Construct",
+]
+
+# ─── Blackrock Spire (LBRS + UBRS) ──────────────────────────────────────────
+[[raid]]
+name = "Blackrock Spire"
+dungeon = true
+encounter_count = 14
+encounters = [
+    "Bannok Grimaxe",
+    "General Drakkisath",
+    "Gyth",
+    "Halycon",
+    "Highlord Omokk",
+    "Mother Smolderweb",
+    "Pyroguard Emberseer",
+    "Quartermaster Zigris",
+    "Shadow Hunter Vosh'gajin",
+    "Solakar Flamewreath",
+    "The Beast",
+    "Urok Doomhowl",
+    "War Master Voone",
+    "Warchief Rend Blackhand",
+]
+bosses = [
+    "Bannok Grimaxe",
+    "General Drakkisath",
+    "Gyth",
+    "Halycon",
+    "Highlord Omokk",
+    "Mother Smolderweb",
+    "Pyroguard Emberseer",
+    "Quartermaster Zigris",
+    "Shadow Hunter Vosh'gajin",
+    "Solakar Flamewreath",
+    "The Beast",
+    "Urok Doomhowl",
+    "War Master Voone",
+    "Warchief Rend Blackhand",
+]
+trash = [
+    "Blackhand Elite",
+    "Blackhand Handler",
+    "Blackhand Incarcerator",
+    "Blackhand Summoner",
+    "Blackhand Veteran",
+    "Chromatic Dragon",
+    "Chromatic Whelp",
+    "Firebrand Grunt",
+    "Rookery Guardian",
+    "Rookery Hatcher",
+    "Scarshield Infiltrator",
+]
+
+# ─── Stratholme ──────────────────────────────────────────────────────────────
+[[raid]]
+name = "Stratholme"
+dungeon = true
+encounter_count = 12
+encounters = [
+    "Balnazzar",
+    "Baron Rivendare",
+    "Baroness Anastari",
+    "Cannon Master Willey",
+    "Grand Crusader Dathrohan",
+    "Magistrate Barthilas",
+    "Maleki the Pallid",
+    "Nerub'enkan",
+    "Postmaster Malown",
+    "Ramstein the Gorger",
+    "The Unforgiven",
+    "Timmy the Cruel",
+]
+bosses = [
+    "Balnazzar",
+    "Baron Rivendare",
+    "Baroness Anastari",
+    "Cannon Master Willey",
+    "Grand Crusader Dathrohan",
+    "Magistrate Barthilas",
+    "Maleki the Pallid",
+    "Nerub'enkan",
+    "Postmaster Malown",
+    "Ramstein the Gorger",
+    "The Unforgiven",
+    "Timmy the Cruel",
+]
+trash = [
+    "Aurius",
+    "Bile Spewer",
+    "Black Guard",
+    "Mindless Undead",
+    "Plagued Insect",
+    "Plagued Maggot",
+    "Plagued Rat",
+    "Undead Postman",
+    "Venom Belcher",
+    "Vengeful Phantom",
+]
+
+# ─── Scholomance ─────────────────────────────────────────────────────────────
+[[raid]]
+name = "Scholomance"
+dungeon = true
+encounter_count = 13
+encounters = [
+    "Darkmaster Gandling",
+    "Doctor Theolen Krastinov",
+    "Illucia Barov",
+    "Instructor Malicia",
+    "Jandice Barov",
+    "Kirtonos the Herald",
+    "Kormok",
+    "Lord Alexei Barov",
+    "Lord Blackwood",
+    "Lorekeeper Polkelt",
+    "Ras Frostwhisper",
+    "Rattlegore",
+    "Vectus",
+]
+bosses = [
+    "Darkmaster Gandling",
+    "Doctor Theolen Krastinov",
+    "Illucia Barov",
+    "Instructor Malicia",
+    "Jandice Barov",
+    "Kirtonos the Herald",
+    "Kormok",
+    "Lord Alexei Barov",
+    "Lord Blackwood",
+    "Lorekeeper Polkelt",
+    "Ras Frostwhisper",
+    "Rattlegore",
+    "Vectus",
+]
+trash = [
+    "Marduk Blackpool",
+    "Reanimated Corpse",
+    "Unstable Corpse",
+]
+
+# ─── Dire Maul (East + West + North) ────────────────────────────────────────
+[[raid]]
+name = "Dire Maul"
+dungeon = true
+encounter_count = 12
+encounters = [
+    "Alzzin the Wildshaper",
+    "Captain Kromcrush",
+    "Cho'Rush the Observer",
+    "Guard Fengus",
+    "Guard Mol'dar",
+    "Guard Slip'kik",
+    "Immol'thar",
+    "Isalien",
+    "King Gordok",
+    "Prince Tortheldrin",
+    "Tendris Warpwood",
+    "Zevrim Thornhoof",
+]
+bosses = [
+    "Alzzin the Wildshaper",
+    "Captain Kromcrush",
+    "Cho'Rush the Observer",
+    "Guard Fengus",
+    "Guard Mol'dar",
+    "Guard Slip'kik",
+    "Immol'thar",
+    "Isalien",
+    "King Gordok",
+    "Prince Tortheldrin",
+    "Tendris Warpwood",
+    "Zevrim Thornhoof",
+]
+trash = [
+    "Arcane Aberration",
+    "Gordok Brute",
+    "Gordok Reaver",
+    "Mana Remnant",
+    "Mizzle the Crafty",
+    "Old Ironbark",
+    "Pusillin",
+    "Residual Monstrosity",
+]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Custom Turtle WoW Dungeons
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ─── Stormwind Vault ─────────────────────────────────────────────────────────
+[[raid]]
+name = "Stormwind Vault"
+dungeon = true
+encounter_count = 7
+encounters = [
+    "Arctiras",
+    "Aszosh Grimflame",
+    "Damian the Ripper",
+    "Nazorna",
+    "Thamgrarr",
+    "The Black Bride",
+    "Volkan Cruelblade",
+]
+bosses = [
+    "Arctiras",
+    "Aszosh Grimflame",
+    "Damian the Ripper",
+    "Nazorna",
+    "Thamgrarr",
+    "The Black Bride",
+    "Volkan Cruelblade",
+]
+trash = [
+    "Hungry Rat",
+    "Maddened Guard",
+    "Vault Rat",
+]
+
+# ─── Black Morass (Caverns of Time) ─────────────────────────────────────────
+[[raid]]
+name = "Black Morass"
+dungeon = true
+encounter_count = 8
+encounters = [
+    "Antnormi",
+    "Chronar",
+    "Chronormu",
+    "Epochronos",
+    "Gerastrasz",
+    "Harbringer",
+    "Mosshear",
+    "Rotmaw",
+]
+bosses = [
+    "Antnormi",
+    "Chronar",
+    "Chronormu",
+    "Epochronos",
+    "Gerastrasz",
+    "Harbringer",
+    "Mosshear",
+    "Rotmaw",
+]
+trash = [
+    "Aqir Cleric",
+    "Aqir Drone",
+    "Aqir Warrior",
+    "Bronze Dragonspawn",
+    "Echo of Gerastrasz",
+    "Infinite Dragonspawn",
+    "Infinite Rift Guard",
+    "Infinite Rift Weaver",
+    "Infinite Riftlord",
+    "Infinite Timeripper",
+    "Infinite Whelp",
+    "Swamp Croc",
+    "Swamp Python",
+    "Swamp Tarantula",
+]
+
+# ─── Karazhan Crypt ──────────────────────────────────────────────────────────
+[[raid]]
+name = "Karazhan Crypt"
+dungeon = true
+encounter_count = 3
+encounters = [
+    "Alarus",
+    "Guard Captain Gort",
+    "Hivaxxis",
+]
+bosses = [
+    "Alarus",
+    "Guard Captain Gort",
+    "Hivaxxis",
+]
+trash = [
+    "Skeletal Remains",
+    "Tomb Bat",
 ]

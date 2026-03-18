@@ -45,10 +45,17 @@ pub(crate) fn is_raid_npc(name: &str) -> bool {
         .is_ok()
 }
 
-/// Check if a zone name (post-normalization) is a known raid zone.
+/// Check if a zone name (post-normalization) is a known instance zone
+/// (raid or dungeon).
 pub(crate) fn is_raid_zone(zone: &str) -> bool {
     let lower = zone.to_lowercase();
     ALL_RAID_ZONES.binary_search(&&*lower).is_ok()
+}
+
+/// Check if a zone name is a 5-man dungeon (not a raid).
+pub(crate) fn is_dungeon_zone(zone: &str) -> bool {
+    let lower = zone.to_lowercase();
+    DUNGEON_ZONES.binary_search(&&*lower).is_ok()
 }
 
 /// Get the encounter count for a raid zone.

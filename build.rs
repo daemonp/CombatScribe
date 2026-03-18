@@ -31,6 +31,9 @@ struct Overworld {
 #[derive(Deserialize)]
 struct Raid {
     name: String,
+    /// If true, this is a 5-man dungeon rather than a raid instance.
+    #[serde(default)]
+    dungeon: bool,
     encounter_count: usize,
     #[allow(dead_code)] // Parsed for future use (encounter-level detail)
     #[serde(default)]
@@ -185,16 +188,36 @@ fn main() {
     writeln!(out, "];").unwrap();
     writeln!(out).unwrap();
 
-    // All raid names (sorted)
+    // All instance names (sorted) — includes both raids and dungeons
     writeln!(
         out,
-        "/// All canonical raid zone names (lowercased, sorted) for O(log n) lookup."
+        "/// All canonical instance zone names (lowercased, sorted) for O(log n) lookup."
     )
     .unwrap();
     writeln!(out, "pub(crate) static ALL_RAID_ZONES: &[&str] = &[").unwrap();
     let mut raid_names: Vec<String> = db.raid.iter().map(|r| r.name.to_lowercase()).collect();
     raid_names.sort();
     for name in &raid_names {
+        writeln!(out, "    {},", quote(name)).unwrap();
+    }
+    writeln!(out, "];").unwrap();
+    writeln!(out).unwrap();
+
+    // Dungeon-only zones (sorted) — subset of ALL_RAID_ZONES where dungeon = true
+    writeln!(
+        out,
+        "/// Dungeon zone names (5-man instances, sorted) for O(log n) lookup."
+    )
+    .unwrap();
+    writeln!(out, "pub(crate) static DUNGEON_ZONES: &[&str] = &[").unwrap();
+    let mut dungeon_names: Vec<String> = db
+        .raid
+        .iter()
+        .filter(|r| r.dungeon)
+        .map(|r| r.name.to_lowercase())
+        .collect();
+    dungeon_names.sort();
+    for name in &dungeon_names {
         writeln!(out, "    {},", quote(name)).unwrap();
     }
     writeln!(out, "];").unwrap();

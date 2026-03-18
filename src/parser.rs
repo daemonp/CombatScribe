@@ -394,6 +394,9 @@ enum EventType {
     CombatStart,
     CombatEnd,
     BossKill,
+    /// A non-boss NPC died that maps to a known instance via `npc_raid()`.
+    /// Used for zone disambiguation (e.g. Lower vs Upper Karazhan).
+    NpcZone,
 }
 
 #[derive(Debug)]
@@ -516,6 +519,17 @@ fn scan_events(lines: &[String]) -> (Vec<String>, Vec<ScanEvent>, Option<i32>) {
                         event_type: EventType::BossKill,
                         name_idx: idx,
                     });
+                } else if let Some(raid_zone) = raid_data::npc_raid(dead_unit) {
+                    // Non-boss NPC mapped to an instance — record for zone
+                    // disambiguation (e.g. Lower vs Upper Karazhan trash).
+                    let idx = names.len() as u32;
+                    names.push(raid_zone.to_string());
+                    events.push(ScanEvent {
+                        timestamp_secs: ts_secs,
+                        line_index: i,
+                        event_type: EventType::NpcZone,
+                        name_idx: idx,
+                    });
                 }
             }
         }
@@ -535,6 +549,9 @@ struct SessionBuilder {
     combat_count: usize,
     boss_kills: Vec<String>,
     start_year: Option<i32>,
+    /// Instance zones seen from non-boss NPC deaths (via `npc_raid()`).
+    /// Used for zone disambiguation when boss kills are absent.
+    npc_raid_zones: HashSet<String>,
 }
 
 /// Determine the established raid instance for a session from its boss kills.
@@ -557,6 +574,7 @@ fn session_instance(boss_kills: &[String]) -> Option<&'static str> {
 /// (e.g. `deadwind pass` between Karazhan boss attempts) do NOT split the session.
 /// This is critical because zone events from raid members interleave with
 /// overworld zones as players zone in/out.
+#[allow(clippy::too_many_lines)] // Session grouping logic with NPC zone tracking
 #[allow(clippy::cast_possible_truncation)] // name_idx indexing
 fn build_sessions(
     names: &[String],
@@ -640,6 +658,7 @@ fn build_sessions(
                 combat_count: 0,
                 boss_kills: Vec::new(),
                 start_year: log_year,
+                npc_raid_zones: HashSet::new(),
             });
         }
 
@@ -674,6 +693,10 @@ fn build_sessions(
             EventType::CombatEnd => {}
             EventType::BossKill => {
                 cur.boss_kills.push(names[event.name_idx as usize].clone());
+            }
+            EventType::NpcZone => {
+                cur.npc_raid_zones
+                    .insert(names[event.name_idx as usize].clone());
             }
         }
     }
@@ -778,7 +801,24 @@ fn finalize_sessions(sessions: Vec<SessionBuilder>) -> Vec<Session> {
                 zone_info
             };
 
+            // Karazhan disambiguation: the "karazhan" zone alias defaults to
+            // "lower karazhan", but the older addon sends bare "Karazhan" for
+            // both Lower (map 532) and Upper (map 814).  When no boss kills
+            // confirm the instance, use NPC deaths to disambiguate — the trash
+            // mob lists are completely disjoint between Lower and Upper Kara.
+            let zone = if zone == "lower karazhan" && boss_zone.is_none() {
+                if s.npc_raid_zones.contains("upper karazhan") {
+                    "upper karazhan"
+                } else {
+                    zone
+                }
+            } else {
+                zone
+            };
+
             let zone_display = raid_data::format_zone_name(zone);
+
+            let is_dungeon = raid_data::is_dungeon_zone(zone);
 
             let name = if is_raid_zone(zone) {
                 let total_bosses = get_boss_count(zone).unwrap_or(0);
@@ -789,7 +829,9 @@ fn finalize_sessions(sessions: Vec<SessionBuilder>) -> Vec<Session> {
                     } else {
                         format!("{zone_display} ({kill_count}/{total_bosses})")
                     }
-                } else if s.combat_count > 0 && kill_count == 0 {
+                } else if s.combat_count > 0 && kill_count == 0 && !is_dungeon {
+                    // "wipes" label only for raids — dungeon sessions without
+                    // boss kills are normal (trash clearing, partial runs).
                     format!("{zone_display} (wipes)")
                 } else {
                     zone_display
