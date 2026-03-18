@@ -165,12 +165,84 @@ pub struct GearSlot {
     pub raw: String,
 }
 
+/// Classification of consumable items by type.
+///
+/// Variant order determines sort order in the UI (Flask first, Other last).
+/// Backed by `data/consumables.toml` → `build.rs` → `consumable_data.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConsumableCategory {
+    Flask,
+    Elixir,
+    Potion,
+    Food,
+    WeaponBuff,
+    Juju,
+    BlastedLands,
+    Zanza,
+    Scroll,
+    Engineering,
+    Bandage,
+    Utility,
+    Other,
+}
+
+impl ConsumableCategory {
+    /// Convert a build-time category index back to an enum variant.
+    ///
+    /// Indices match the order of `[[category]]` sections in `consumables.toml`
+    /// which must match the enum variant order above.
+    #[must_use]
+    pub fn from_index(idx: u8) -> Self {
+        match idx {
+            0 => Self::Flask,
+            1 => Self::Elixir,
+            2 => Self::Potion,
+            3 => Self::Food,
+            4 => Self::WeaponBuff,
+            5 => Self::Juju,
+            6 => Self::BlastedLands,
+            7 => Self::Zanza,
+            8 => Self::Scroll,
+            9 => Self::Engineering,
+            10 => Self::Bandage,
+            11 => Self::Utility,
+            _ => Self::Other,
+        }
+    }
+
+    /// All category variants in display order.
+    #[allow(dead_code)] // Public API — available for future iteration needs
+    pub const ALL: &'static [Self] = &[
+        Self::Flask,
+        Self::Elixir,
+        Self::Potion,
+        Self::Food,
+        Self::WeaponBuff,
+        Self::Juju,
+        Self::BlastedLands,
+        Self::Zanza,
+        Self::Scroll,
+        Self::Engineering,
+        Self::Bandage,
+        Self::Utility,
+        Self::Other,
+    ];
+}
+
+impl std::fmt::Display for ConsumableCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = crate::consumable_data::category_display_name(*self);
+        write!(f, "{name}")
+    }
+}
+
 /// Consumable/item use event parsed from V1 `"uses"` lines.
 #[derive(Debug, Clone)]
 pub struct ConsumableUse {
     pub timestamp: f64,
     pub player: String,
     pub consumable: String,
+    pub category: ConsumableCategory,
 }
 
 #[derive(Debug, Clone, Default)]

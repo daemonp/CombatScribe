@@ -322,6 +322,10 @@ pub(super) fn parse_loot_trade(trimmed: &str, timestamp: f64, data: &mut LogData
 }
 
 /// Parse consumable usage from V1 `"uses"` lines.
+///
+/// Validates the player against `all_combatants` and classifies the item
+/// via `consumable_data::classify()`. Ignored items (toys, conjured food)
+/// are silently dropped.
 pub(super) fn parse_consumable(trimmed: &str, timestamp: f64, data: &mut LogData) {
     if !trimmed.contains(" uses ") {
         return;
@@ -331,17 +335,26 @@ pub(super) fn parse_consumable(trimmed: &str, timestamp: f64, data: &mut LogData
         return;
     }
     if let Some(caps) = RE_CONSUMABLE.captures(trimmed) {
-        let Some(player) = caps.get(1).map(|m| m.as_str().to_string()) else {
+        let Some(player) = caps.get(1).map(|m| m.as_str()) else {
             return;
         };
-        let Some(consumable) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+        // Only record consumable usage for known players
+        if !data.all_combatants.contains_key(player) {
+            return;
+        }
+        let Some(consumable_raw) = caps.get(2).map(|m| m.as_str().trim()) else {
+            return;
+        };
+        // Classify and filter — returns None for ignored items
+        let Some(category) = crate::consumable_data::classify(consumable_raw) else {
             return;
         };
 
         data.consumables.push(ConsumableUse {
             timestamp,
-            player,
-            consumable,
+            player: player.to_string(),
+            consumable: consumable_raw.to_string(),
+            category,
         });
     }
 }
@@ -477,5 +490,86 @@ mod tests {
         } else {
             panic!("Expected AuraGain");
         }
+    }
+
+    // ── Consumable parsing tests ────────────────────────────────────────
+
+    #[test]
+    fn test_parse_consumable_classifies_correctly() {
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Ashbash&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Ashbash uses Elixir of the Mongoose.".to_string(),
+            "1/27 12:24:02.000  Ashbash uses Juju Power on Ashbash.".to_string(),
+            "1/27 12:24:03.000  Ashbash uses Major Healing Potion.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.consumables.len(), 3);
+        assert_eq!(data.consumables[0].consumable, "Elixir of the Mongoose");
+        assert_eq!(
+            data.consumables[0].category,
+            crate::log_data::ConsumableCategory::Elixir
+        );
+        assert_eq!(data.consumables[1].consumable, "Juju Power");
+        assert_eq!(
+            data.consumables[1].category,
+            crate::log_data::ConsumableCategory::Juju
+        );
+        assert_eq!(data.consumables[2].consumable, "Major Healing Potion");
+        assert_eq!(
+            data.consumables[2].category,
+            crate::log_data::ConsumableCategory::Potion
+        );
+    }
+
+    #[test]
+    fn test_parse_consumable_excludes_ignored() {
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Ashbash&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Ashbash uses Goblin Brainwashing Device.".to_string(),
+            "1/27 12:24:02.000  Ashbash uses Conjured Mana Orange.".to_string(),
+            "1/27 12:24:03.000  Ashbash uses Major Healing Potion.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        // Only the Major Healing Potion should be recorded
+        assert_eq!(data.consumables.len(), 1);
+        assert_eq!(data.consumables[0].consumable, "Major Healing Potion");
+    }
+
+    #[test]
+    fn test_parse_consumable_strips_on_target() {
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Ashbash&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Ashbash uses Juju Power on Ashbash.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.consumables.len(), 1);
+        // The "on Ashbash" suffix should be stripped
+        assert_eq!(data.consumables[0].consumable, "Juju Power");
+    }
+
+    #[test]
+    fn test_parse_consumable_validates_player() {
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Ashbash&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            // Unknown player — should be skipped
+            "1/27 12:24:01.000  Randomnpc uses Major Healing Potion.".to_string(),
+            // Known player — should be recorded
+            "1/27 12:24:02.000  Ashbash uses Major Healing Potion.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.consumables.len(), 1);
+        assert_eq!(data.consumables[0].player, "Ashbash");
     }
 }

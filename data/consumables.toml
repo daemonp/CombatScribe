@@ -1,0 +1,310 @@
+# Consumable database for CombatScribe.
+#
+# This file is the single source of truth for consumable item classification.
+# build.rs compiles it into an optimised static lookup table at build time.
+#
+# To add a new consumable:
+#   1. Add the item name to the appropriate [[category]] section below
+#   2. Run `cargo build` — the lookup table regenerates automatically
+#
+# Items are matched by exact name from SuperWoW "uses" lines (after
+# stripping "on Target" suffixes). Names use SuperWoW's apostrophe-stripped
+# form (e.g. "Medivhs Merlot" not "Medivh's Merlot").
+
+# Items in "uses" lines that are NOT consumables (toys, trinkets, mounts, etc.)
+[ignored]
+items = [
+    "MOLL-E, Remote Mail Terminal",
+    "Goblin Brainwashing Device",
+    "Conjured Mana Orange",
+    "Conjured Crystal Water",
+    "Conjured Mana Strudel",
+    "Morning Glory Dew",
+    "Ripe Tel'Abim Banana",
+    "Juicy Striped Melon",
+    "Gnomish Battle Chicken",
+    "Barov Peasant Caller",
+    "Defender of the Timbermaw",
+    "The Black Pendant",
+    "Poisonous Mushroom",
+    "Greater Dreamless Sleep Potion",
+    "Dreamless Sleep Potion",
+    "Slumber Sand",
+    "Magic Dust",
+    "Catseye Elixir",
+    "Swim Speed Potion",
+    "Cowardly Flight Potion",
+]
+
+[[category]]
+name = "Flask"
+display = "Flasks"
+items = [
+    "Flask of Supreme Power",
+    "Flask of the Titans",
+    "Flask of Distilled Wisdom",
+    "Flask of Chromatic Resistance",
+    "Flask of Petrification",
+]
+
+[[category]]
+name = "Elixir"
+display = "Elixirs"
+items = [
+    # Combat elixirs
+    "Elixir of the Mongoose",
+    "Greater Arcane Elixir",
+    "Elixir of Shadow Power",
+    "Elixir of Giants",
+    "Elixir of Fortitude",
+    "Elixir of Superior Defense",
+    "Elixir of Greater Firepower",
+    "Elixir of Firepower",
+    "Elixir of Frost Power",
+    "Elixir of Brute Force",
+    "Elixir of Greater Agility",
+    "Elixir of Greater Intellect",
+    "Elixir of Greater Defense",
+    "Elixir of Giant Growth",
+    "Elixir of the Sages",
+    "Elixir of Demonslaying",
+    "Elixir of Poison Resistance",
+    "Elixir of Greater Nature Power",
+    "Arcane Elixir",
+    "Bogling Root",
+    # Despite "Potion" in name, these are elixir-class persistent buffs
+    "Mageblood Potion",
+    "Weak Trolls Blood Potion",
+    "Strong Trolls Blood Potion",
+    "Major Trolls Blood Potion",
+    "Mighty Trolls Blood Potion",
+    "Gift of Arthas",
+    "Lucidity Potion",
+    # Turtle WoW custom
+    "Dreamshard Elixir",
+    "Dreamtonic",
+    "Bloodkelp Elixir of Resistance",
+    "Bloodkelp Elixir of Dodging",
+]
+
+[[category]]
+name = "Potion"
+display = "Potions"
+items = [
+    # Healing potions (all tiers)
+    "Major Healing Potion",
+    "Superior Healing Potion",
+    "Combat Healing Potion",
+    "Greater Healing Potion",
+    "Healing Potion",
+    "Lesser Healing Potion",
+    "Discolored Healing Potion",
+    "Minor Healing Potion",
+    # Mana potions (all tiers)
+    "Major Mana Potion",
+    "Superior Mana Potion",
+    "Combat Mana Potion",
+    "Greater Mana Potion",
+    "Mana Potion",
+    "Full Moonshine",
+    "Minor Mana Potion",
+    "Diet McWeaksauce",
+    # Rejuvenation
+    "Major Rejuvenation Potion",
+    "Minor Rejuvenation Potion",
+    # Rage potions
+    "Mighty Rage Potion",
+    "Great Rage Potion",
+    "Rage Potion",
+    # Protection potions (greater)
+    "Greater Fire Protection Potion",
+    "Greater Frost Protection Potion",
+    "Greater Nature Protection Potion",
+    "Greater Shadow Protection Potion",
+    "Greater Arcane Protection Potion",
+    "Greater Holy Protection Potion",
+    # Protection potions (lesser)
+    "Fire Protection Potion",
+    "Frost Protection Potion",
+    "Nature Protection Potion",
+    "Shadow Protection Potion",
+    "Holy Protection Potion",
+    # Stoneshield
+    "Greater Stoneshield Potion",
+    # Utility potions (single-use with cooldown)
+    "Free Action Potion",
+    "Living Action Potion",
+    "Limited Invulnerability Potion",
+    "Swiftness Potion",
+    "Restorative Potion",
+    "Invisibility Potion",
+    "Lesser Invisibility Potion",
+    "Purification Potion",
+    "Wildvine Potion",
+    "Magic Resistance Potion",
+    "Oil of Immolation",
+    "Volatile Concoction",
+    # Despite "Elixir" name, this is a single-use fun potion
+    "Noggenfogger Elixir",
+    # Turtle WoW custom
+    "Potion of Quickness",
+]
+
+[[category]]
+name = "Food"
+display = "Food & Drink"
+items = [
+    # Stat-buff food
+    "Grilled Squid",
+    "Baked Salmon",
+    "Nightfin Soup",
+    "Blessed Sunfruit",
+    "Blessed Sunfruit Juice",
+    "Dig Rat Stew",
+    "Windblossom Berries",
+    # Alcohol buffs
+    "Rumsey Rum Black Label",
+    "Rumsey Rum Dark",
+    "Rumsey Rum",
+    "Gordok Green Grog",
+    "Kreegs Stout Beatdown",
+    # Turtle WoW custom food
+    "Danonzos Tel'Abim Delight",
+    "Danonzos Tel'Abim Medley",
+    "Danonzos Tel'Abim Surprise",
+    "Gurubashi Gumbo",
+    "Medivhs Merlot",
+    "Medivhs Merlot Blue Label",
+    "Graccus Mince Meat Fruitcake",
+    "Graccus Homemade Meat Pie",
+    "Tea with Sugar",
+    "Tea With Sugar",
+    "Empowering Herbal Salad",
+    "Power Mushroom",
+    "Hardened Mushroom",
+    "Gilneas Hot Stew",
+    "Le Fishe Au Chocolat",
+    "Concoction of the Dreamwater",
+    "Concoction of the Arcane Giant",
+    "Concoction of the Emerald Mongoose",
+    # Seasonal
+    "Winter Veil Cookie",
+    "Winter Veil Eggnog",
+    "Fire-toasted Bun",
+]
+
+[[category]]
+name = "WeaponBuff"
+display = "Weapon Buffs"
+items = [
+    # Sharpening stones
+    "Elemental Sharpening Stone",
+    "Consecrated Sharpening Stone",
+    "Dense Sharpening Stone",
+    # Weightstones
+    "Dense Weightstone",
+    # Wizard/Mana oils
+    "Brilliant Wizard Oil",
+    "Brilliant Mana Oil",
+    "Blessed Wizard Oil",
+    "Wizard Oil",
+    "Shadow Oil",
+    "Frost Oil",
+    "Lesser Mana Oil",
+    # Turtle WoW
+    "Oil of Olaf",
+]
+
+[[category]]
+name = "Juju"
+display = "Jujus"
+items = [
+    "Juju Power",
+    "Juju Flurry",
+    "Juju Might",
+    "Juju Guile",
+    "Juju Escape",
+    "Juju Ember",
+    "Juju Chill",
+]
+
+[[category]]
+name = "BlastedLands"
+display = "Blasted Lands"
+items = [
+    "Ground Scorpok Assay",
+    "Rage of Ages",
+    "Cerebral Cortex Compound",
+    "Lung Juice Cocktail",
+    "Gizzard Gum",
+    "Infallible Mind",
+]
+
+[[category]]
+name = "Zanza"
+display = "Zanza"
+items = [
+    "Spirit of Zanza",
+    "Swiftness of Zanza",
+    "Sheen of Zanza",
+]
+
+[[category]]
+name = "Scroll"
+display = "Scrolls"
+prefix = "Scroll of "
+items = [
+    "Scroll of Agility IV",
+    "Scroll of Intellect IV",
+    "Scroll of Protection IV",
+    "Scroll of Spirit IV",
+    "Scroll of Stamina IV",
+    "Scroll of Strength IV",
+    "Scroll of Empowered Protection",
+    "Scroll of Magic Warding",
+    "Scroll of Thorns",
+]
+
+[[category]]
+name = "Engineering"
+display = "Engineering"
+items = [
+    "Goblin Sapper Charge",
+    "Dense Dynamite",
+    "Solid Dynamite",
+    "Thorium Grenade",
+    "Iron Grenade",
+    "Stratholme Holy Water",
+    "Dragonbreath Chili",
+    "Crystal Charge",
+    "Crystal Force",
+    "Crystal Spire",
+    "Frozen Rune",
+    "Powerful Smelling Salts",
+    "Hourglass Sand",
+]
+
+[[category]]
+name = "Bandage"
+display = "Bandages"
+items = [
+    "Heavy Runecloth Bandage",
+    "Runecloth Bandage",
+    "Crystal Infused Bandage",
+]
+
+[[category]]
+name = "Utility"
+display = "Utility"
+items = [
+    "Demonic Rune",
+    "Dark Rune",
+    "Thistle Tea",
+    "Winterfall Firewater",
+    "Powerful Anti-Venom",
+    "Strong Anti-Venom",
+    "Anti-Venom",
+    "Jungle Remedy",
+    "Emerald Blessing",
+    "Crystal Ward",
+]

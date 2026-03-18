@@ -97,6 +97,28 @@ pub const BAR_CONSUMABLE: Color = Color {
     a: 1.0,
 }; // #FFD700 gold
 
+// ── Consumable Category Colors ──────────────────────────────────────────────
+
+/// Color for a consumable category in the Consumes tab and detail panel.
+pub fn consumable_category_color(cat: crate::log_data::ConsumableCategory) -> Color {
+    use crate::log_data::ConsumableCategory;
+    match cat {
+        ConsumableCategory::Flask => Color::from_rgb8(163, 53, 238), // purple (epic)
+        ConsumableCategory::Elixir => Color::from_rgb8(30, 200, 30), // green
+        ConsumableCategory::Potion => Color::from_rgb8(255, 80, 80), // red
+        ConsumableCategory::Food => Color::from_rgb8(210, 165, 90),  // warm tan
+        ConsumableCategory::WeaponBuff => Color::from_rgb8(180, 180, 180), // silver
+        ConsumableCategory::Juju => Color::from_rgb8(0, 200, 200),   // cyan
+        ConsumableCategory::BlastedLands => Color::from_rgb8(200, 140, 50), // bronze
+        ConsumableCategory::Zanza => Color::from_rgb8(255, 180, 0),  // amber
+        ConsumableCategory::Scroll => Color::from_rgb8(180, 200, 255), // light blue
+        ConsumableCategory::Engineering => Color::from_rgb8(255, 120, 0), // orange
+        ConsumableCategory::Bandage => Color::from_rgb8(255, 200, 200), // pink
+        ConsumableCategory::Utility => Color::from_rgb8(200, 200, 200), // gray
+        ConsumableCategory::Other => Color::from_rgb8(140, 140, 140), // dim gray
+    }
+}
+
 // ── Timeline Colors ─────────────────────────────────────────────────────────
 
 /// Raid DPS line/area color (amber-gold).

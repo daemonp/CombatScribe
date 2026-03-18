@@ -455,7 +455,6 @@ impl ViewerState {
             DeathSubType::Absorbs,
             DeathSubType::Avoidance,
             DeathSubType::Buffs,
-            DeathSubType::Consumables,
         ];
         let type_picker = pick_list(death_types, Some(self.death_type), |dt| {
             ViewerMessage::SetDeathType(dt)
@@ -469,7 +468,6 @@ impl ViewerState {
             DeathSubType::Absorbs => self.view_absorbs_content(),
             DeathSubType::Avoidance => self.view_avoidance_content(),
             DeathSubType::Buffs => self.view_buffs_content(),
-            DeathSubType::Consumables => self.view_consumables_content(),
         };
 
         let header = row![
@@ -642,22 +640,5 @@ impl ViewerState {
             Some(DetailType::Buffs),
         );
         (col.into(), format!("{} unique buffs", total_unique.len()))
-    }
-
-    fn view_consumables_content(&self) -> (Element<'_, ViewerMessage>, String) {
-        let consumables = self.log_data.filtered_consumables(&self.encounter_filter);
-        let players = aggregate_by_player(
-            &consumables,
-            |c| &c.player,
-            &self.log_data.combatants,
-            |n| self.log_data.player_class(n),
-        );
-        view_event_meters_owned(
-            &players,
-            theme::BAR_CONSUMABLE,
-            "No consumable usage recorded",
-            Some(DetailType::Consumables),
-            "uses",
-        )
     }
 }

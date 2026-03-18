@@ -734,54 +734,105 @@ impl ViewerState {
         column![summary, buff_table,].spacing(8).width(Fill).into()
     }
 
+    #[allow(clippy::too_many_lines)] // iced UI layout — grouped consumable detail with category sections
     fn view_consumable_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
+        use crate::log_data::ConsumableCategory;
+
         let consumables = self.log_data.filtered_consumables(&self.encounter_filter);
         let player_cons: Vec<_> = consumables
             .into_iter()
             .filter(|c| c.player == player)
             .collect();
 
-        // Aggregate by consumable name
-        let mut by_name: HashMap<&str, u64> = HashMap::new();
-        for c in &player_cons {
-            *by_name.entry(&c.consumable).or_insert(0) += 1;
-        }
-        let mut sorted: Vec<(String, u64)> = by_name
-            .into_iter()
-            .map(|(name, count)| (name.to_string(), count))
-            .collect();
-        sorted.sort_by_key(|b| Reverse(b.1));
-
         let summary = text(format!("Total Consumable Uses: {}", player_cons.len()))
             .size(12)
             .color(theme::TEXT_SECONDARY);
 
-        if sorted.is_empty() {
+        if player_cons.is_empty() {
             return column![summary, empty_state("No consumables used"),]
                 .spacing(8)
                 .width(Fill)
                 .into();
         }
 
-        let header = |label| text(label).size(12);
+        // Aggregate by category → item name → count
+        let mut by_category: HashMap<ConsumableCategory, HashMap<&str, u64>> = HashMap::new();
+        for c in &player_cons {
+            *by_category
+                .entry(c.category)
+                .or_default()
+                .entry(&c.consumable)
+                .or_insert(0) += 1;
+        }
 
-        let columns = [
-            table::column(header("Consumable"), |row: (String, u64)| {
-                text(row.0).size(12).color(theme::BAR_CONSUMABLE)
-            })
-            .width(Length::FillPortion(3)),
-            table::column(header("Uses"), |row: (String, u64)| {
-                text(row.1.to_string()).size(12)
-            })
-            .width(Length::FillPortion(1)),
-        ];
+        // Sort categories by enum order
+        let mut categories: Vec<ConsumableCategory> = by_category.keys().copied().collect();
+        categories.sort();
 
-        let cons_table = table::table(columns, sorted)
-            .padding_x(2)
-            .padding_y(2)
-            .separator_y(1);
+        let mut content = Column::new().spacing(8);
+        content = content.push(summary);
 
-        column![summary, cons_table,].spacing(8).width(Fill).into()
+        for cat in &categories {
+            let cat_color = theme::consumable_category_color(*cat);
+            let items = &by_category[cat];
+
+            // Sort items by count descending
+            let mut sorted_items: Vec<(String, u64)> = items
+                .iter()
+                .map(|(name, count)| ((*name).to_string(), *count))
+                .collect();
+            sorted_items.sort_by_key(|b| Reverse(b.1));
+
+            let cat_total: u64 = sorted_items.iter().map(|(_, c)| *c).sum();
+
+            // Category header with colored dot
+            let dot: Element<ViewerMessage> = container("")
+                .width(8)
+                .height(8)
+                .style(move |_theme: &iced::Theme| container::Style {
+                    background: Some(iced::Background::Color(cat_color)),
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into();
+
+            let cat_header = row![
+                dot,
+                text(cat.to_string()).size(13).color(cat_color),
+                text(format!("({cat_total})"))
+                    .size(11)
+                    .color(theme::TEXT_MUTED),
+            ]
+            .spacing(6)
+            .align_y(Center);
+
+            // Item rows
+            let mut item_col = Column::new().spacing(2);
+            for (name, count) in &sorted_items {
+                item_col = item_col.push(
+                    row![
+                        text("  ").size(12), // indent
+                        text(name.clone())
+                            .size(12)
+                            .color(cat_color)
+                            .width(Length::FillPortion(3)),
+                        text(count.to_string())
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                    ]
+                    .spacing(4),
+                );
+            }
+
+            content = content.push(rule::horizontal(1));
+            content = content.push(cat_header);
+            content = content.push(item_col);
+        }
+
+        content.width(Fill).into()
     }
 
     /// Player info bar showing spec, race, guild, and gear count.

@@ -14,6 +14,7 @@
 
 mod charts;
 mod components;
+mod consumes;
 mod death_log;
 mod detail;
 mod events;
@@ -33,9 +34,10 @@ use std::sync::LazyLock;
 
 use crate::log_data;
 use crate::log_data::{
-    AbilityStats, AvoidanceStats, BuffStats, DeathEvent, DeathLogWindow, EncounterFilter,
-    EventLogMode, EventLogTypeFilter, EventLogTypeKind, LogData, LogEntry, LootEvent,
-    PlayerEventType, ResurrectEvent, TimelineData, TimelineSeriesKind, TimelineVisibility,
+    AbilityStats, AvoidanceStats, BuffStats, ConsumableCategory, DeathEvent, DeathLogWindow,
+    EncounterFilter, EventLogMode, EventLogTypeFilter, EventLogTypeKind, LogData, LogEntry,
+    LootEvent, PlayerEventType, ResurrectEvent, TimelineData, TimelineSeriesKind,
+    TimelineVisibility,
 };
 use crate::theme;
 use components::build_timeline_event_log_text;
@@ -74,6 +76,9 @@ pub struct ViewerState {
     // Utility tab
     pub dispel_type: DispelSubType,
     pub death_type: DeathSubType,
+
+    // Consumes tab
+    pub consumes_mode: ConsumesViewMode,
 
     // Death Log tab
     pub death_log_mode: death_log::DeathLogMode,
@@ -138,6 +143,7 @@ pub enum ViewerTab {
     DeathLog,
     Timeline,
     Loot,
+    Consumes,
     Events,
 }
 
@@ -150,6 +156,7 @@ impl ViewerTab {
             Self::DeathLog => "DeathLog",
             Self::Timeline => "Timeline",
             Self::Loot => "Loot",
+            Self::Consumes => "Consumes",
             Self::Events => "Events",
         }
     }
@@ -161,6 +168,7 @@ impl ViewerTab {
             "DeathLog" => Self::DeathLog,
             "Timeline" => Self::Timeline,
             "Loot" => Self::Loot,
+            "Consumes" => Self::Consumes,
             "Events" => Self::Events,
             _ => Self::Meters,
         }
@@ -267,7 +275,6 @@ pub enum DeathSubType {
     Absorbs,
     Avoidance,
     Buffs,
-    Consumables,
 }
 
 impl std::fmt::Display for DeathSubType {
@@ -278,7 +285,24 @@ impl std::fmt::Display for DeathSubType {
             Self::Absorbs => write!(f, "Damage Absorbed"),
             Self::Avoidance => write!(f, "Avoidance (Dodge/Parry)"),
             Self::Buffs => write!(f, "Buff Uptime"),
-            Self::Consumables => write!(f, "Consumables"),
+        }
+    }
+}
+
+/// View mode for the Consumes tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumesViewMode {
+    /// Per-player ranked list (default).
+    PlayerBreakdown,
+    /// Players x categories per encounter.
+    EncounterMatrix,
+}
+
+impl std::fmt::Display for ConsumesViewMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PlayerBreakdown => write!(f, "Player Breakdown"),
+            Self::EncounterMatrix => write!(f, "Encounter Matrix"),
         }
     }
 }
@@ -313,6 +337,7 @@ pub enum ViewerMessage {
     SetHealingType(HealingType),
     SetDispelType(DispelSubType),
     SetDeathType(DeathSubType),
+    SetConsumesMode(ConsumesViewMode),
     ShowDetail(String, DetailType),
     CloseDetail,
     SetLootSearch(String),
@@ -402,6 +427,7 @@ impl ViewerState {
             view_prefs_dirty: false,
             dispel_type: DispelSubType::Dispels,
             death_type: DeathSubType::Deaths,
+            consumes_mode: ConsumesViewMode::PlayerBreakdown,
             death_log_mode: death_log::DeathLogMode::PlayerDeaths,
             loot_search: String::new(),
             collapsed_bosses: HashSet::new(),
@@ -481,6 +507,7 @@ impl ViewerState {
             }
             ViewerMessage::SetDispelType(dt) => self.dispel_type = dt,
             ViewerMessage::SetDeathType(dt) => self.death_type = dt,
+            ViewerMessage::SetConsumesMode(mode) => self.consumes_mode = mode,
             ViewerMessage::SetDeathTabFilter(m) => self.death_log_mode = m,
             ViewerMessage::ShowDetail(name, dtype) => {
                 self.detail = Some(DetailView {
@@ -656,6 +683,7 @@ impl ViewerState {
                 ViewerTab::DeathLog => self.view_death_log_tab(),
                 ViewerTab::Timeline => self.view_timeline_tab(),
                 ViewerTab::Loot => self.view_loot_tab(),
+                ViewerTab::Consumes => self.view_consumes_tab(),
                 ViewerTab::Events => self.view_events_tab(),
             }
         };
@@ -821,6 +849,7 @@ impl ViewerState {
             ("Death Log", ViewerTab::DeathLog),
             ("Timeline", ViewerTab::Timeline),
             ("Loot", ViewerTab::Loot),
+            ("Consumes", ViewerTab::Consumes),
             ("Events", ViewerTab::Events),
         ];
 
