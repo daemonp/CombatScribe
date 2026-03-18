@@ -35,16 +35,17 @@ pub struct Session {
 impl std::fmt::Display for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let duration = format_duration(self.duration_secs);
+        let date = date_display_from_timestamp(self.start_time, self.start_year);
         if self.you_players.is_empty() {
             write!(
                 f,
-                "{} - {} encounters, {duration}",
+                "{date} - {} - {} encounters, {duration}",
                 self.name, self.combat_count
             )
         } else {
             write!(
                 f,
-                "{} - {} encounters, {duration} [You: {}]",
+                "{date} - {} - {} encounters, {duration} [You: {}]",
                 self.name,
                 self.combat_count,
                 self.you_players.join(", ")
@@ -841,6 +842,28 @@ pub fn date_from_session_timestamp(ts: f64, year: Option<i32>) -> String {
     });
 
     format!("{y:04}-{month:02}-{day:02}")
+}
+
+/// Format a session timestamp as `DD/MM/YYYY` for UI display.
+///
+/// Same reverse-decoding as `date_from_session_timestamp`, but in the
+/// day-first format used by the session picker dropdown.
+#[allow(clippy::cast_possible_truncation)] // month/day values are small integers
+#[allow(clippy::cast_sign_loss)] // month/day are always positive
+pub fn date_display_from_timestamp(ts: f64, year: Option<i32>) -> String {
+    let total_days = (ts / 86400.0).floor() as u32;
+    let month = total_days / 31;
+    let day = total_days % 31;
+
+    let y = year.unwrap_or_else(|| {
+        chrono::Local::now()
+            .format("%Y")
+            .to_string()
+            .parse()
+            .unwrap_or(2026)
+    });
+
+    format!("{day:02}/{month:02}/{y:04}")
 }
 
 /// Extract the "You" player name from `COMBATANT_INFO` by splitting on `&`.

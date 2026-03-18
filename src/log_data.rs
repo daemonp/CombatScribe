@@ -208,6 +208,12 @@ pub struct PlayerStats {
     pub pet_damage: u64,
     pub abilities: HashMap<String, AbilityStats>,
     pub healing_abilities: HashMap<String, AbilityStats>,
+    /// Damage taken broken down by source → ability → stats.
+    ///
+    /// Outer key is the source name (e.g. "Patchwerk"), inner key is the ability
+    /// name (e.g. "Hateful Strike").  This lets tanks compare exactly which
+    /// abilities hit them and how much was mitigated.
+    pub damage_taken_breakdown: HashMap<String, HashMap<String, DamageTakenAbilityStats>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -219,6 +225,23 @@ pub struct AbilityStats {
     pub overheal: u64,
     #[allow(dead_code)]
     pub is_pet: bool,
+}
+
+/// Per-ability breakdown of damage taken, including mitigation details.
+///
+/// Keyed by `(source, ability)` pairs in `PlayerStats::damage_taken_breakdown`,
+/// this lets tanks compare exactly which abilities hit them and how much was
+/// mitigated by absorbs, resists, and blocks.
+#[derive(Debug, Clone, Default)]
+pub struct DamageTakenAbilityStats {
+    pub total: u64,
+    pub hits: u64,
+    pub crits: u64,
+    pub absorbed: u64,
+    pub resisted: u64,
+    pub blocked: u64,
+    pub crushing_hits: u64,
+    pub glancing_hits: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -707,7 +730,12 @@ impl LogData {
                     target,
                     spell,
                     amount,
+                    absorbed,
+                    resisted,
+                    blocked,
                     is_crit,
+                    is_crushing,
+                    is_glancing,
                     ..
                 } => {
                     let ps = stats.entry(source.clone()).or_default();
@@ -719,9 +747,29 @@ impl LogData {
                         ab.crits += 1;
                     }
 
-                    // Damage taken
+                    // Damage taken — total and per-source per-ability breakdown
                     let ts = stats.entry(target.clone()).or_default();
                     ts.damage_taken += amount;
+                    let dt_ab = ts
+                        .damage_taken_breakdown
+                        .entry(source.clone())
+                        .or_default()
+                        .entry(spell.clone())
+                        .or_default();
+                    dt_ab.total += amount;
+                    dt_ab.hits += 1;
+                    dt_ab.absorbed += absorbed;
+                    dt_ab.resisted += resisted;
+                    dt_ab.blocked += blocked;
+                    if *is_crit {
+                        dt_ab.crits += 1;
+                    }
+                    if *is_crushing {
+                        dt_ab.crushing_hits += 1;
+                    }
+                    if *is_glancing {
+                        dt_ab.glancing_hits += 1;
+                    }
                 }
                 LogEntry::Healing {
                     source,

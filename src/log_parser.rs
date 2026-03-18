@@ -765,6 +765,9 @@ fn record_damage(
     health_deficit: &mut HashMap<String, u64>,
     event: DamageEvent<'_>,
 ) {
+    // Record damage taken breakdown before destructuring the event.
+    add_damage_taken(data, &event);
+
     let DamageEvent {
         timestamp,
         source,
@@ -781,7 +784,6 @@ fn record_damage(
         pet_owner,
     } = event;
     add_damage(data, &source, &spell, amount, pet_owner, is_crit);
-    add_damage_taken(data, &target, amount);
     record_absorb(data, &target, absorbed);
     // Increment target's health deficit for effective healing calculation
     *health_deficit.entry(target.clone()).or_insert(0) += amount;
@@ -1337,9 +1339,31 @@ fn add_damage(
     }
 }
 
-/// Add damage taken to a target player's stats.
-fn add_damage_taken(data: &mut LogData, target: &str, amount: u64) {
-    ensure_stats(data, target).damage_taken += amount;
+/// Add damage taken to a target player's stats, including per-source per-ability
+/// breakdown with mitigation details.
+fn add_damage_taken(data: &mut LogData, event: &DamageEvent<'_>) {
+    let stats = ensure_stats(data, &event.target);
+    stats.damage_taken += event.amount;
+    let dt_ab = stats
+        .damage_taken_breakdown
+        .entry(event.source.clone())
+        .or_default()
+        .entry(event.spell.clone())
+        .or_default();
+    dt_ab.total += event.amount;
+    dt_ab.hits += 1;
+    dt_ab.absorbed += event.absorbed;
+    dt_ab.resisted += event.resisted;
+    dt_ab.blocked += event.blocked;
+    if event.is_crit {
+        dt_ab.crits += 1;
+    }
+    if event.is_crushing {
+        dt_ab.crushing_hits += 1;
+    }
+    if event.is_glancing {
+        dt_ab.glancing_hits += 1;
+    }
 }
 
 /// Add healing to a source player's stats.
@@ -2660,5 +2684,76 @@ mod tests {
             ba_intervals[0].end > 25.0,
             "Unclosed aura end should be clamped to encounter end"
         );
+    }
+
+    // ── Damage Taken Breakdown Tests ────────────────────────────────
+
+    #[test]
+    fn test_damage_taken_breakdown_populated() {
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Patchwerk 's Hateful Strike hits Tank for 6000. (200 blocked)".to_string(),
+            "1/27 12:24:02.000  Patchwerk 's Hateful Strike crits Tank for 9000.".to_string(),
+            "1/27 12:24:03.000  Patchwerk hits Tank for 3000. (500 absorbed)".to_string(),
+            "1/27 12:24:04.000  Boss 's Shadow Bolt hits Tank for 2000 Shadow damage. (300 resisted) (100 absorbed)".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let tank = data
+            .player_stats
+            .get("Tank")
+            .expect("Tank should have stats");
+        assert_eq!(
+            tank.damage_taken,
+            6000 + 9000 + 3000 + 2000,
+            "Total damage taken should be sum of all hits"
+        );
+
+        // Check Patchwerk's abilities
+        let pw = tank
+            .damage_taken_breakdown
+            .get("Patchwerk")
+            .expect("Should have Patchwerk as source");
+
+        let hs = pw
+            .get("Hateful Strike")
+            .expect("Should have Hateful Strike");
+        assert_eq!(hs.total, 15000, "Hateful Strike total: 6000+9000");
+        assert_eq!(hs.hits, 2, "Two Hateful Strike hits");
+        assert_eq!(hs.crits, 1, "One Hateful Strike crit");
+        assert_eq!(hs.blocked, 200, "200 blocked on first hit");
+
+        let melee = pw.get("Auto Attack").expect("Should have Auto Attack");
+        assert_eq!(melee.total, 3000);
+        assert_eq!(melee.absorbed, 500);
+
+        // Check Boss's Shadow Bolt
+        let boss = tank
+            .damage_taken_breakdown
+            .get("Boss")
+            .expect("Should have Boss as source");
+        let sb = boss.get("Shadow Bolt").expect("Should have Shadow Bolt");
+        assert_eq!(sb.total, 2000);
+        assert_eq!(sb.resisted, 300);
+        assert_eq!(sb.absorbed, 100);
+
+        // Verify filtered_stats also populates the breakdown
+        let filter = crate::log_data::EncounterFilter::Single(0);
+        let (filtered, _) = data.filtered_stats(&filter);
+        let ft = filtered.get("Tank").expect("Filtered Tank stats");
+        assert!(
+            !ft.damage_taken_breakdown.is_empty(),
+            "Filtered stats should populate damage_taken_breakdown"
+        );
+        let fpw = ft
+            .damage_taken_breakdown
+            .get("Patchwerk")
+            .expect("Filtered should have Patchwerk");
+        let fhs = fpw
+            .get("Hateful Strike")
+            .expect("Filtered should have Hateful Strike");
+        assert_eq!(fhs.total, 15000);
     }
 }

@@ -204,6 +204,7 @@ pub struct DetailView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailType {
     Damage,
+    DamageTaken,
     Healing,
     Dispels,
     Interrupts,
@@ -823,6 +824,11 @@ impl ViewerState {
         .spacing(8)
         .align_y(Center);
 
+        let dmg_detail_type = match self.damage_type {
+            DamageType::DamageTaken => DetailType::DamageTaken,
+            _ => DetailType::Damage,
+        };
+
         let mut dmg_col = Column::new().spacing(3);
         for (rank, (name, class, value)) in damage_players.iter().enumerate() {
             let pps = per_second(*value, duration);
@@ -835,7 +841,7 @@ impl ViewerState {
                 pps,
                 percent,
                 theme::class_color(class),
-                Some((name.clone(), DetailType::Damage)),
+                Some((name.clone(), dmg_detail_type)),
             ));
         }
 
@@ -2337,6 +2343,9 @@ impl ViewerState {
 
         let title = match &detail.detail_type {
             DetailType::Damage => format!("{} - Damage Breakdown", detail.player_name),
+            DetailType::DamageTaken => {
+                format!("{} - Damage Taken Breakdown", detail.player_name)
+            }
             DetailType::Healing => {
                 format!("{} - {} Breakdown", detail.player_name, self.healing_type)
             }
@@ -2360,6 +2369,7 @@ impl ViewerState {
             DetailType::Damage | DetailType::Healing => {
                 self.view_ability_breakdown(&detail.player_name, detail.detail_type)
             }
+            DetailType::DamageTaken => self.view_damage_taken_breakdown(&detail.player_name),
             DetailType::Dispels => self.view_dispel_detail(&detail.player_name),
             DetailType::Interrupts => self.view_interrupt_detail(&detail.player_name),
             DetailType::Resurrects => self.view_resurrect_detail(&detail.player_name),
@@ -2651,6 +2661,186 @@ impl ViewerState {
             .spacing(10)
             .width(Fill)
             .into()
+    }
+
+    // ── Damage Taken Breakdown ──────────────────────────────────────────
+
+    /// Render the damage taken detail view: grouped by source, showing each
+    /// ability with mitigation columns (absorbed, resisted, blocked, crush,
+    /// glancing).  This lets tanks compare incoming damage and their mitigation
+    /// against other tanks on the same encounter.
+    #[allow(clippy::too_many_lines)] // iced UI layout — source-grouped ability table with mitigation columns
+    fn view_damage_taken_breakdown(&self, player: &str) -> Element<'_, ViewerMessage> {
+        let (stats, duration) = self.log_data.filtered_stats(&self.encounter_filter);
+        let Some(ps) = stats.get(player) else {
+            return text("No data").size(14).into();
+        };
+
+        let total = ps.damage_taken;
+        if total == 0 {
+            return text("No damage taken").size(14).into();
+        }
+
+        #[allow(clippy::cast_precision_loss)] // damage values never approach 2^52
+        let dtps = if duration > 0.0 {
+            total as f64 / duration
+        } else {
+            0.0
+        };
+
+        // Aggregate source-level totals for sorting
+        let mut source_totals: Vec<(String, u64)> = ps
+            .damage_taken_breakdown
+            .iter()
+            .map(|(source, abilities)| {
+                let src_total: u64 = abilities.values().map(|a| a.total).sum();
+                (source.clone(), src_total)
+            })
+            .collect();
+        source_totals.sort_by_key(|s| Reverse(s.1));
+
+        let summary = text(format!(
+            "Total Taken: {} | Per Second: {}/s | Duration: {}",
+            theme::format_number(total),
+            theme::format_number_f64(dtps),
+            theme::format_duration(duration),
+        ))
+        .size(12)
+        .color(theme::TEXT_SECONDARY);
+
+        let mut content = Column::new().spacing(12);
+        content = content.push(summary);
+
+        for (source_name, source_total) in &source_totals {
+            let Some(abilities) = ps.damage_taken_breakdown.get(source_name) else {
+                continue;
+            };
+
+            // Source header with total and percentage
+            #[allow(clippy::cast_precision_loss)] // damage values never approach 2^52
+            let src_pct = if total > 0 {
+                *source_total as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            let source_header = row![
+                text(source_name.clone())
+                    .size(14)
+                    .color(Color::from_rgb8(200, 160, 100)),
+                horizontal_space(),
+                text(format!(
+                    "{} ({:.1}%)",
+                    theme::format_number(*source_total),
+                    src_pct
+                ))
+                .size(12)
+                .color(theme::TEXT_SECONDARY),
+            ]
+            .spacing(8)
+            .align_y(Center)
+            .width(Fill);
+
+            // Sort abilities within this source by total descending
+            let mut sorted_abilities: Vec<(&String, &log_data::DamageTakenAbilityStats)> =
+                abilities.iter().collect();
+            sorted_abilities.sort_by_key(|(_, a)| Reverse(a.total));
+
+            // Table header
+            let table_header = row![
+                text("Ability").size(11).width(Length::FillPortion(3)),
+                text("Total").size(11).width(Length::FillPortion(2)),
+                text("Hits").size(11).width(Length::FillPortion(1)),
+                text("Avg").size(11).width(Length::FillPortion(2)),
+                text("Crit").size(11).width(Length::FillPortion(1)),
+                text("Absorb").size(11).width(Length::FillPortion(2)),
+                text("Resist").size(11).width(Length::FillPortion(2)),
+                text("Block").size(11).width(Length::FillPortion(2)),
+                text("Crush").size(11).width(Length::FillPortion(1)),
+                text("%").size(11).width(Length::FillPortion(1)),
+            ]
+            .spacing(4)
+            .width(Fill);
+
+            let mut table = Column::new().spacing(2);
+            table = table.push(table_header);
+            table = table.push(horizontal_rule(1));
+
+            for (spell_name, ab) in &sorted_abilities {
+                let avg = ab.total.checked_div(ab.hits).unwrap_or(0);
+                #[allow(clippy::cast_precision_loss)] // damage values never approach 2^52
+                let pct = if total > 0 {
+                    ab.total as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                };
+
+                let absorb_str = if ab.absorbed > 0 {
+                    theme::format_number(ab.absorbed)
+                } else {
+                    "-".to_string()
+                };
+                let resist_str = if ab.resisted > 0 {
+                    theme::format_number(ab.resisted)
+                } else {
+                    "-".to_string()
+                };
+                let block_str = if ab.blocked > 0 {
+                    theme::format_number(ab.blocked)
+                } else {
+                    "-".to_string()
+                };
+                let crush_str = if ab.crushing_hits > 0 {
+                    ab.crushing_hits.to_string()
+                } else {
+                    "-".to_string()
+                };
+
+                table = table.push(
+                    row![
+                        text((*spell_name).clone())
+                            .size(12)
+                            .width(Length::FillPortion(3)),
+                        text(theme::format_number(ab.total))
+                            .size(12)
+                            .width(Length::FillPortion(2)),
+                        text(ab.hits.to_string())
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(theme::format_number(avg))
+                            .size(12)
+                            .width(Length::FillPortion(2)),
+                        text(ab.crits.to_string())
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                        text(absorb_str)
+                            .size(12)
+                            .color(theme::TEXT_SECONDARY)
+                            .width(Length::FillPortion(2)),
+                        text(resist_str)
+                            .size(12)
+                            .color(theme::TEXT_SECONDARY)
+                            .width(Length::FillPortion(2)),
+                        text(block_str)
+                            .size(12)
+                            .color(theme::TEXT_SECONDARY)
+                            .width(Length::FillPortion(2)),
+                        text(crush_str)
+                            .size(12)
+                            .color(Color::from_rgb8(200, 100, 100))
+                            .width(Length::FillPortion(1)),
+                        text(format!("{pct:.1}%"))
+                            .size(12)
+                            .width(Length::FillPortion(1)),
+                    ]
+                    .spacing(4)
+                    .width(Fill),
+                );
+            }
+
+            content = content.push(column![source_header, table].spacing(4).width(Fill));
+        }
+
+        content.width(Fill).into()
     }
 
     fn view_dispel_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
