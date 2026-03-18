@@ -18,7 +18,7 @@ use std::fmt::Write;
 
 use iced::widget::{
     button, canvas, column, container, horizontal_rule, horizontal_space, image, pick_list, row,
-    scrollable, stack, text, text_input, Column, Row,
+    scrollable, stack, text, text_input, tooltip, Column, Row,
 };
 use iced::{mouse, Center, Color, Element, Fill, Length, Point, Rectangle, Renderer, Theme};
 
@@ -1416,11 +1416,30 @@ impl ViewerState {
                 vis.show_dps,
                 TimelineSeriesKind::Dps,
             ),
-            legend_toggle(
-                theme::TIMELINE_DTPS,
-                "Raid DTPS",
-                vis.show_dtps,
-                TimelineSeriesKind::Dtps,
+            tooltip(
+                legend_toggle(
+                    theme::TIMELINE_DTPS,
+                    "Raid DTPS",
+                    vis.show_dtps,
+                    TimelineSeriesKind::Dtps,
+                ),
+                container(
+                    text("Damage Taken Per Second — total raid incoming damage each second")
+                        .size(11),
+                )
+                .padding([4, 8])
+                .style(|_theme: &iced::Theme| container::Style {
+                    background: Some(iced::Background::Color(
+                        Color::from_rgba8(30, 30, 40, 0.95,)
+                    )),
+                    border: iced::Border {
+                        color: Color::from_rgba8(100, 100, 120, 0.5),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                }),
+                tooltip::Position::Bottom,
             ),
             legend_toggle(
                 theme::TIMELINE_HPS,
@@ -1822,11 +1841,13 @@ impl ViewerState {
                 let mut parts: Vec<String> = Vec::new();
                 for group in &aura_layout {
                     if let Some(intervals) = td.aura_intervals.get(group.aura_name) {
-                        let active: Vec<&str> = intervals
+                        let mut active: Vec<&str> = intervals
                             .iter()
                             .filter(|iv| iv.start <= second && second <= iv.end)
                             .map(|iv| iv.player.as_str())
                             .collect();
+                        active.sort_unstable();
+                        active.dedup();
                         if !active.is_empty() {
                             parts.push(format!("{}: {}", group.aura_name, active.join(", ")));
                         }
@@ -1927,6 +1948,18 @@ impl ViewerState {
             };
 
         // ── Fixed top section: charts ──────────────────────────────────
+        // Wrap tracker sections (aura/dispel/alive) in a scrollable capped
+        // at 300px so they remain accessible when all three are active,
+        // without pushing the event log off-screen.
+        let tracker_content = column![aura_section, dispel_section, alive_section,]
+            .spacing(6)
+            .width(Fill);
+        let tracker_panel: Element<'_, ViewerMessage> =
+            container(scrollable(tracker_content).width(Fill))
+                .max_height(300)
+                .width(Fill)
+                .into();
+
         let charts_panel = container(
             column![
                 header,
@@ -1937,9 +1970,7 @@ impl ViewerState {
                 chart_canvas,
                 tooltip,
                 horizontal_rule(1),
-                aura_section,
-                dispel_section,
-                alive_section,
+                tracker_panel,
             ]
             .spacing(6)
             .width(Fill),
@@ -3850,7 +3881,7 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
 
         // Hover line
         if let Some(idx) = self.hover_idx {
-            let x = x_offset + (idx as f32 + 0.5) * x_scale;
+            let x = x_offset + idx as f32 * x_scale;
             let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
             frame.stroke(
                 &line,
@@ -4051,7 +4082,7 @@ fn draw_sparkline_area(
     // Build the line path (top edge)
     let line_path = canvas::Path::new(|b| {
         for (i, bucket) in buckets.iter().enumerate() {
-            let x = x_offset + (i as f32 + 0.5) * x_scale;
+            let x = x_offset + i as f32 * x_scale;
             let val = get_val(bucket) as f32;
             let y = height - (val / y_max) * height;
             if i == 0 {
@@ -4065,17 +4096,17 @@ fn draw_sparkline_area(
     // Build the filled area path (line + close back to baseline)
     let area_path = canvas::Path::new(|b| {
         // Start at bottom-left
-        b.move_to(Point::new(x_offset + 0.5 * x_scale, height));
+        b.move_to(Point::new(x_offset, height));
 
         for (i, bucket) in buckets.iter().enumerate() {
-            let x = x_offset + (i as f32 + 0.5) * x_scale;
+            let x = x_offset + i as f32 * x_scale;
             let val = get_val(bucket) as f32;
             let y = height - (val / y_max) * height;
             b.line_to(Point::new(x, y));
         }
 
         // Close back to bottom-right
-        let last_x = x_offset + ((buckets.len() - 1) as f32 + 0.5) * x_scale;
+        let last_x = x_offset + (buckets.len() - 1) as f32 * x_scale;
         b.line_to(Point::new(last_x, height));
         b.close();
     });
@@ -4140,13 +4171,13 @@ impl canvas::Program<ViewerMessage> for AliveChart<'_> {
 
         // Filled area
         let area_path = canvas::Path::new(|b| {
-            b.move_to(Point::new(x_offset + 0.5 * x_scale, h));
+            b.move_to(Point::new(x_offset, h));
             for (i, bucket) in td.buckets.iter().enumerate() {
-                let x = x_offset + (i as f32 + 0.5) * x_scale;
+                let x = x_offset + i as f32 * x_scale;
                 let y = h - (bucket.alive_count as f32 / y_max) * h;
                 b.line_to(Point::new(x, y));
             }
-            let last_x = x_offset + ((n - 1) as f32 + 0.5) * x_scale;
+            let last_x = x_offset + (n - 1) as f32 * x_scale;
             b.line_to(Point::new(last_x, h));
             b.close();
         });
@@ -4162,7 +4193,7 @@ impl canvas::Program<ViewerMessage> for AliveChart<'_> {
         // Stroke line
         let line_path = canvas::Path::new(|b| {
             for (i, bucket) in td.buckets.iter().enumerate() {
-                let x = x_offset + (i as f32 + 0.5) * x_scale;
+                let x = x_offset + i as f32 * x_scale;
                 let y = h - (bucket.alive_count as f32 / y_max) * h;
                 if i == 0 {
                     b.move_to(Point::new(x, y));
