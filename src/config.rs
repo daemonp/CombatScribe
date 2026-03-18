@@ -35,6 +35,31 @@ pub struct AppConfig {
     /// when an even newer release is published.
     #[serde(default)]
     pub dismissed_version: Option<String>,
+    /// Saved view preferences (None = use built-in defaults).
+    ///
+    /// Role-specific settings (damage/healing type, per-second toggles,
+    /// default tab) that the user explicitly saves via the eye icon.
+    #[serde(default)]
+    pub view: Option<ViewPrefs>,
+}
+
+/// Persistent view preferences for role-specific UI settings.
+///
+/// Fields are stored as strings for forward-compatibility: adding new enum
+/// variants won't break existing config files (unrecognized strings fall back
+/// to defaults).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ViewPrefs {
+    /// Damage panel type: Damage, `DamageWithPets`, or `DamageTaken`.
+    pub damage_type: String,
+    /// Healing panel type: Healing, Effective, Raw, or Overhealing.
+    pub healing_type: String,
+    /// Show per-second rates on the damage panel.
+    pub damage_per_second: bool,
+    /// Show per-second rates on the healing panel.
+    pub healing_per_second: bool,
+    /// Default tab: Meters, Utility, `DeathLog`, Timeline, Loot, or Events.
+    pub default_tab: String,
 }
 
 impl AppConfig {
@@ -69,5 +94,43 @@ impl AppConfig {
         if let Some(parent) = file_path.parent() {
             self.last_directory = Some(parent.to_path_buf());
         }
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_view_prefs_round_trip() {
+        let prefs = ViewPrefs {
+            damage_type: "DamageWithPets".to_string(),
+            healing_type: "Healing".to_string(),
+            damage_per_second: true,
+            healing_per_second: false,
+            default_tab: "DeathLog".to_string(),
+        };
+
+        let config = AppConfig {
+            last_directory: None,
+            tracked_auras: HashSet::new(),
+            dismissed_version: None,
+            view: Some(prefs.clone()),
+        };
+
+        let serialized = toml::to_string_pretty(&config).expect("serialize config");
+        let deserialized: AppConfig = toml::from_str(&serialized).expect("deserialize config");
+
+        assert_eq!(deserialized.view, Some(prefs));
+    }
+
+    #[test]
+    fn test_config_missing_view_prefs_defaults_to_none() {
+        let toml_str = r#"tracked_auras = []
+"#;
+        let config: AppConfig = toml::from_str(toml_str).expect("parse minimal config");
+        assert!(config.view.is_none());
     }
 }

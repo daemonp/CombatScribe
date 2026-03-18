@@ -308,7 +308,8 @@ impl App {
             }
 
             Message::ViewerParsed(log_data) => {
-                let mut vs = viewer::ViewerState::new(*log_data);
+                let mut vs =
+                    viewer::ViewerState::new(*log_data, self.config.view.as_ref());
                 // Provide session list to the viewer for the header dropdown
                 vs.session_names.clone_from(&self.session_names);
                 vs.selected_session_name.clone_from(&self.selected_session);
@@ -480,6 +481,29 @@ impl App {
                         self.state = AppState::Loading;
                         self.loading_phase = "Switching session...";
                         self.parse_session()
+                    }
+                    viewer::ViewerMessage::SaveViewPrefs => {
+                        if let AppState::Viewing(ref mut viewer_state) = self.state {
+                            // Snapshot current view prefs into config
+                            self.config.view = Some(config::ViewPrefs {
+                                damage_type: viewer_state.damage_type.to_config_key().to_string(),
+                                healing_type: viewer_state
+                                    .healing_type
+                                    .to_config_key()
+                                    .to_string(),
+                                damage_per_second: false,
+                                healing_per_second: false,
+                                default_tab: viewer_state
+                                    .current_tab
+                                    .to_config_key()
+                                    .to_string(),
+                            });
+                            self.config.save();
+                            // Clear dirty flag in viewer
+                            viewer_state.update(viewer_msg).map(Message::Viewer)
+                        } else {
+                            Task::none()
+                        }
                     }
                     viewer::ViewerMessage::Quit => iced::exit(),
                     viewer::ViewerMessage::ToggleAura(_)

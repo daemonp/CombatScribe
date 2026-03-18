@@ -117,7 +117,7 @@ impl ViewerState {
             DetailType::Damage => (&ps.abilities, ps.damage),
             DetailType::Healing => {
                 let heal_total = match self.healing_type {
-                    HealingType::Effective => ps.effective_healing,
+                    HealingType::Healing | HealingType::Effective => ps.effective_healing,
                     HealingType::Raw => ps.healing,
                     HealingType::Overhealing => ps.overhealing,
                 };
@@ -147,7 +147,7 @@ impl ViewerState {
         };
 
         let heal_value_label = match self.healing_type {
-            HealingType::Effective => "Effective",
+            HealingType::Healing | HealingType::Effective => "Effective",
             HealingType::Raw => "Raw",
             HealingType::Overhealing => "Overheal",
         };
@@ -249,7 +249,7 @@ impl ViewerState {
             .map(|(spell, ab)| {
                 let display_total = if is_healing {
                     match self.healing_type {
-                        HealingType::Effective => ab.effective,
+                        HealingType::Healing | HealingType::Effective => ab.effective,
                         HealingType::Raw => ab.total,
                         HealingType::Overhealing => ab.overheal,
                     }
@@ -836,38 +836,6 @@ impl ViewerState {
     }
 
     // ── Meter Bar Components ────────────────────────────────────────────
-
-    /// Full meter bar row with value + per-second + percentage.
-    #[allow(clippy::too_many_arguments, clippy::unused_self)]
-    pub(super) fn meter_bar_row(
-        &self,
-        rank: usize,
-        name: &str,
-        class: &str,
-        value: u64,
-        pps: f64,
-        percent: f64,
-        bar_color: Color,
-        on_click: Option<(String, DetailType)>,
-    ) -> Element<'_, ViewerMessage> {
-        let value_text = format!(
-            "{} - {}/s",
-            theme::format_number(value),
-            theme::format_number_f64(pps)
-        );
-        let pct_text = format!("{percent:.1}%");
-
-        build_meter_row(
-            rank,
-            name,
-            class,
-            &value_text,
-            &pct_text,
-            percent,
-            bar_color,
-            on_click,
-        )
-    }
 
     /// Meter bar with custom detail text (for avoidance breakdown).
     #[allow(clippy::too_many_arguments, clippy::unused_self)]

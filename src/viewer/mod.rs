@@ -14,6 +14,7 @@
 
 mod charts;
 mod components;
+mod death_log;
 mod detail;
 mod events;
 mod loot;
@@ -51,6 +52,7 @@ static TIMELINE_LOG_ID: LazyLock<iced::widget::Id> =
 
 // ViewerState cannot derive Clone because canvas::Cache is not Clone.
 // This is acceptable since ViewerState is only held in a Box by the app.
+#[allow(clippy::struct_excessive_bools)] // UI state — toggle flags are independent user preferences
 #[derive(Debug)]
 pub struct ViewerState {
     pub log_data: LogData,
@@ -66,10 +68,15 @@ pub struct ViewerState {
     // Damage/Healing tab
     pub damage_type: DamageType,
     pub healing_type: HealingType,
+    /// True when view preferences differ from last saved config.
+    pub view_prefs_dirty: bool,
 
     // Utility tab
     pub dispel_type: DispelSubType,
     pub death_type: DeathSubType,
+
+    // Death Log tab
+    pub death_log_mode: death_log::DeathLogMode,
 
     // Loot tab
     pub loot_search: String,
@@ -128,9 +135,36 @@ pub struct ViewerState {
 pub enum ViewerTab {
     Meters,
     Utility,
+    DeathLog,
     Timeline,
     Loot,
     Events,
+}
+
+impl ViewerTab {
+    /// Serialize to a config-safe string key.
+    pub fn to_config_key(self) -> &'static str {
+        match self {
+            Self::Meters => "Meters",
+            Self::Utility => "Utility",
+            Self::DeathLog => "DeathLog",
+            Self::Timeline => "Timeline",
+            Self::Loot => "Loot",
+            Self::Events => "Events",
+        }
+    }
+
+    /// Parse from a config string, falling back to Meters on unrecognized input.
+    pub fn from_config_key(s: &str) -> Self {
+        match s {
+            "Utility" => Self::Utility,
+            "DeathLog" => Self::DeathLog,
+            "Timeline" => Self::Timeline,
+            "Loot" => Self::Loot,
+            "Events" => Self::Events,
+            _ => Self::Meters,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,8 +184,29 @@ impl std::fmt::Display for DamageType {
     }
 }
 
+impl DamageType {
+    /// Serialize to a config-safe string key.
+    pub fn to_config_key(self) -> &'static str {
+        match self {
+            Self::Damage => "Damage",
+            Self::DamageWithPets => "DamageWithPets",
+            Self::DamageTaken => "DamageTaken",
+        }
+    }
+
+    /// Parse from a config string, falling back to default on unrecognized input.
+    pub fn from_config_key(s: &str) -> Self {
+        match s {
+            "DamageWithPets" => Self::DamageWithPets,
+            "DamageTaken" => Self::DamageTaken,
+            _ => Self::Damage,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealingType {
+    Healing,
     Effective,
     Raw,
     Overhealing,
@@ -160,9 +215,32 @@ pub enum HealingType {
 impl std::fmt::Display for HealingType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Healing => write!(f, "Healing"),
             Self::Effective => write!(f, "Effective healing"),
             Self::Raw => write!(f, "Raw healing"),
             Self::Overhealing => write!(f, "Overhealing"),
+        }
+    }
+}
+
+impl HealingType {
+    /// Serialize to a config-safe string key.
+    pub fn to_config_key(self) -> &'static str {
+        match self {
+            Self::Healing => "Healing",
+            Self::Effective => "Effective",
+            Self::Raw => "Raw",
+            Self::Overhealing => "Overhealing",
+        }
+    }
+
+    /// Parse from a config string, falling back to combined "Healing" on unrecognized input.
+    pub fn from_config_key(s: &str) -> Self {
+        match s {
+            "Effective" => Self::Effective,
+            "Raw" => Self::Raw,
+            "Overhealing" => Self::Overhealing,
+            _ => Self::Healing,
         }
     }
 }
@@ -273,6 +351,10 @@ pub enum ViewerMessage {
     ZoomDragEnd(f64),
     /// Reset zoom back to the full encounter.
     ZoomReset,
+    /// Set the death log tab filter (player deaths vs all deaths).
+    SetDeathTabFilter(death_log::DeathLogMode),
+    /// Save current view preferences to config.
+    SaveViewPrefs,
     /// Request to load a new file (handled by App).
     LoadFile,
     /// Request to open the export modal (handled by App).
@@ -285,7 +367,7 @@ pub enum ViewerMessage {
 // ── Construction ────────────────────────────────────────────────────────────
 
 impl ViewerState {
-    pub fn new(log_data: LogData) -> Self {
+    pub fn new(log_data: LogData, view_prefs: Option<&crate::config::ViewPrefs>) -> Self {
         let encounter_names = build_encounter_names(&log_data);
         let selected = encounter_names.first().cloned();
 
@@ -296,18 +378,31 @@ impl ViewerState {
 
         let timeline_data = log_data.build_timeline(&EncounterFilter::All, BIG_HIT_THRESHOLD);
 
+        // Apply saved view preferences (or fall back to defaults)
+        let (current_tab, damage_type, healing_type) = if let Some(prefs) = view_prefs {
+            (
+                ViewerTab::from_config_key(&prefs.default_tab),
+                DamageType::from_config_key(&prefs.damage_type),
+                HealingType::from_config_key(&prefs.healing_type),
+            )
+        } else {
+            (ViewerTab::Meters, DamageType::Damage, HealingType::Healing)
+        };
+
         Self {
             log_data,
-            current_tab: ViewerTab::Meters,
+            current_tab,
             encounter_filter: EncounterFilter::All,
             encounter_names,
             selected_encounter_name: selected,
             session_names: Vec::new(),
             selected_session_name: None,
-            damage_type: DamageType::Damage,
-            healing_type: HealingType::Effective,
+            damage_type,
+            healing_type,
+            view_prefs_dirty: false,
             dispel_type: DispelSubType::Dispels,
             death_type: DeathSubType::Deaths,
+            death_log_mode: death_log::DeathLogMode::PlayerDeaths,
             loot_search: String::new(),
             collapsed_bosses: HashSet::new(),
             detail: None,
@@ -355,6 +450,7 @@ impl ViewerState {
             ViewerMessage::SwitchTab(tab) => {
                 self.current_tab = tab;
                 self.detail = None;
+                self.view_prefs_dirty = true;
             }
             ViewerMessage::SelectEncounter(name) => {
                 // Ignore separator lines — keep current selection
@@ -375,10 +471,17 @@ impl ViewerState {
                 self.zoom_drag_end = None;
                 self.clear_all_chart_caches();
             }
-            ViewerMessage::SetDamageType(dt) => self.damage_type = dt,
-            ViewerMessage::SetHealingType(ht) => self.healing_type = ht,
+            ViewerMessage::SetDamageType(dt) => {
+                self.damage_type = dt;
+                self.view_prefs_dirty = true;
+            }
+            ViewerMessage::SetHealingType(ht) => {
+                self.healing_type = ht;
+                self.view_prefs_dirty = true;
+            }
             ViewerMessage::SetDispelType(dt) => self.dispel_type = dt,
             ViewerMessage::SetDeathType(dt) => self.death_type = dt,
+            ViewerMessage::SetDeathTabFilter(m) => self.death_log_mode = m,
             ViewerMessage::ShowDetail(name, dtype) => {
                 self.detail = Some(DetailView {
                     player_name: name,
@@ -524,6 +627,10 @@ impl ViewerState {
                 self.zoom_drag_end = None;
                 self.clear_all_chart_caches();
             }
+            // SaveViewPrefs is intercepted by App — viewer just clears dirty flag
+            ViewerMessage::SaveViewPrefs => {
+                self.view_prefs_dirty = false;
+            }
             // These are intercepted and handled by App::update() in main.rs
             ViewerMessage::LoadFile
             | ViewerMessage::ShowExport
@@ -546,6 +653,7 @@ impl ViewerState {
             match self.current_tab {
                 ViewerTab::Meters => self.view_meters_tab(),
                 ViewerTab::Utility => self.view_utility_tab(),
+                ViewerTab::DeathLog => self.view_death_log_tab(),
                 ViewerTab::Timeline => self.view_timeline_tab(),
                 ViewerTab::Loot => self.view_loot_tab(),
                 ViewerTab::Events => self.view_events_tab(),
@@ -562,6 +670,7 @@ impl ViewerState {
 
     // ── Header ──────────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_lines)] // iced UI layout — header with action buttons and info badges
     fn view_header(&self) -> Element<'_, ViewerMessage> {
         // ── Left side: action buttons + session dropdown ────────────
         let load_btn = button(text("Load File").size(12).color(Color::WHITE))
@@ -649,6 +758,28 @@ impl ViewerState {
             );
         }
 
+        // Save View button (eye icon with dirty indicator)
+        let eye_opacity = if self.view_prefs_dirty { 1.0 } else { 0.5 };
+        let eye_color = Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: eye_opacity,
+        };
+        let save_tooltip = if self.view_prefs_dirty {
+            "Unsaved changes \u{2014} click to save\n\nYour damage, healing, and tab preferences\nwill be restored when opening future logs."
+        } else {
+            "Save current view as default\n\nYour damage, healing, and tab preferences\nwill be restored when opening future logs."
+        };
+        let eye_btn = button(text("\u{1F441}").size(14).color(eye_color))
+            .on_press(ViewerMessage::SaveViewPrefs)
+            .padding([5, 10])
+            .style(transparent_button_style);
+        let eye_with_tooltip = tooltip(eye_btn, save_tooltip, tooltip::Position::Bottom)
+            .gap(4)
+            .style(tooltip_container_style);
+        right_row = right_row.push(eye_with_tooltip);
+
         right_row = right_row.push(
             button(text("Quit").size(11).color(theme::TEXT_SECONDARY))
                 .on_press(ViewerMessage::Quit)
@@ -687,6 +818,7 @@ impl ViewerState {
         let tabs = [
             ("Damage/Healing", ViewerTab::Meters),
             ("Utility", ViewerTab::Utility),
+            ("Death Log", ViewerTab::DeathLog),
             ("Timeline", ViewerTab::Timeline),
             ("Loot", ViewerTab::Loot),
             ("Events", ViewerTab::Events),

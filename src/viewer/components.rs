@@ -367,6 +367,15 @@ pub fn transparent_button_style(_theme: &iced::Theme, status: button::Status) ->
     }
 }
 
+/// Brightness multiplier for meter bar class colors (Chronicle-style pop).
+const BAR_BRIGHTNESS: f32 = 0.80;
+
+/// Alpha for the main (solid) meter bar segment.
+const BAR_ALPHA: f32 = 0.85;
+
+/// Alpha for the stacked (translucent) overheal bar segment.
+const STACKED_ALPHA: f32 = 0.35;
+
 /// Create the colored meter bar element.
 ///
 /// Uses a `Stack` to layer a partial-width colored bar behind the full-width
@@ -379,12 +388,11 @@ pub(super) fn make_bar(
     let pct = percent.clamp(1.0, 100.0) as u16;
     let remainder = 100_u16.saturating_sub(pct).max(1);
 
-    // Vibrant class-colored bar at ~65% brightness — visible proportion indicator
     let bg_color = Color {
-        r: bar_color.r * 0.65,
-        g: bar_color.g * 0.65,
-        b: bar_color.b * 0.65,
-        a: 0.9,
+        r: bar_color.r * BAR_BRIGHTNESS,
+        g: bar_color.g * BAR_BRIGHTNESS,
+        b: bar_color.b * BAR_BRIGHTNESS,
+        a: BAR_ALPHA,
     };
 
     // Bottom layer: partial-width colored bar + transparent spacer
@@ -411,6 +419,125 @@ pub(super) fn make_bar(
 
     // Fixed height prevents the bar from expanding unboundedly inside a scrollable.
     stack![bar_layer, text_layer].width(Fill).height(28).into()
+}
+
+/// Compute the adaptive 75%-rule scale factor for meter bars.
+///
+/// The top player's bar fills 75% of the width. When stacked values (e.g. overheal)
+/// would push any bar past 100%, the scale widens to prevent overflow.
+///
+/// Returns the scale denominator such that `(value / scale) * 100` gives the bar %.
+pub(super) fn adaptive_scale(max_primary: u64, max_combined: u64) -> f64 {
+    if max_primary == 0 {
+        return 1.0;
+    }
+    let default_scale = max_primary as f64 / 0.75;
+    if max_combined > 0 {
+        default_scale.max(max_combined as f64)
+    } else {
+        default_scale
+    }
+}
+
+/// Compute bar percentage using the adaptive scale.
+///
+/// Returns a value in 0..=100 representing the bar fill width.
+pub(super) fn scaled_percent(value: u64, scale: f64) -> f64 {
+    if scale <= 0.0 {
+        return 0.0;
+    }
+    (value as f64 / scale * 100.0).clamp(0.0, 100.0)
+}
+
+/// Create a stacked meter bar: solid main segment + translucent stacked segment.
+///
+/// Used by the combined healing view to show effective healing (solid) with an
+/// overheal extension (translucent) in the same row.
+pub(super) fn make_stacked_bar(
+    content: Row<'_, ViewerMessage>,
+    main_percent: f64,
+    stacked_percent: f64,
+    bar_color: Color,
+) -> Element<'_, ViewerMessage> {
+    let main_pct = (main_percent.clamp(0.0, 100.0) as u16).max(1);
+    let stacked_pct = stacked_percent.clamp(0.0, 100.0) as u16;
+    let remainder = 100_u16.saturating_sub(main_pct + stacked_pct).max(1);
+
+    let main_color = Color {
+        r: bar_color.r * BAR_BRIGHTNESS,
+        g: bar_color.g * BAR_BRIGHTNESS,
+        b: bar_color.b * BAR_BRIGHTNESS,
+        a: BAR_ALPHA,
+    };
+
+    // Stacked segment: same hue at reduced alpha (translucent overheal)
+    let stacked_color = Color {
+        r: bar_color.r * BAR_BRIGHTNESS,
+        g: bar_color.g * BAR_BRIGHTNESS,
+        b: bar_color.b * BAR_BRIGHTNESS,
+        a: STACKED_ALPHA,
+    };
+
+    // Bottom layer: main bar + stacked bar + transparent spacer
+    let mut bar_row = Row::new().width(Fill).height(Fill);
+
+    bar_row = bar_row.push(
+        container("")
+            .width(Length::FillPortion(main_pct))
+            .height(Fill)
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: Some(iced::Background::Color(main_color)),
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+    );
+
+    if stacked_pct > 0 {
+        bar_row = bar_row.push(
+            container("")
+                .width(Length::FillPortion(stacked_pct))
+                .height(Fill)
+                .style(move |_theme: &iced::Theme| container::Style {
+                    background: Some(iced::Background::Color(stacked_color)),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        );
+    }
+
+    bar_row = bar_row.push(container("").width(Length::FillPortion(remainder)));
+
+    let bar_layer: Element<ViewerMessage> = bar_row.into();
+
+    // Top layer: full-width text content
+    let text_layer: Element<ViewerMessage> = content.padding([4, 8]).into();
+
+    stack![bar_layer, text_layer].width(Fill).height(28).into()
+}
+
+/// Styled container for tooltips (dark background with border).
+pub(super) fn tooltip_container_style(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(Color::from_rgba8(30, 32, 38, 0.95))),
+        border: iced::Border {
+            color: Color::from_rgba8(80, 85, 95, 0.6),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        text_color: Some(Color::WHITE),
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 6.0,
+        },
+        snap: false,
+    }
 }
 
 /// Styled container background for card/panel sections.

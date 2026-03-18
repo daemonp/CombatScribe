@@ -9,12 +9,20 @@ use iced::widget::column;
 
 // ── Meters Tab ──────────────────────────────────────────────────────────────
 
+/// Collected per-player healing data for combined view rendering.
+struct HealingPlayer {
+    name: String,
+    class: String,
+    effective: u64,
+    overheal: u64,
+}
+
 impl ViewerState {
     #[allow(clippy::too_many_lines)] // iced UI layout — side-by-side panels with data collection
     pub(super) fn view_meters_tab(&self) -> Element<'_, ViewerMessage> {
         let (stats, duration) = self.log_data.filtered_stats(&self.encounter_filter);
 
-        // Collect owned data for damage panel
+        // ── Damage panel data ───────────────────────────────────────
         let damage_types_list = vec![
             DamageType::Damage,
             DamageType::DamageWithPets,
@@ -45,14 +53,238 @@ impl ViewerState {
         damage_players.sort_by_key(|p| Reverse(p.2));
 
         let dmg_total: u64 = damage_players.iter().map(|(_, _, v)| *v).sum();
-        let dps = per_second(dmg_total, duration);
+
+        // Adaptive 75%-rule scaling for damage
+        let dmg_max = damage_players.first().map_or(0, |(_, _, v)| *v);
+        let dmg_scale = adaptive_scale(dmg_max, 0); // no stacked values for damage
+
+        let dmg_total_ps = per_second(dmg_total, duration);
         let dmg_total_text = format!(
             "{} ({}/s)",
             theme::format_number(dmg_total),
-            theme::format_number_f64(dps)
+            theme::format_number_f64(dmg_total_ps)
         );
 
-        // Collect owned data for healing panel
+        let dmg_type_picker = pick_list(damage_types_list, Some(self.damage_type), |dt| {
+            ViewerMessage::SetDamageType(dt)
+        })
+        .width(Fill)
+        .padding(4);
+
+        let dmg_header = row![
+            dmg_type_picker,
+            text(dmg_total_text).size(12).color(theme::TEXT_SECONDARY),
+        ]
+        .spacing(8)
+        .align_y(Center);
+
+        let dmg_detail_type = match self.damage_type {
+            DamageType::DamageTaken => DetailType::DamageTaken,
+            _ => DetailType::Damage,
+        };
+
+        let mut dmg_col = Column::new().spacing(3);
+        for (rank, (name, class, value)) in damage_players.iter().enumerate() {
+            let pps = per_second(*value, duration);
+            let percent = percent_of(*value, dmg_total);
+            let bar_pct = scaled_percent(*value, dmg_scale);
+
+            let value_text = format!(
+                "{} - {}/s",
+                theme::format_number(*value),
+                theme::format_number_f64(pps)
+            );
+            let pct_text = format!("{percent:.1}%");
+
+            dmg_col = dmg_col.push(build_meter_row(
+                rank + 1,
+                name,
+                class,
+                &value_text,
+                &pct_text,
+                bar_pct,
+                theme::class_color(class),
+                Some((name.clone(), dmg_detail_type)),
+            ));
+        }
+
+        let damage_panel: Element<ViewerMessage> = container(
+            column![dmg_header, rule::horizontal(1), dmg_col]
+                .spacing(8)
+                .width(Fill),
+        )
+        .padding(12)
+        .width(Length::FillPortion(1))
+        .style(panel_style)
+        .into();
+
+        // ── Healing panel data ──────────────────────────────────────
+        let healing_types_list = vec![
+            HealingType::Healing,
+            HealingType::Effective,
+            HealingType::Raw,
+            HealingType::Overhealing,
+        ];
+
+        let healing_panel: Element<ViewerMessage> = if self.healing_type == HealingType::Healing {
+            self.build_combined_healing_panel(&stats, duration, &healing_types_list)
+        } else {
+            self.build_simple_healing_panel(&stats, duration, &healing_types_list)
+        };
+
+        scrollable(row![damage_panel, healing_panel].spacing(12).width(Fill))
+            .height(Fill)
+            .into()
+    }
+
+    /// Build the combined "Healing" panel with stacked effective + overheal bars.
+    #[allow(clippy::too_many_lines)] // iced UI layout — combined healing with stacked bars
+    fn build_combined_healing_panel(
+        &self,
+        stats: &HashMap<String, log_data::PlayerStats>,
+        duration: f64,
+        healing_types_list: &[HealingType],
+    ) -> Element<'_, ViewerMessage> {
+        // Collect healing data with both effective and overheal values
+        let mut players: Vec<HealingPlayer> = stats
+            .iter()
+            .filter_map(|(name, ps)| {
+                if !self.log_data.combatants.contains_key(name) {
+                    return None;
+                }
+                if ps.effective_healing == 0 && ps.overhealing == 0 {
+                    return None;
+                }
+                Some(HealingPlayer {
+                    name: name.clone(),
+                    class: self.log_data.player_class(name).to_string(),
+                    effective: ps.effective_healing,
+                    overheal: ps.overhealing,
+                })
+            })
+            .collect();
+        // Sort by effective healing (descending)
+        players.sort_by_key(|p| Reverse(p.effective));
+
+        let total_effective: u64 = players.iter().map(|p| p.effective).sum();
+        let total_overheal: u64 = players.iter().map(|p| p.overheal).sum();
+
+        // Adaptive scale: top effective at 75%, safe_scale prevents overflow
+        let max_effective = players.first().map_or(0, |p| p.effective);
+        let max_combined = players
+            .iter()
+            .map(|p| p.effective + p.overheal)
+            .max()
+            .unwrap_or(0);
+        let scale = adaptive_scale(max_effective, max_combined);
+
+        let total_eff_ps = per_second(total_effective, duration);
+        let oh_pct = if total_effective + total_overheal > 0 {
+            total_overheal as f64 / (total_effective + total_overheal) as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        let header_text = format!(
+            "{} eff ({} overheal, {oh_pct:.1}%) - {}/s",
+            theme::format_number(total_effective),
+            theme::format_number(total_overheal),
+            theme::format_number_f64(total_eff_ps),
+        );
+
+        let heal_type_picker =
+            pick_list(healing_types_list.to_vec(), Some(self.healing_type), |ht| {
+                ViewerMessage::SetHealingType(ht)
+            })
+            .width(Fill)
+            .padding(4);
+
+        let header = row![
+            heal_type_picker,
+            text(header_text).size(12).color(theme::TEXT_SECONDARY),
+        ]
+        .spacing(8)
+        .align_y(Center);
+
+        let mut heal_col = Column::new().spacing(3);
+        for (rank, player) in players.iter().enumerate() {
+            let main_pct = scaled_percent(player.effective, scale);
+            let stacked_pct = scaled_percent(player.overheal, scale);
+
+            let player_oh_pct = if player.effective + player.overheal > 0 {
+                player.overheal as f64 / (player.effective + player.overheal) as f64 * 100.0
+            } else {
+                0.0
+            };
+
+            let value_text = format!(
+                "{} eff ({} oh {player_oh_pct:.1}%)",
+                theme::format_number(player.effective),
+                theme::format_number(player.overheal),
+            );
+
+            let class_str = player.class.clone();
+            let class_color = theme::class_color(&class_str);
+            let player_name = player.name.clone();
+
+            // Inner bar content: rank + name left, stats right
+            let inner: Row<'_, ViewerMessage> = row![
+                text(format!("{}.", rank + 1))
+                    .size(12)
+                    .color(theme::TEXT_MUTED),
+                text(player_name.clone()).size(12).color(class_color),
+                Space::new().width(Fill),
+                text(value_text)
+                    .size(12)
+                    .color(Color::from_rgb8(220, 225, 230)),
+            ]
+            .spacing(6)
+            .align_y(Center)
+            .width(Fill);
+
+            // Class icon
+            let icon = image(theme::class_icon(&class_str)).width(22).height(22);
+
+            // Stacked bar
+            let bar = make_stacked_bar(inner, main_pct, stacked_pct, class_color);
+
+            let full_row: Element<ViewerMessage> = row![icon, bar]
+                .spacing(6)
+                .align_y(Center)
+                .width(Fill)
+                .into();
+
+            heal_col = heal_col.push(
+                button(full_row)
+                    .on_press(ViewerMessage::ShowDetail(player_name, DetailType::Healing))
+                    .padding(0)
+                    .width(Fill)
+                    .style(transparent_button_style),
+            );
+        }
+
+        if players.is_empty() {
+            heal_col = heal_col.push(empty_state("No healing recorded"));
+        }
+
+        container(
+            column![header, rule::horizontal(1), heal_col]
+                .spacing(8)
+                .width(Fill),
+        )
+        .padding(12)
+        .width(Length::FillPortion(1))
+        .style(panel_style)
+        .into()
+    }
+
+    /// Build a simple (non-combined) healing panel for Effective/Raw/Overhealing modes.
+    fn build_simple_healing_panel(
+        &self,
+        stats: &HashMap<String, log_data::PlayerStats>,
+        duration: f64,
+        healing_types_list: &[HealingType],
+    ) -> Element<'_, ViewerMessage> {
         let mut healing_players: Vec<(String, String, u64)> = stats
             .iter()
             .filter_map(|(name, ps)| {
@@ -60,7 +292,7 @@ impl ViewerState {
                     return None;
                 }
                 let value = match self.healing_type {
-                    HealingType::Effective => ps.effective_healing,
+                    HealingType::Healing | HealingType::Effective => ps.effective_healing,
                     HealingType::Raw => ps.healing,
                     HealingType::Overhealing => ps.overhealing,
                 };
@@ -77,70 +309,22 @@ impl ViewerState {
         healing_players.sort_by_key(|p| Reverse(p.2));
 
         let heal_total: u64 = healing_players.iter().map(|(_, _, v)| *v).sum();
-        let hps = per_second(heal_total, duration);
+        let heal_max = healing_players.first().map_or(0, |(_, _, v)| *v);
+        let heal_scale = adaptive_scale(heal_max, 0);
+
+        let hps_total = per_second(heal_total, duration);
         let heal_total_text = format!(
             "{} ({}/s)",
             theme::format_number(heal_total),
-            theme::format_number_f64(hps)
+            theme::format_number_f64(hps_total)
         );
 
-        // Build damage panel
-        let dmg_type_picker = pick_list(damage_types_list, Some(self.damage_type), |dt| {
-            ViewerMessage::SetDamageType(dt)
-        })
-        .width(Fill)
-        .padding(4);
-
-        let dmg_header = row![
-            dmg_type_picker,
-            text(dmg_total_text).size(12).color(theme::TEXT_SECONDARY)
-        ]
-        .spacing(8)
-        .align_y(Center);
-
-        let dmg_detail_type = match self.damage_type {
-            DamageType::DamageTaken => DetailType::DamageTaken,
-            _ => DetailType::Damage,
-        };
-
-        let mut dmg_col = Column::new().spacing(3);
-        for (rank, (name, class, value)) in damage_players.iter().enumerate() {
-            let pps = per_second(*value, duration);
-            let percent = percent_of(*value, dmg_total);
-            dmg_col = dmg_col.push(self.meter_bar_row(
-                rank + 1,
-                name,
-                class,
-                *value,
-                pps,
-                percent,
-                theme::class_color(class),
-                Some((name.clone(), dmg_detail_type)),
-            ));
-        }
-
-        let damage_panel: Element<ViewerMessage> = container(
-            column![dmg_header, rule::horizontal(1), dmg_col]
-                .spacing(8)
-                .width(Fill),
-        )
-        .padding(12)
-        .width(Length::FillPortion(1))
-        .style(panel_style)
-        .into();
-
-        // Build healing panel
-        let healing_types_list = vec![
-            HealingType::Effective,
-            HealingType::Raw,
-            HealingType::Overhealing,
-        ];
-
-        let heal_type_picker = pick_list(healing_types_list, Some(self.healing_type), |ht| {
-            ViewerMessage::SetHealingType(ht)
-        })
-        .width(Fill)
-        .padding(4);
+        let heal_type_picker =
+            pick_list(healing_types_list.to_vec(), Some(self.healing_type), |ht| {
+                ViewerMessage::SetHealingType(ht)
+            })
+            .width(Fill)
+            .padding(4);
 
         let heal_header = row![
             heal_type_picker,
@@ -153,19 +337,32 @@ impl ViewerState {
         for (rank, (name, class, value)) in healing_players.iter().enumerate() {
             let pps = per_second(*value, duration);
             let percent = percent_of(*value, heal_total);
-            heal_col = heal_col.push(self.meter_bar_row(
+            let bar_pct = scaled_percent(*value, heal_scale);
+
+            let value_text = format!(
+                "{} - {}/s",
+                theme::format_number(*value),
+                theme::format_number_f64(pps)
+            );
+            let pct_text = format!("{percent:.1}%");
+
+            heal_col = heal_col.push(build_meter_row(
                 rank + 1,
                 name,
                 class,
-                *value,
-                pps,
-                percent,
+                &value_text,
+                &pct_text,
+                bar_pct,
                 theme::class_color(class),
                 Some((name.clone(), DetailType::Healing)),
             ));
         }
 
-        let healing_panel: Element<ViewerMessage> = container(
+        if healing_players.is_empty() {
+            heal_col = heal_col.push(empty_state("No healing recorded"));
+        }
+
+        container(
             column![heal_header, rule::horizontal(1), heal_col]
                 .spacing(8)
                 .width(Fill),
@@ -173,11 +370,7 @@ impl ViewerState {
         .padding(12)
         .width(Length::FillPortion(1))
         .style(panel_style)
-        .into();
-
-        scrollable(row![damage_panel, healing_panel].spacing(12).width(Fill))
-            .height(Fill)
-            .into()
+        .into()
     }
 
     // ── Utility Tab ─────────────────────────────────────────────────────
