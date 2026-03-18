@@ -1,3 +1,5 @@
+//! Damage event parsing: spell hits, auto-attacks, and DoT/suffer lines.
+
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -62,7 +64,7 @@ pub(super) fn parse_trailer(trimmed: &str) -> TrailerData {
 /// Vanilla `WoW` damage lines include the school as `"for N School damage"`, e.g.:
 /// `"Ragnaros hits Tank for 5000 Fire damage."` or `"Tank suffers 300 Nature damage"`.
 /// Auto-attacks have no school word (just `"for N."`) and default to Physical.
-pub(super) fn parse_school(trimmed: &str) -> Option<String> {
+pub(super) fn parse_school(trimmed: &str) -> Option<&str> {
     // Look for the pattern: digits followed by a school word followed by "damage"
     // Common schools: Physical, Holy, Fire, Nature, Frost, Shadow, Arcane
     static RE_SCHOOL: LazyLock<Regex> = LazyLock::new(|| {
@@ -70,15 +72,20 @@ pub(super) fn parse_school(trimmed: &str) -> Option<String> {
     });
     RE_SCHOOL
         .captures(trimmed)
-        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .and_then(|c| c.get(1).map(|m| m.as_str()))
 }
 
 /// Parsed damage event ready to be recorded into stats and entries.
+///
+/// All string fields borrow from the input line (`trimmed`) to avoid
+/// intermediate heap allocations.  Owned `String`s are created only at
+/// the point of insertion into `LogEntry` and `HashMap` keys.
+#[derive(Clone, Copy)]
 pub(super) struct DamageEvent<'a> {
     pub(super) timestamp: f64,
-    pub(super) source: String,
-    pub(super) target: String,
-    pub(super) spell: String,
+    pub(super) source: &'a str,
+    pub(super) target: &'a str,
+    pub(super) spell: &'a str,
     pub(super) amount: u64,
     pub(super) absorbed: u64,
     pub(super) resisted: u64,
@@ -86,7 +93,7 @@ pub(super) struct DamageEvent<'a> {
     pub(super) is_crit: bool,
     pub(super) is_glancing: bool,
     pub(super) is_crushing: bool,
-    pub(super) school: Option<String>,
+    pub(super) school: Option<&'a str>,
     pub(super) pet_owner: Option<&'a str>,
 }
 
@@ -96,41 +103,34 @@ pub(super) fn record_damage(
     health_deficit: &mut HashMap<String, u64>,
     event: DamageEvent<'_>,
 ) {
-    // Record damage taken breakdown before destructuring the event.
+    // Record damage taken + source damage stats (both use &str directly).
     add_damage_taken(data, &event);
+    add_damage(
+        data,
+        event.source,
+        event.spell,
+        event.amount,
+        event.pet_owner,
+        event.is_crit,
+    );
+    record_absorb(data, event.target, event.absorbed);
 
-    let DamageEvent {
-        timestamp,
-        source,
-        target,
-        spell,
-        amount,
-        absorbed,
-        resisted,
-        blocked,
-        is_crit,
-        is_glancing,
-        is_crushing,
-        school,
-        pet_owner,
-    } = event;
-    add_damage(data, &source, &spell, amount, pet_owner, is_crit);
-    record_absorb(data, &target, absorbed);
     // Increment target's health deficit for effective healing calculation
-    *health_deficit.entry(target.clone()).or_insert(0) += amount;
+    *health_deficit.entry(event.target.to_string()).or_insert(0) += event.amount;
+
     data.entries.push(LogEntry::Damage {
-        timestamp,
-        source,
-        target,
-        spell,
-        amount,
-        absorbed,
-        resisted,
-        blocked,
-        is_crit,
-        is_glancing,
-        is_crushing,
-        school,
+        timestamp: event.timestamp,
+        source: event.source.to_string(),
+        target: event.target.to_string(),
+        spell: event.spell.to_string(),
+        amount: event.amount,
+        absorbed: event.absorbed,
+        resisted: event.resisted,
+        blocked: event.blocked,
+        is_crit: event.is_crit,
+        is_glancing: event.is_glancing,
+        is_crushing: event.is_crushing,
+        school: event.school.map(str::to_string),
     });
 }
 
@@ -148,20 +148,20 @@ pub(super) fn parse_damage_events(
 
     // Format 1: Source 's Spell hits/crits Target for N
     if let Some(caps) = RE_DMG_SPELL.captures(trimmed) {
-        let Some(source) = caps.get(1).map(|m| m.as_str().to_string()) else {
+        let Some(source) = caps.get(1).map(|m| m.as_str()) else {
             return;
         };
-        let Some(spell) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+        let Some(spell) = caps.get(2).map(|m| m.as_str().trim()) else {
             return;
         };
-        let Some(target) = caps.get(3).map(|m| m.as_str().trim().to_string()) else {
+        let Some(target) = caps.get(3).map(|m| m.as_str().trim()) else {
             return;
         };
         let amount: u64 = caps
             .get(4)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
-        let pet_owner = extract_pet_owner(&source, data);
+        let pet_owner = extract_pet_owner(source, data);
         record_damage(
             data,
             health_deficit,
@@ -177,7 +177,7 @@ pub(super) fn parse_damage_events(
                 is_crit,
                 is_glancing: trailer.is_glancing,
                 is_crushing: trailer.is_crushing,
-                school: school.clone(),
+                school,
                 pet_owner: pet_owner.as_deref(),
             },
         );
@@ -186,10 +186,10 @@ pub(super) fn parse_damage_events(
 
     // Format 2: Source hits/crits Target for N.
     if let Some(caps) = RE_DMG_AUTO.captures(trimmed) {
-        let Some(source) = caps.get(1).map(|m| m.as_str().to_string()) else {
+        let Some(source) = caps.get(1).map(|m| m.as_str()) else {
             return;
         };
-        let Some(target) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+        let Some(target) = caps.get(2).map(|m| m.as_str().trim()) else {
             return;
         };
         let amount: u64 = caps
@@ -203,7 +203,7 @@ pub(super) fn parse_damage_events(
                 timestamp,
                 source,
                 target,
-                spell: "Auto Attack".to_string(),
+                spell: "Auto Attack",
                 amount,
                 absorbed: trailer.absorbed,
                 resisted: trailer.resisted,
@@ -211,7 +211,7 @@ pub(super) fn parse_damage_events(
                 is_crit,
                 is_glancing: trailer.is_glancing,
                 is_crushing: trailer.is_crushing,
-                school: school.clone(),
+                school,
                 pet_owner: None,
             },
         );
@@ -220,20 +220,20 @@ pub(super) fn parse_damage_events(
 
     // Format 3: Target suffers N damage from Source 's Spell
     if let Some(caps) = RE_DMG_SUFFER.captures(trimmed) {
-        let Some(target) = caps.get(1).map(|m| m.as_str().trim().to_string()) else {
+        let Some(target) = caps.get(1).map(|m| m.as_str().trim()) else {
             return;
         };
         let amount: u64 = caps
             .get(2)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
-        let Some(source) = caps.get(3).map(|m| m.as_str().to_string()) else {
+        let Some(source) = caps.get(3).map(|m| m.as_str()) else {
             return;
         };
-        let Some(spell) = caps.get(4).map(|m| m.as_str().trim().to_string()) else {
+        let Some(spell) = caps.get(4).map(|m| m.as_str().trim()) else {
             return;
         };
-        let pet_owner = extract_pet_owner(&source, data);
+        let pet_owner = extract_pet_owner(source, data);
         record_damage(
             data,
             health_deficit,
@@ -256,7 +256,7 @@ pub(super) fn parse_damage_events(
     }
 }
 
-/// Add damage to a source player's stats.
+/// Add damage to a source player's stats, with optional pet owner attribution.
 fn add_damage(
     data: &mut LogData,
     source: &str,
@@ -266,14 +266,7 @@ fn add_damage(
     is_crit: bool,
 ) {
     // Stats for the direct source
-    let stats = ensure_stats(data, source);
-    stats.damage += amount;
-    let ab = stats.abilities.entry(spell.to_string()).or_default();
-    ab.total += amount;
-    ab.hits += 1;
-    if is_crit {
-        ab.crits += 1;
-    }
+    ensure_stats(data, source).accumulate_damage(spell, amount, is_crit);
 
     // Attribute to pet owner
     if let Some(owner) = pet_owner {
@@ -300,28 +293,17 @@ fn add_damage(
 /// Add damage taken to a target player's stats, including per-source per-ability
 /// breakdown with mitigation details.
 fn add_damage_taken(data: &mut LogData, event: &DamageEvent<'_>) {
-    let stats = ensure_stats(data, &event.target);
-    stats.damage_taken += event.amount;
-    let dt_ab = stats
-        .damage_taken_breakdown
-        .entry(event.source.clone())
-        .or_default()
-        .entry(event.spell.clone())
-        .or_default();
-    dt_ab.total += event.amount;
-    dt_ab.hits += 1;
-    dt_ab.absorbed += event.absorbed;
-    dt_ab.resisted += event.resisted;
-    dt_ab.blocked += event.blocked;
-    if event.is_crit {
-        dt_ab.crits += 1;
-    }
-    if event.is_crushing {
-        dt_ab.crushing_hits += 1;
-    }
-    if event.is_glancing {
-        dt_ab.glancing_hits += 1;
-    }
+    ensure_stats(data, event.target).accumulate_damage_taken(
+        event.source,
+        event.spell,
+        event.amount,
+        event.absorbed,
+        event.resisted,
+        event.blocked,
+        event.is_crit,
+        event.is_crushing,
+        event.is_glancing,
+    );
 }
 
 #[cfg(test)]
@@ -446,7 +428,7 @@ mod tests {
     #[test]
     fn test_parse_school_fire() {
         let line = "Boss hits Tank for 5000 Fire damage.";
-        assert_eq!(parse_school(line).as_deref(), Some("Fire"));
+        assert_eq!(parse_school(line), Some("Fire"));
     }
 
     #[test]
@@ -462,11 +444,7 @@ mod tests {
             "Physical", "Holy", "Fire", "Nature", "Frost", "Shadow", "Arcane",
         ] {
             let line = format!("Boss hits Tank for 100 {school} damage.");
-            assert_eq!(
-                parse_school(&line).as_deref(),
-                Some(*school),
-                "Should parse {school}"
-            );
+            assert_eq!(parse_school(&line), Some(*school), "Should parse {school}");
         }
     }
 

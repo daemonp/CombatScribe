@@ -1,3 +1,5 @@
+//! Loot tab rendering: boss-grouped item tables with search and quality filtering.
+
 #[allow(clippy::wildcard_imports)]
 // viewer UI — many shared component functions used throughout
 use super::components::*;

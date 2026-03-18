@@ -1,3 +1,5 @@
+//! Discrete event parsing: casts, buffs, dispels, loot, trades, and avoidance.
+
 use crate::log_data::{
     ConsumableUse, DispelEvent, InterruptEvent, ItemQuality, LogData, LogEntry, LootEvent,
     ResurrectEvent, TradeEvent,

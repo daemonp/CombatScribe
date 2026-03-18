@@ -1,3 +1,5 @@
+//! Events tab rendering: raw combat log entry display with filtering controls.
+
 use std::fmt::Write;
 
 use iced::widget::column;

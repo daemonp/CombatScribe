@@ -335,6 +335,17 @@ impl ViewerState {
         }
     }
 
+    /// Clear all chart canvas geometry caches.
+    ///
+    /// Called when the underlying data or visible range changes (encounter
+    /// selection, zoom, etc.) so that the canvas programs redraw.
+    fn clear_all_chart_caches(&mut self) {
+        self.timeline_cache.clear();
+        self.alive_cache.clear();
+        self.aura_cache.clear();
+        self.dispel_cache.clear();
+    }
+
     // ── Update ──────────────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)] // iced message dispatch — one arm per variant
@@ -361,10 +372,7 @@ impl ViewerState {
                 self.zoom_range = None;
                 self.zoom_drag_start = None;
                 self.zoom_drag_end = None;
-                self.timeline_cache.clear();
-                self.alive_cache.clear();
-                self.aura_cache.clear();
-                self.dispel_cache.clear();
+                self.clear_all_chart_caches();
             }
             ViewerMessage::SetDamageType(dt) => self.damage_type = dt,
             ViewerMessage::SetHealingType(ht) => self.healing_type = ht,
@@ -503,10 +511,7 @@ impl ViewerState {
                     // Only commit if the selection is at least 2 seconds wide
                     if hi - lo >= 2.0 {
                         self.zoom_range = Some((lo, hi));
-                        self.timeline_cache.clear();
-                        self.alive_cache.clear();
-                        self.aura_cache.clear();
-                        self.dispel_cache.clear();
+                        self.clear_all_chart_caches();
                     }
                 }
                 self.zoom_drag_start = None;
@@ -516,10 +521,7 @@ impl ViewerState {
                 self.zoom_range = None;
                 self.zoom_drag_start = None;
                 self.zoom_drag_end = None;
-                self.timeline_cache.clear();
-                self.alive_cache.clear();
-                self.aura_cache.clear();
-                self.dispel_cache.clear();
+                self.clear_all_chart_caches();
             }
             // These are intercepted and handled by App::update() in main.rs
             ViewerMessage::LoadFile

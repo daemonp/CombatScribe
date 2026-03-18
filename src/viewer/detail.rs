@@ -1,3 +1,5 @@
+//! Detail overlay rendering: per-player ability breakdowns, damage taken, and opener display.
+
 #[allow(clippy::wildcard_imports)]
 // viewer UI — many shared component functions used throughout
 use super::components::*;

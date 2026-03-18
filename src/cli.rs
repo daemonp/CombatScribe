@@ -22,16 +22,9 @@ fn read_log_lines(path: &str) -> Vec<String> {
 }
 
 pub fn run_bench(path: &str) {
-    let file_path = std::path::Path::new(path);
     eprintln!("Reading file...");
     let t0 = Instant::now();
-    let content = if is_zip_file(file_path) {
-        let bytes = fs::read(path).expect("read zip file");
-        read_text_from_zip_bytes(&bytes).expect("extract txt from zip")
-    } else {
-        fs::read_to_string(path).expect("read file")
-    };
-    let lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let lines = read_log_lines(path);
     let read_time = t0.elapsed();
     eprintln!("  Read {} lines in {read_time:.2?}", lines.len());
 

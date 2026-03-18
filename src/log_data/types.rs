@@ -1,3 +1,5 @@
+//! Core data types: `LogData`, `LogEntry`, `Encounter`, `PlayerStats`, and supporting structs.
+
 use std::collections::HashMap;
 
 // ── Core Data ───────────────────────────────────────────────────────────────
@@ -219,6 +221,81 @@ pub struct AbilityStats {
     pub overheal: u64,
     #[allow(dead_code)] // Data model — stored for future pet damage breakdown display
     pub is_pet: bool,
+}
+
+// ── Stat Accumulation Helpers ───────────────────────────────────────────────
+
+impl PlayerStats {
+    /// Accumulate a damage event into this player's stats.
+    pub fn accumulate_damage(&mut self, spell: &str, amount: u64, is_crit: bool) {
+        self.damage += amount;
+        let ab = self.abilities.entry(spell.to_string()).or_default();
+        ab.total += amount;
+        ab.hits += 1;
+        if is_crit {
+            ab.crits += 1;
+        }
+    }
+
+    /// Accumulate damage taken into this player's stats, including the
+    /// per-source per-ability mitigation breakdown.
+    #[allow(clippy::too_many_arguments)] // mirrors the LogEntry::Damage fields
+    pub fn accumulate_damage_taken(
+        &mut self,
+        source: &str,
+        spell: &str,
+        amount: u64,
+        absorbed: u64,
+        resisted: u64,
+        blocked: u64,
+        is_crit: bool,
+        is_crushing: bool,
+        is_glancing: bool,
+    ) {
+        self.damage_taken += amount;
+        let dt_ab = self
+            .damage_taken_breakdown
+            .entry(source.to_string())
+            .or_default()
+            .entry(spell.to_string())
+            .or_default();
+        dt_ab.total += amount;
+        dt_ab.hits += 1;
+        dt_ab.absorbed += absorbed;
+        dt_ab.resisted += resisted;
+        dt_ab.blocked += blocked;
+        if is_crit {
+            dt_ab.crits += 1;
+        }
+        if is_crushing {
+            dt_ab.crushing_hits += 1;
+        }
+        if is_glancing {
+            dt_ab.glancing_hits += 1;
+        }
+    }
+
+    /// Accumulate a healing event into this player's stats.
+    pub fn accumulate_healing(
+        &mut self,
+        spell: &str,
+        amount: u64,
+        effective: u64,
+        overheal: u64,
+        is_crit: bool,
+    ) {
+        self.healing += amount;
+        self.effective_healing += effective;
+        self.overhealing += overheal;
+        let ab = self.healing_abilities.entry(spell.to_string()).or_default();
+        ab.total += amount;
+        ab.effective += effective;
+        ab.overheal += overheal;
+        ab.hits += 1;
+        if is_crit {
+            ab.crits += 1;
+        }
+    }
 }
 
 /// Per-ability breakdown of damage taken, including mitigation details.

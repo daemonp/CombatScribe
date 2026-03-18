@@ -1,3 +1,5 @@
+//! Shared utility functions for the log parser (word matching, title case, stat helpers).
+
 use crate::log_data::{LogData, PlayerStats};
 
 use super::regex::RE_PET_OWNER;

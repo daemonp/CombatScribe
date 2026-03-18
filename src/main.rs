@@ -297,10 +297,11 @@ impl App {
                 let selected = self.selected_session.clone();
 
                 // Look up session metadata for descriptive filename.
+                // Search unfiltered `sessions` directly (session_names is raid-filtered).
                 let session_idx = self
                     .selected_session
                     .as_ref()
-                    .and_then(|sel| self.session_names.iter().position(|n| n == sel));
+                    .and_then(|sel| self.sessions.iter().position(|s| s.to_string() == *sel));
                 let (players, zone, start_time, start_year) = session_idx.map_or_else(
                     || (Vec::new(), String::new(), 0.0, None),
                     |idx| {
@@ -532,10 +533,11 @@ impl App {
 
     /// Build a preview string for the rename checkbox label.
     fn export_filename_preview(&self) -> String {
+        // Search unfiltered `sessions` directly (session_names is raid-filtered).
         let session_idx = self
             .selected_session
             .as_ref()
-            .and_then(|sel| self.session_names.iter().position(|n| n == sel));
+            .and_then(|sel| self.sessions.iter().position(|s| s.to_string() == *sel));
 
         if let Some(idx) = session_idx {
             let s = &self.sessions[idx];

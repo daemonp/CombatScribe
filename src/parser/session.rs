@@ -186,13 +186,6 @@ struct SessionBuilder {
     npc_raid_zones: HashSet<String>,
 }
 
-/// Determine the established raid instance for a session from its boss kills.
-///
-/// Returns `Some(instance_name)` if all boss kills so far belong to one instance.
-fn session_instance(boss_kills: &[String]) -> Option<&'static str> {
-    raid_data::instance_from_bosses(boss_kills)
-}
-
 /// Second phase: group sorted events into sessions.
 ///
 /// Session boundaries are determined by:
@@ -236,7 +229,7 @@ fn build_sessions(
                 if let Some(boss_inst) = raid_data::boss_raid(boss) {
                     // If the current session already has boss kills from a specific instance,
                     // and this new boss is from a DIFFERENT instance -> split
-                    if let Some(cur_inst) = session_instance(&cur.boss_kills) {
+                    if let Some(cur_inst) = instance_from_boss_kills(&cur.boss_kills) {
                         return cur_inst != boss_inst;
                     }
                     // If the session has a raid zone set and boss is from a different raid -> split

@@ -1,3 +1,5 @@
+//! Timeline construction: bucketing events into 1-second intervals with aura tracking.
+
 use std::collections::{HashMap, HashSet};
 
 use super::timeline::{
@@ -331,4 +333,45 @@ fn is_pet_target(target: &str, combatants: &HashMap<String, Combatant>) -> bool 
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn combatants_with_pet(owner: &str, pet: &str) -> HashMap<String, Combatant> {
+        let mut map = HashMap::new();
+        map.insert(
+            owner.to_string(),
+            Combatant {
+                pet_name: Some(pet.to_string()),
+                ..Combatant::default()
+            },
+        );
+        map
+    }
+
+    #[test]
+    fn test_is_pet_target_true() {
+        let combatants = combatants_with_pet("Phair", "Nymeria");
+        assert!(is_pet_target("Nymeria (Phair)", &combatants));
+    }
+
+    #[test]
+    fn test_is_pet_target_wrong_pet_name() {
+        let combatants = combatants_with_pet("Hunter", "Cat");
+        assert!(!is_pet_target("Wolf (Hunter)", &combatants));
+    }
+
+    #[test]
+    fn test_is_pet_target_unknown_owner() {
+        let combatants = combatants_with_pet("Hunter", "Cat");
+        assert!(!is_pet_target("Wolf (Unknown)", &combatants));
+    }
+
+    #[test]
+    fn test_is_pet_target_no_parens() {
+        let combatants = combatants_with_pet("Hunter", "Cat");
+        assert!(!is_pet_target("Ragnaros", &combatants));
+    }
 }

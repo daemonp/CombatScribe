@@ -1,3 +1,5 @@
+//! Canvas drawing programs: `TimelineChart`, `AliveChart`, `DispelChart`, and `AuraChart`.
+
 use std::collections::{HashMap, HashSet};
 
 use iced::widget::canvas;

@@ -1,3 +1,5 @@
+//! Shared UI components: meter bars, encounter name badges, event log builders, and styles.
+
 // ── Shared Helpers & Free Functions ──────────────────────────────────────────
 
 use std::collections::HashMap;

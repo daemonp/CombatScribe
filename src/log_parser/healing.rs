@@ -1,3 +1,5 @@
+//! Healing event parsing: direct heals, `HoT` gains, and effective heal calculation.
+
 use std::collections::HashMap;
 
 use crate::log_data::{LogData, LogEntry};
@@ -140,21 +142,7 @@ fn add_healing(
     overheal: u64,
     is_crit: bool,
 ) {
-    let stats = ensure_stats(data, source);
-    stats.healing += amount;
-    stats.effective_healing += effective;
-    stats.overhealing += overheal;
-    let ab = stats
-        .healing_abilities
-        .entry(spell.to_string())
-        .or_default();
-    ab.total += amount;
-    ab.effective += effective;
-    ab.overheal += overheal;
-    ab.hits += 1;
-    if is_crit {
-        ab.crits += 1;
-    }
+    ensure_stats(data, source).accumulate_healing(spell, amount, effective, overheal, is_crit);
 }
 
 #[cfg(test)]

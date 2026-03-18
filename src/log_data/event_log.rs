@@ -1,3 +1,5 @@
+//! Event log view modes, death log window state, and event type filters.
+
 use super::types::LogEntry;
 
 // ── Event Log Facets ────────────────────────────────────────────────────────

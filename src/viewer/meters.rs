@@ -1,3 +1,5 @@
+//! Meters tab rendering: damage and healing meter bars with the utility sub-panel.
+
 #[allow(clippy::wildcard_imports)]
 // viewer UI — many shared component functions used throughout
 use super::components::*;

@@ -1,3 +1,5 @@
+//! Post-processing pass: encounter merging, loot attribution, and combatant filtering.
+
 use std::collections::{HashMap, HashSet};
 
 use crate::log_data::{Encounter, GearSlot, LogData, LogEntry};

@@ -1,3 +1,5 @@
+//! Compiled regex patterns and spell-name constants for combat log parsing.
+
 use regex::Regex;
 use std::sync::LazyLock;
 

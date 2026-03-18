@@ -1,3 +1,5 @@
+//! Combat state tracking, boss detection, and `UNIT_DIED` handling.
+
 use crate::log_data::{Combatant, DeathEvent, Encounter, LogData, LogEntry};
 use crate::parser;
 

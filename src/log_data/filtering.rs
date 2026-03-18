@@ -1,3 +1,5 @@
+//! Encounter-aware query methods on `LogData` for stats, deaths, dispels, and openers.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -29,14 +31,34 @@ impl LogData {
     }
 
     /// Check if a timestamp falls within any selected encounter.
+    ///
+    /// Uses lazy iterators to avoid the `Vec` allocation that
+    /// `selected_encounters()` would perform on every call.
     pub fn is_in_selection(&self, timestamp: f64, filter: &EncounterFilter) -> bool {
-        if matches!(filter, EncounterFilter::All) {
-            return self.start_time.is_some_and(|s| timestamp >= s)
-                && self.end_time.is_some_and(|e| timestamp <= e);
+        let in_range = |enc: &Encounter| timestamp >= enc.start && timestamp <= enc.end;
+        match filter {
+            EncounterFilter::All => {
+                self.start_time.is_some_and(|s| timestamp >= s)
+                    && self.end_time.is_some_and(|e| timestamp <= e)
+            }
+            EncounterFilter::Single(idx) => self
+                .encounters
+                .get(*idx)
+                .is_some_and(|enc| timestamp >= enc.start && timestamp <= enc.end),
+            EncounterFilter::AllKills => self
+                .encounters
+                .iter()
+                .filter(|e| e.is_boss && e.is_kill)
+                .any(in_range),
+            EncounterFilter::AllWipes => self
+                .encounters
+                .iter()
+                .filter(|e| e.is_boss && !e.is_kill)
+                .any(in_range),
+            EncounterFilter::AllTrash => {
+                self.encounters.iter().filter(|e| !e.is_boss).any(in_range)
+            }
         }
-        self.selected_encounters(filter)
-            .iter()
-            .any(|enc| timestamp >= enc.start && timestamp <= enc.end)
     }
 
     /// Get total combat duration for selected encounters.
@@ -82,38 +104,25 @@ impl LogData {
                     is_glancing,
                     ..
                 } => {
-                    let ps = stats.entry(source.clone()).or_default();
-                    ps.damage += amount;
-                    let ab = ps.abilities.entry(spell.clone()).or_default();
-                    ab.total += amount;
-                    ab.hits += 1;
-                    if *is_crit {
-                        ab.crits += 1;
-                    }
-
-                    // Damage taken — total and per-source per-ability breakdown
-                    let ts = stats.entry(target.clone()).or_default();
-                    ts.damage_taken += amount;
-                    let dt_ab = ts
-                        .damage_taken_breakdown
+                    stats
                         .entry(source.clone())
                         .or_default()
-                        .entry(spell.clone())
-                        .or_default();
-                    dt_ab.total += amount;
-                    dt_ab.hits += 1;
-                    dt_ab.absorbed += absorbed;
-                    dt_ab.resisted += resisted;
-                    dt_ab.blocked += blocked;
-                    if *is_crit {
-                        dt_ab.crits += 1;
-                    }
-                    if *is_crushing {
-                        dt_ab.crushing_hits += 1;
-                    }
-                    if *is_glancing {
-                        dt_ab.glancing_hits += 1;
-                    }
+                        .accumulate_damage(spell, *amount, *is_crit);
+
+                    stats
+                        .entry(target.clone())
+                        .or_default()
+                        .accumulate_damage_taken(
+                            source,
+                            spell,
+                            *amount,
+                            *absorbed,
+                            *resisted,
+                            *blocked,
+                            *is_crit,
+                            *is_crushing,
+                            *is_glancing,
+                        );
                 }
                 LogEntry::Healing {
                     source,
@@ -132,18 +141,13 @@ impl LogData {
                     if !self.all_combatants.contains_key(target.as_str()) {
                         continue;
                     }
-                    let ps = stats.entry(source.clone()).or_default();
-                    ps.healing += amount;
-                    ps.effective_healing += effective_heal;
-                    ps.overhealing += overheal;
-                    let ab = ps.healing_abilities.entry(spell.clone()).or_default();
-                    ab.total += amount;
-                    ab.effective += effective_heal;
-                    ab.overheal += overheal;
-                    ab.hits += 1;
-                    if *is_crit {
-                        ab.crits += 1;
-                    }
+                    stats.entry(source.clone()).or_default().accumulate_healing(
+                        spell,
+                        *amount,
+                        *effective_heal,
+                        *overheal,
+                        *is_crit,
+                    );
                 }
                 _ => {}
             }
@@ -260,5 +264,312 @@ impl LogData {
         self.combatants
             .get(name)
             .map_or("UNKNOWN", |c| c.class.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log_data::types::Combatant;
+
+    /// Build a minimal `LogData` with the given encounters.
+    fn make_log_data(encounters: Vec<Encounter>) -> LogData {
+        let start = encounters.first().map(|e| e.start);
+        let end = encounters.last().map(|e| e.end);
+        LogData {
+            encounters,
+            start_time: start,
+            end_time: end,
+            ..LogData::default()
+        }
+    }
+
+    fn boss_kill(name: &str, start: f64, end: f64) -> Encounter {
+        Encounter {
+            name: Some(name.to_string()),
+            start,
+            end,
+            duration: end - start,
+            is_boss: true,
+            is_kill: true,
+            zone: None,
+            attempt: None,
+            player_deaths: 0,
+            active_players: 0,
+        }
+    }
+
+    fn boss_wipe(name: &str, start: f64, end: f64) -> Encounter {
+        Encounter {
+            is_kill: false,
+            ..boss_kill(name, start, end)
+        }
+    }
+
+    fn trash(start: f64, end: f64) -> Encounter {
+        Encounter {
+            name: None,
+            start,
+            end,
+            duration: end - start,
+            is_boss: false,
+            is_kill: false,
+            zone: None,
+            attempt: None,
+            player_deaths: 0,
+            active_players: 0,
+        }
+    }
+
+    fn damage_entry(ts: f64, source: &str, target: &str, spell: &str, amount: u64) -> LogEntry {
+        LogEntry::Damage {
+            timestamp: ts,
+            source: source.to_string(),
+            target: target.to_string(),
+            spell: spell.to_string(),
+            amount,
+            absorbed: 0,
+            resisted: 0,
+            blocked: 0,
+            is_crit: false,
+            is_glancing: false,
+            is_crushing: false,
+            school: None,
+        }
+    }
+
+    fn healing_entry(ts: f64, source: &str, target: &str, spell: &str, amount: u64) -> LogEntry {
+        LogEntry::Healing {
+            timestamp: ts,
+            source: source.to_string(),
+            target: target.to_string(),
+            spell: spell.to_string(),
+            amount,
+            effective_heal: amount,
+            overheal: 0,
+            is_crit: false,
+        }
+    }
+
+    // ── selected_encounters ─────────────────────────────────────────────
+
+    #[test]
+    fn test_selected_encounters_filters() {
+        let data = make_log_data(vec![
+            boss_kill("Ragnaros", 100.0, 200.0),
+            boss_wipe("Vael", 300.0, 350.0),
+            trash(400.0, 420.0),
+        ]);
+
+        assert_eq!(data.selected_encounters(&EncounterFilter::All).len(), 3);
+        assert_eq!(
+            data.selected_encounters(&EncounterFilter::AllKills).len(),
+            1
+        );
+        assert_eq!(
+            data.selected_encounters(&EncounterFilter::AllWipes).len(),
+            1
+        );
+        assert_eq!(
+            data.selected_encounters(&EncounterFilter::AllTrash).len(),
+            1
+        );
+        assert_eq!(
+            data.selected_encounters(&EncounterFilter::Single(0)).len(),
+            1
+        );
+        assert_eq!(
+            data.selected_encounters(&EncounterFilter::Single(0))[0]
+                .name
+                .as_deref(),
+            Some("Ragnaros")
+        );
+    }
+
+    #[test]
+    fn test_selected_encounters_single_out_of_bounds() {
+        let data = make_log_data(vec![boss_kill("Ragnaros", 100.0, 200.0)]);
+        assert!(data
+            .selected_encounters(&EncounterFilter::Single(99))
+            .is_empty());
+    }
+
+    // ── is_in_selection ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_in_selection_all_filter() {
+        let data = make_log_data(vec![boss_kill("Rag", 100.0, 200.0)]);
+        let filter = EncounterFilter::All;
+        assert!(data.is_in_selection(100.0, &filter));
+        assert!(data.is_in_selection(150.0, &filter));
+        assert!(data.is_in_selection(200.0, &filter));
+        assert!(!data.is_in_selection(99.9, &filter));
+        assert!(!data.is_in_selection(200.1, &filter));
+    }
+
+    #[test]
+    fn test_is_in_selection_single_encounter() {
+        let data = make_log_data(vec![
+            boss_kill("Rag", 100.0, 150.0),
+            boss_kill("Ony", 200.0, 250.0),
+        ]);
+        let filter = EncounterFilter::Single(1);
+        assert!(!data.is_in_selection(125.0, &filter));
+        assert!(data.is_in_selection(225.0, &filter));
+        assert!(!data.is_in_selection(260.0, &filter));
+    }
+
+    // ── selected_duration ───────────────────────────────────────────────
+
+    #[test]
+    fn test_selected_duration() {
+        let data = make_log_data(vec![
+            boss_kill("Rag", 100.0, 130.0),
+            boss_kill("Ony", 200.0, 245.0),
+            trash(300.0, 360.0),
+        ]);
+        let all_dur = data.selected_duration(&EncounterFilter::All);
+        assert!((all_dur - 135.0).abs() < f64::EPSILON);
+
+        let single_dur = data.selected_duration(&EncounterFilter::Single(1));
+        assert!((single_dur - 45.0).abs() < f64::EPSILON);
+    }
+
+    // ── filtered_stats ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_filtered_stats_all_borrows() {
+        let mut data = make_log_data(vec![boss_kill("Rag", 100.0, 200.0)]);
+        data.player_stats
+            .insert("Warrior".to_string(), PlayerStats::default());
+
+        let (stats, _dur) = data.filtered_stats(&EncounterFilter::All);
+        assert!(matches!(stats, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_filtered_stats_single_encounter() {
+        let mut data = make_log_data(vec![
+            boss_kill("Rag", 100.0, 200.0),
+            boss_kill("Ony", 300.0, 400.0),
+        ]);
+        data.entries = vec![
+            damage_entry(150.0, "Warrior", "Rag", "Mortal Strike", 1000),
+            damage_entry(350.0, "Warrior", "Ony", "Mortal Strike", 2000),
+        ];
+        // Add Warrior as a combatant for healing gate
+        data.all_combatants
+            .insert("Warrior".to_string(), Combatant::default());
+
+        let (stats, _dur) = data.filtered_stats(&EncounterFilter::Single(0));
+        let warrior = stats.get("Warrior").expect("warrior should have stats");
+        assert_eq!(warrior.damage, 1000);
+    }
+
+    #[test]
+    fn test_filtered_stats_skips_boss_heals() {
+        let mut data = make_log_data(vec![boss_kill("Rag", 100.0, 200.0)]);
+        // "Priest" is a combatant, "Boss" is not
+        data.all_combatants
+            .insert("Priest".to_string(), Combatant::default());
+        data.entries = vec![
+            healing_entry(150.0, "Priest", "Priest", "Flash Heal", 500),
+            healing_entry(160.0, "Priest", "Boss", "Shadow of Ebonroc", 1000),
+        ];
+
+        let (stats, _dur) = data.filtered_stats(&EncounterFilter::Single(0));
+        let priest = stats.get("Priest").expect("priest should have stats");
+        // Only the self-heal should count (target is a combatant)
+        assert_eq!(priest.healing, 500);
+    }
+
+    // ── opener_sequence ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_opener_sequence_basic() {
+        let mut data = make_log_data(vec![boss_kill("Rag", 100.0, 200.0)]);
+        data.entries = vec![
+            damage_entry(100.0, "Mage", "Rag", "Frostbolt", 300),
+            damage_entry(101.5, "Mage", "Rag", "Frostbolt", 320),
+            damage_entry(103.0, "Mage", "Rag", "Fireblast", 200),
+            damage_entry(115.0, "Mage", "Rag", "Frostbolt", 310), // outside 10s window
+        ];
+
+        let opener =
+            data.opener_sequence("Mage", PlayerEventType::Damage, &EncounterFilter::Single(0));
+        assert_eq!(opener.len(), 3);
+        assert_eq!(opener[0].spell, "Frostbolt");
+        assert!((opener[0].delay - 0.0).abs() < f64::EPSILON);
+        assert!((opener[1].delay - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_opener_sequence_empty_for_unknown_player() {
+        let data = make_log_data(vec![boss_kill("Rag", 100.0, 200.0)]);
+        let opener = data.opener_sequence(
+            "Nobody",
+            PlayerEventType::Damage,
+            &EncounterFilter::Single(0),
+        );
+        assert!(opener.is_empty());
+    }
+
+    #[test]
+    fn test_opener_sequence_limit() {
+        let mut data = make_log_data(vec![boss_kill("Rag", 100.0, 200.0)]);
+        // 12 entries all within 10s window
+        data.entries = (0..12)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)] // test index values are tiny
+                let ts = 100.0 + f64::from(i);
+                damage_entry(ts, "Mage", "Rag", "Frostbolt", 300)
+            })
+            .collect();
+
+        let opener =
+            data.opener_sequence("Mage", PlayerEventType::Damage, &EncounterFilter::Single(0));
+        assert_eq!(opener.len(), 8); // limit is 8
+    }
+
+    // ── player_class ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_player_class_known_and_unknown() {
+        let mut data = LogData::default();
+        data.combatants.insert(
+            "Warrior".to_string(),
+            Combatant {
+                class: "WARRIOR".to_string(),
+                ..Combatant::default()
+            },
+        );
+
+        assert_eq!(data.player_class("Warrior"), "WARRIOR");
+        assert_eq!(data.player_class("Nobody"), "UNKNOWN");
+    }
+
+    // ── filtered_deaths ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_filtered_deaths_time_range() {
+        let mut data = make_log_data(vec![boss_kill("Rag", 150.0, 200.0)]);
+        data.deaths = vec![
+            super::DeathEvent {
+                timestamp: 100.0,
+                player: "Tank".to_string(),
+            },
+            super::DeathEvent {
+                timestamp: 175.0,
+                player: "Healer".to_string(),
+            },
+            super::DeathEvent {
+                timestamp: 300.0,
+                player: "DPS".to_string(),
+            },
+        ];
+
+        let deaths = data.filtered_deaths(&EncounterFilter::Single(0));
+        assert_eq!(deaths.len(), 1);
+        assert_eq!(deaths[0].player, "Healer");
     }
 }

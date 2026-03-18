@@ -1,3 +1,5 @@
+//! Timeline data model: buckets, events, aura intervals, and visibility toggles.
+
 use std::collections::HashMap;
 
 // ── Timeline Data ───────────────────────────────────────────────────────────
