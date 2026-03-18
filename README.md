@@ -62,17 +62,21 @@ cargo run --release
 3. **Export** -- Format and export the log for upload to MonkeyLogs / TurtLogs.
 4. **View** -- Open the interactive log viewer to browse damage meters, healing, utility, loot, and events.
 
-## Dependencies
+### Screenshots
 
-| Crate | Purpose |
-|-------|---------|
-| `iced` | GUI framework |
-| `rfd` | Native file dialog |
-| `regex` | Log line pattern matching |
-| `zip` | ZIP archive creation for export |
-| `chrono` | Timestamp formatting |
-| `tokio` | Async runtime |
+# Damage and Healing View
+<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/b912166b-6a99-4f53-ba91-5df4e443bc3e" />
 
-## License
+### Damage issuer breakdown
 
-This project is not currently published under a formal license.
+<img width="2523" height="876" alt="image" src="https://github.com/user-attachments/assets/4c214449-3210-4869-89e0-21f301e64fb4" />
+
+### Tank damage taken player stats
+
+<img width="2508" height="902" alt="image" src="https://github.com/user-attachments/assets/b293aa76-e52a-4a87-8d96-c696ee30cf4a" />
+
+### Timeline view
+
+Per fight timeline to better understand mechanics 
+
+<img width="2510" height="721" alt="image" src="https://github.com/user-attachments/assets/2a885836-13d1-4fab-98d5-c91d90fcfc9e" />
