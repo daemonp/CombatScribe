@@ -1,0 +1,374 @@
+use std::collections::HashMap;
+
+// ── Core Data ───────────────────────────────────────────────────────────────
+
+/// All parsed data for a single session.
+#[derive(Debug, Clone, Default)]
+pub struct LogData {
+    pub entries: Vec<LogEntry>,
+    /// Filtered combatants — raid participants only (windowed + combat participants).
+    pub combatants: HashMap<String, Combatant>,
+    /// All `COMBATANT_INFO` entries, including city bystanders.
+    pub all_combatants: HashMap<String, Combatant>,
+    pub encounters: Vec<Encounter>,
+    pub start_time: Option<f64>,
+    pub end_time: Option<f64>,
+    pub zone_name: String,
+    pub player_stats: HashMap<String, PlayerStats>,
+    pub deaths: Vec<DeathEvent>,
+    pub resurrects: Vec<ResurrectEvent>,
+    pub dispels: Vec<DispelEvent>,
+    pub interrupts: Vec<InterruptEvent>,
+    pub absorbs: HashMap<String, u64>,
+    pub pet_owners: HashMap<String, String>,
+    pub avoidance: HashMap<String, AvoidanceStats>,
+    pub buffs: HashMap<String, HashMap<String, BuffStats>>,
+    pub loot: Vec<LootEvent>,
+    pub trades: Vec<TradeEvent>,
+    pub consumables: Vec<ConsumableUse>,
+    /// Last seen `PLAYERS_IN_COMBAT` snapshot: `(in_combat, total)`.
+    pub raid_size: Option<(u32, u32)>,
+}
+
+// LogData derives Default — all fields are Vec/HashMap/Option/String which default correctly.
+
+// ── Log Entries ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum LogEntry {
+    Damage {
+        timestamp: f64,
+        source: String,
+        target: String,
+        spell: String,
+        amount: u64,
+        absorbed: u64,
+        resisted: u64,
+        blocked: u64,
+        is_crit: bool,
+        is_glancing: bool,
+        is_crushing: bool,
+        school: Option<String>,
+    },
+    Healing {
+        timestamp: f64,
+        source: String,
+        target: String,
+        spell: String,
+        amount: u64,
+        effective_heal: u64,
+        overheal: u64,
+        is_crit: bool,
+    },
+    Death {
+        timestamp: f64,
+        player: String,
+    },
+    Dispel {
+        timestamp: f64,
+        caster: String,
+        target: String,
+        spell: String,
+    },
+    Resurrect {
+        timestamp: f64,
+        caster: String,
+        target: String,
+        #[allow(dead_code)] // Data model — stored for future resurrection detail display
+        spell: String,
+    },
+    Interrupt {
+        timestamp: f64,
+        caster: String,
+        target: String,
+        spell: String,
+    },
+    /// Buff or debuff applied to a player ("gains" / "is afflicted by").
+    AuraGain {
+        timestamp: f64,
+        player: String,
+        aura: String,
+        stacks: u32,
+    },
+    /// Buff or debuff removed from a player ("fades from").
+    AuraFade {
+        timestamp: f64,
+        player: String,
+        aura: String,
+    },
+}
+
+impl LogEntry {
+    /// Return the timestamp of any entry variant.
+    pub fn timestamp(&self) -> f64 {
+        match self {
+            Self::Damage { timestamp, .. }
+            | Self::Healing { timestamp, .. }
+            | Self::Death { timestamp, .. }
+            | Self::Dispel { timestamp, .. }
+            | Self::Resurrect { timestamp, .. }
+            | Self::Interrupt { timestamp, .. }
+            | Self::AuraGain { timestamp, .. }
+            | Self::AuraFade { timestamp, .. } => *timestamp,
+        }
+    }
+
+    /// Return the source/actor name.
+    pub fn source(&self) -> &str {
+        match self {
+            Self::Damage { source, .. } | Self::Healing { source, .. } => source,
+            Self::Death { player, .. }
+            | Self::AuraGain { player, .. }
+            | Self::AuraFade { player, .. } => player,
+            Self::Dispel { caster, .. }
+            | Self::Resurrect { caster, .. }
+            | Self::Interrupt { caster, .. } => caster,
+        }
+    }
+
+    /// Return the target name (if applicable).
+    pub fn target(&self) -> Option<&str> {
+        match self {
+            Self::Death { .. } | Self::AuraGain { .. } | Self::AuraFade { .. } => None,
+            Self::Damage { target, .. }
+            | Self::Healing { target, .. }
+            | Self::Dispel { target, .. }
+            | Self::Resurrect { target, .. }
+            | Self::Interrupt { target, .. } => Some(target),
+        }
+    }
+}
+
+// ── Supporting Structures ───────────────────────────────────────────────────
+
+/// Equipment slot parsed from `COMBATANT_INFO` gear fields.
+///
+/// Format in the log: `itemId:enchantId:suffixId:uniqueId`
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Data model — fields stored for future gear inspection display
+pub struct GearSlot {
+    pub item_id: u32,
+    pub enchant_id: u32,
+    pub suffix_id: i32,
+    pub raw: String,
+}
+
+/// Consumable/item use event parsed from V1 `"uses"` lines.
+#[derive(Debug, Clone)]
+pub struct ConsumableUse {
+    pub timestamp: f64,
+    pub player: String,
+    pub consumable: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Combatant {
+    pub class: String,
+    pub race: String,
+    pub guild: Option<String>,
+    pub gear: Vec<Option<GearSlot>>,
+    /// Talent summary like `"31/20/0"`.
+    pub talent_summary: Option<String>,
+    #[allow(dead_code)] // Data model — stored for future gear inspection display
+    pub guid: Option<String>,
+    /// Pet name from `COMBATANT_INFO` — used by `is_pet_target()` in timeline
+    /// to distinguish pet heals from MC'd-mob heals.
+    pub pet_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Encounter {
+    pub name: Option<String>,
+    pub start: f64,
+    pub end: f64,
+    pub duration: f64,
+    pub is_boss: bool,
+    pub is_kill: bool,
+    pub zone: Option<String>,
+    pub attempt: Option<usize>,
+    /// Number of unique players who died during this encounter.
+    pub player_deaths: u32,
+    /// Number of unique players active (dealt/took damage) during this encounter.
+    pub active_players: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PlayerStats {
+    pub damage: u64,
+    pub healing: u64,
+    pub effective_healing: u64,
+    pub overhealing: u64,
+    pub damage_taken: u64,
+    pub pet_damage: u64,
+    pub abilities: HashMap<String, AbilityStats>,
+    pub healing_abilities: HashMap<String, AbilityStats>,
+    /// Damage taken broken down by source -> ability -> stats.
+    ///
+    /// Outer key is the source name (e.g. "Patchwerk"), inner key is the ability
+    /// name (e.g. "Hateful Strike").  This lets tanks compare exactly which
+    /// abilities hit them and how much was mitigated.
+    pub damage_taken_breakdown: HashMap<String, HashMap<String, DamageTakenAbilityStats>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AbilityStats {
+    pub total: u64,
+    pub hits: u64,
+    pub crits: u64,
+    pub effective: u64,
+    pub overheal: u64,
+    #[allow(dead_code)] // Data model — stored for future pet damage breakdown display
+    pub is_pet: bool,
+}
+
+/// Per-ability breakdown of damage taken, including mitigation details.
+///
+/// Keyed by `(source, ability)` pairs in `PlayerStats::damage_taken_breakdown`,
+/// this lets tanks compare exactly which abilities hit them and how much was
+/// mitigated by absorbs, resists, and blocks.
+#[derive(Debug, Clone, Default)]
+pub struct DamageTakenAbilityStats {
+    pub total: u64,
+    pub hits: u64,
+    pub crits: u64,
+    pub absorbed: u64,
+    pub resisted: u64,
+    pub blocked: u64,
+    pub crushing_hits: u64,
+    pub glancing_hits: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AvoidanceStats {
+    pub dodges: u64,
+    pub parries: u64,
+    pub blocks: u64,
+    pub missed_by: u64,
+    pub misses: u64,
+}
+
+impl AvoidanceStats {
+    /// Total attacks avoided (dodges + parries + blocks + missed by attacker).
+    ///
+    /// Note: `misses` (player's own missed attacks) is excluded since it
+    /// represents offensive misses, not defensive avoidance.
+    pub fn total(&self) -> u64 {
+        self.dodges + self.parries + self.blocks + self.missed_by
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BuffStats {
+    pub gains: u64,
+    pub fades: u64,
+    pub first_gain: Option<f64>,
+    pub last_fade: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LootEvent {
+    pub timestamp: f64,
+    pub player: String,
+    pub item_name: String,
+    #[allow(dead_code)] // Data model — stored for future item tooltip/link display
+    pub item_id: u64,
+    pub quality: ItemQuality,
+    pub quantity: u64,
+    pub boss: String,
+    pub traded_to: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeEvent {
+    pub timestamp: f64,
+    pub from_player: String,
+    pub item_name: String,
+    pub to_player: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeathEvent {
+    pub timestamp: f64,
+    pub player: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResurrectEvent {
+    pub timestamp: f64,
+    pub caster: String,
+    pub target: String,
+    pub spell: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DispelEvent {
+    pub timestamp: f64,
+    pub caster: String,
+    pub target: String,
+    pub spell: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterruptEvent {
+    pub timestamp: f64,
+    pub caster: String,
+    pub target: String,
+    pub spell: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerEventType {
+    Damage,
+    Healing,
+}
+
+/// Item quality tier from `WoW` color codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ItemQuality {
+    Poor,
+    Common,
+    Uncommon,
+    Rare,
+    Epic,
+    Legendary,
+}
+
+impl ItemQuality {
+    /// Parse from the 6-char hex color code in `LOOT:` lines.
+    pub fn from_color_code(code: &str) -> Self {
+        match code {
+            "9d9d9d" => Self::Poor,
+            "1eff00" => Self::Uncommon,
+            "0070dd" => Self::Rare,
+            "a335ee" => Self::Epic,
+            "ff8000" => Self::Legendary,
+            _ => Self::Common,
+        }
+    }
+
+    /// Whether this quality is notable (green or above).
+    pub fn is_notable(self) -> bool {
+        self >= Self::Uncommon
+    }
+}
+
+// ── Encounter Filter ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncounterFilter {
+    All,
+    AllKills,
+    AllWipes,
+    AllTrash,
+    Single(usize),
+}
+
+// ── Opener ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct OpenerSpell {
+    pub spell: String,
+    pub delay: f64,
+    pub amount: u64,
+    pub is_crit: bool,
+}

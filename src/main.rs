@@ -1,4 +1,7 @@
+mod cli;
 mod config;
+mod export;
+mod file_io;
 mod formatter;
 mod log_data;
 mod log_parser;
@@ -7,8 +10,6 @@ mod raid_data;
 mod theme;
 mod viewer;
 
-use std::fs;
-use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,25 +19,28 @@ use iced::widget::{
 };
 use iced::{Center, Color, Element, Fill, Length, Task, Theme};
 
+use crate::export::{DoneInfo, ExportOptions};
+use crate::file_io::{load_file, pick_file};
+
 fn main() -> iced::Result {
     let args: Vec<String> = std::env::args().collect();
 
     // Quick benchmark mode: `combat-scribe --bench <file>`
     if args.len() >= 3 && args[1] == "--bench" {
-        run_bench(&args[2]);
+        cli::run_bench(&args[2]);
         return Ok(());
     }
 
     // Debug session detection: `combat-scribe --debug-sessions <file>`
     if args.len() >= 3 && args[1] == "--debug-sessions" {
-        run_debug_sessions(&args[2]);
+        cli::run_debug_sessions(&args[2]);
         return Ok(());
     }
 
     // Debug wipe detection: `combat-scribe --debug-wipes <file> [session#]`
     if args.len() >= 3 && args[1] == "--debug-wipes" {
         let session_num = args.get(3).and_then(|s| s.parse::<usize>().ok());
-        run_debug_wipes(&args[2], session_num);
+        cli::run_debug_wipes(&args[2], session_num);
         return Ok(());
     }
 
@@ -61,235 +65,6 @@ fn main() -> iced::Result {
         })
 }
 
-fn run_bench(path: &str) {
-    use std::time::Instant;
-
-    let file_path = std::path::Path::new(path);
-    eprintln!("Reading file...");
-    let t0 = Instant::now();
-    let content = if is_zip_file(file_path) {
-        let bytes = fs::read(path).expect("read zip file");
-        read_text_from_zip_bytes(&bytes).expect("extract txt from zip")
-    } else {
-        fs::read_to_string(path).expect("read file")
-    };
-    let lines: Vec<String> = content.lines().map(str::to_string).collect();
-    let read_time = t0.elapsed();
-    eprintln!("  Read {} lines in {read_time:.2?}", lines.len());
-
-    eprintln!("Running formatter...");
-    let t1 = Instant::now();
-    let (formatted, player_names) = formatter::format_log(lines);
-    let fmt_time = t1.elapsed();
-    eprintln!(
-        "  Formatted {} lines in {fmt_time:.2?} ({} players: {})",
-        formatted.len(),
-        player_names.len(),
-        player_names.join(", ")
-    );
-
-    eprintln!("Running parser...");
-    let t2 = Instant::now();
-    let data = log_parser::parse_log(&formatted);
-    let parse_time = t2.elapsed();
-    eprintln!(
-        "  Parsed in {parse_time:.2?}: {} encounters, {} combatants, {} entries",
-        data.encounters.len(),
-        data.combatants.len(),
-        data.entries.len()
-    );
-
-    // Show boss encounters
-    for enc in &data.encounters {
-        if enc.is_boss {
-            let result = if enc.is_kill { "Kill" } else { "Wipe" };
-            let name = enc.name.as_deref().unwrap_or("Unknown");
-            eprintln!("  {name} - {result} - {:.0}s", enc.duration);
-        }
-    }
-
-    let total = t0.elapsed();
-    eprintln!("Total: {total:.2?}");
-}
-
-/// Debug session detection — prints session boundaries, line ranges, and per-session parse results.
-#[allow(clippy::too_many_lines)] // diagnostic output needs many prints
-fn run_debug_sessions(path: &str) {
-    let file_path = std::path::Path::new(path);
-    eprintln!("Reading file...");
-    let content = if is_zip_file(file_path) {
-        let bytes = fs::read(path).expect("read zip file");
-        read_text_from_zip_bytes(&bytes).expect("extract txt from zip")
-    } else {
-        fs::read_to_string(path).expect("read file")
-    };
-    let lines: Vec<String> = content.lines().map(str::to_string).collect();
-    eprintln!("  {} total lines in file\n", lines.len());
-
-    let sessions = parser::detect_sessions(&lines);
-    eprintln!("Detected {} sessions:\n", sessions.len());
-
-    // Print session details
-    for (i, s) in sessions.iter().enumerate() {
-        eprintln!("  Session {}: \"{}\"", i + 1, s.name);
-        eprintln!(
-            "    Scan window: lines {}..{} ({} lines)",
-            s.start_line,
-            s.end_line,
-            s.end_line.saturating_sub(s.start_line) + 1
-        );
-        eprintln!(
-            "    Time: {:.0}..{:.0} ({:.0}s)",
-            s.start_time, s.end_time, s.duration_secs
-        );
-        eprintln!("    Combat count: {}", s.combat_count);
-        if !s.you_players.is_empty() {
-            eprintln!("    You: {}", s.you_players.join(", "));
-        }
-        eprintln!();
-    }
-
-    // Parse each session and show details
-    for (i, session) in sessions.iter().enumerate() {
-        eprintln!("--- Session {} parse details ---", i + 1);
-        let session_lines = parser::extract_session_lines(&lines, session, &sessions);
-        eprintln!("  Extracted {} lines", session_lines.len());
-
-        let (formatted, player_names) = formatter::format_log(session_lines);
-        eprintln!(
-            "  Formatted {} lines, players: [{}]",
-            formatted.len(),
-            player_names.join(", ")
-        );
-
-        let data = log_parser::parse_log(&formatted);
-        eprintln!("  Zone: \"{}\"", data.zone_name);
-        eprintln!(
-            "  Combatants: {} (all: {})",
-            data.combatants.len(),
-            data.all_combatants.len()
-        );
-        if let Some((in_combat, total)) = data.raid_size {
-            eprintln!("  PLAYERS_IN_COMBAT: {in_combat}/{total}");
-        }
-        eprintln!("  Encounters: {}", data.encounters.len());
-
-        for enc in &data.encounters {
-            if enc.is_boss {
-                let result = if enc.is_kill { "Kill" } else { "Wipe" };
-                let name = enc.name.as_deref().unwrap_or("Unknown");
-                let attempt = enc.attempt.map_or(String::new(), |a| format!(" #{a}"));
-                let zone = enc.zone.as_deref().unwrap_or("?");
-                eprintln!(
-                    "    {name} - {result}{attempt} - {:.0}s [zone: {zone}]",
-                    enc.duration
-                );
-            }
-        }
-        let boss_count = data.encounters.iter().filter(|e| e.is_boss).count();
-        let trash_count = data.encounters.iter().filter(|e| !e.is_boss).count();
-        eprintln!("  Boss encounters: {boss_count}, Trash: {trash_count}");
-        eprintln!();
-    }
-}
-
-/// Debug encounter/wipe detection for a specific session.
-///
-/// Usage: `combat-scribe --debug-wipes <file> [session#]`
-///
-/// If no session number is given, uses the first raid session.
-/// Shows every encounter with timestamps, gap to previous, boss detection
-/// method, and merge decisions.
-#[allow(clippy::too_many_lines)] // diagnostic output
-fn run_debug_wipes(path: &str, session_num: Option<usize>) {
-    let file_path = std::path::Path::new(path);
-    eprintln!("Reading file...");
-    let content = if is_zip_file(file_path) {
-        let bytes = fs::read(path).expect("read zip file");
-        read_text_from_zip_bytes(&bytes).expect("extract txt from zip")
-    } else {
-        fs::read_to_string(path).expect("read file")
-    };
-    let lines: Vec<String> = content.lines().map(str::to_string).collect();
-
-    let sessions = parser::detect_sessions(&lines);
-    if sessions.is_empty() {
-        eprintln!("No sessions found.");
-        return;
-    }
-
-    // Pick session: user-specified or first with boss encounters
-    let idx = session_num.map_or(0, |n| n.saturating_sub(1));
-    if idx >= sessions.len() {
-        eprintln!("Session {idx} not found (have {} sessions)", sessions.len());
-        return;
-    }
-    let session = &sessions[idx];
-    eprintln!("Analyzing session {}: \"{}\"\n", idx + 1, session.name,);
-
-    let session_lines = parser::extract_session_lines(&lines, session, &sessions);
-    let (formatted, _) = formatter::format_log(session_lines);
-    let data = log_parser::parse_log(&formatted);
-
-    eprintln!(
-        "Zone: \"{}\", {} encounters ({} boss, {} trash)\n",
-        data.zone_name,
-        data.encounters.len(),
-        data.encounters.iter().filter(|e| e.is_boss).count(),
-        data.encounters.iter().filter(|e| !e.is_boss).count(),
-    );
-
-    let mut prev_end: Option<f64> = None;
-    for (i, enc) in data.encounters.iter().enumerate() {
-        let gap = prev_end.map_or_else(
-            || "  (first)".to_string(),
-            |pe| format!("  gap: {:.0}s from prev", enc.start - pe),
-        );
-
-        let result = if enc.is_kill { "KILL" } else { "WIPE" };
-        let boss_tag = if enc.is_boss { " [BOSS]" } else { "" };
-        let name = enc.name.as_deref().unwrap_or("(unnamed)");
-        let zone = enc.zone.as_deref().unwrap_or("?");
-        let attempt = enc.attempt.map_or(String::new(), |a| format!(" #{a}"));
-
-        eprintln!("  {:>3}. {name} — {result}{attempt}{boss_tag}", i + 1,);
-        eprintln!(
-            "       duration: {:.0}s, start: {:.0}, end: {:.0}",
-            enc.duration, enc.start, enc.end,
-        );
-        eprintln!(
-            "       zone: {zone}, deaths: {}/{} active{gap}",
-            enc.player_deaths, enc.active_players
-        );
-
-        // Check if this encounter should have merged with the previous one
-        if let Some(pe) = prev_end {
-            let gap_secs = enc.start - pe;
-            if enc.is_boss && gap_secs < 60.0 {
-                // Check if the previous encounter was the same boss
-                if i > 0 {
-                    let prev = &data.encounters[i - 1];
-                    if prev.is_boss {
-                        let same = prev
-                            .name
-                            .as_ref()
-                            .zip(enc.name.as_ref())
-                            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
-                        if same {
-                            eprintln!(
-                                "       *** SHOULD MERGE with prev (same boss, {gap_secs:.0}s gap < 60s) ***"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        prev_end = Some(enc.end);
-        eprintln!();
-    }
-}
-
 // ── Application State ───────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -302,29 +77,6 @@ enum AppState {
     Viewing(Box<viewer::ViewerState>),
     /// Error occurred.
     Error(String),
-}
-
-#[derive(Debug, Clone)]
-struct DoneInfo {
-    output_path: String,
-    player_names: Vec<String>,
-    line_count: usize,
-    zipped: bool,
-    zeroed: bool,
-}
-
-/// Options passed to the export pipeline.
-#[derive(Debug, Clone)]
-struct ExportOptions {
-    file_path: PathBuf,
-    create_zip: bool,
-    zero_log: bool,
-    rename_output: bool,
-    /// Session metadata for descriptive filename (empty when exporting entire log).
-    session_player_names: Vec<String>,
-    session_zone_name: String,
-    session_start_time: f64,
-    session_start_year: Option<i32>,
 }
 
 #[allow(clippy::struct_excessive_bools)] // export options are independent toggles
@@ -574,7 +326,7 @@ impl App {
                 };
 
                 Task::perform(
-                    async move { do_export(&lines, &sessions, selected.as_deref(), &opts) },
+                    async move { export::do_export(&lines, &sessions, selected.as_deref(), &opts) },
                     Message::ExportComplete,
                 )
             }
@@ -792,7 +544,7 @@ impl App {
             } else {
                 s.you_players.join("-")
             };
-            let raid_part = sanitize_zone_for_filename(&s.name);
+            let raid_part = export::sanitize_zone_for_filename(&s.name);
             let raid_part = if raid_part.is_empty() {
                 "Export".to_string()
             } else {
@@ -1006,201 +758,4 @@ fn primary_button_style(_theme: &iced::Theme, status: button::Status) -> button:
         },
         shadow: iced::Shadow::default(),
     }
-}
-
-// ── Async helpers ───────────────────────────────────────────────────────────
-
-async fn pick_file(start_dir: Option<PathBuf>) -> Option<PathBuf> {
-    let mut dialog = rfd::AsyncFileDialog::new()
-        .add_filter("Combat Log", &["txt", "zip"])
-        .add_filter("All Files", &["*"])
-        .set_title("Select WoW Combat Log");
-
-    if let Some(dir) = start_dir {
-        dialog = dialog.set_directory(dir);
-    }
-
-    dialog.pick_file().await.map(|f| f.path().to_path_buf())
-}
-
-async fn load_file(path: PathBuf) -> Result<Arc<Vec<String>>, String> {
-    let content = if is_zip_file(&path) {
-        // Read the raw bytes and extract the first .txt from the zip
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| format!("Failed to read zip file: {e}"))?;
-        read_text_from_zip_bytes(&bytes)?
-    } else {
-        tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| format!("Failed to read file: {e}"))?
-    };
-
-    let lines: Vec<String> = content.lines().map(str::to_string).collect();
-    Ok(Arc::new(lines))
-}
-
-/// Check if a path looks like a zip file (by extension).
-fn is_zip_file(path: &std::path::Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-}
-
-/// Extract the first `.txt` file from a zip archive's raw bytes.
-fn read_text_from_zip_bytes(bytes: &[u8]) -> Result<String, String> {
-    let cursor = std::io::Cursor::new(bytes);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open zip archive: {e}"))?;
-
-    // Find the first .txt entry
-    let txt_index = (0..archive.len())
-        .find(|&i| {
-            archive
-                .by_index(i)
-                .is_ok_and(|f| f.name().to_lowercase().ends_with(".txt"))
-        })
-        .ok_or_else(|| "No .txt file found inside zip archive".to_string())?;
-
-    let mut file = archive
-        .by_index(txt_index)
-        .map_err(|e| format!("Failed to read file from zip: {e}"))?;
-
-    let mut content = String::new();
-    file.read_to_string(&mut content)
-        .map_err(|e| format!("Failed to read text from zip entry '{}': {e}", file.name()))?;
-
-    Ok(content)
-}
-
-/// Strip session name qualifiers and make it filename-safe.
-///
-/// Removes trailing ` Full Clear`, ` (3/10)`, ` (wipes)` added by
-/// `finalize_sessions()`, then drops spaces and non-alphanumeric characters.
-fn sanitize_zone_for_filename(session_name: &str) -> String {
-    let base = session_name
-        .trim_end_matches(" Full Clear")
-        .split(" (")
-        .next()
-        .unwrap_or(session_name)
-        .trim();
-
-    base.chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect()
-}
-
-/// Export pipeline — runs synchronous I/O (no async needed).
-fn do_export(
-    all_lines: &[String],
-    sessions: &[parser::Session],
-    selected: Option<&str>,
-    opts: &ExportOptions,
-) -> Result<DoneInfo, String> {
-    // Determine which lines to process.
-    // Match selected name against all sessions (not just filtered names).
-    let lines_to_process = selected
-        .and_then(|sel| sessions.iter().position(|s| s.to_string() == sel))
-        .map_or_else(
-            || all_lines.to_vec(),
-            |idx| parser::extract_session_lines(all_lines, &sessions[idx], sessions),
-        );
-
-    // Format the log (takes ownership, applies all replacements)
-    let (formatted_lines, player_names) = formatter::format_log(lines_to_process);
-    let line_count = formatted_lines.len();
-
-    // Create backup of original file
-    let file_stem = opts
-        .file_path
-        .file_stem()
-        .map_or_else(|| "log".to_string(), |s| s.to_string_lossy().to_string());
-    let parent = opts
-        .file_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-
-    let timestamp = chrono::Local::now().format("%s").to_string();
-    let backup_name = format!("{file_stem}.original.{timestamp}.txt");
-    let backup_path = parent.join(&backup_name);
-
-    fs::copy(&opts.file_path, &backup_path).map_err(|e| format!("Failed to create backup: {e}"))?;
-
-    // Determine output filename
-    let output_path = if opts.rename_output {
-        let player_part = if opts.session_player_names.is_empty() {
-            "Unknown".to_string()
-        } else {
-            opts.session_player_names.join("-")
-        };
-
-        let raid_part = sanitize_zone_for_filename(&opts.session_zone_name);
-        let raid_part = if raid_part.is_empty() {
-            "Export".to_string()
-        } else {
-            raid_part
-        };
-
-        let date_part =
-            parser::date_from_session_timestamp(opts.session_start_time, opts.session_start_year);
-
-        parent.join(format!("{player_part}-{raid_part}-{date_part}-export.txt"))
-    } else {
-        opts.file_path.clone()
-    };
-
-    // Write formatted output
-    let content = formatted_lines.join("\n");
-    fs::write(&output_path, &content).map_err(|e| format!("Failed to write output: {e}"))?;
-
-    // Optionally create zip
-    let zipped = if opts.create_zip {
-        let zip_path = output_path.with_extension("txt.zip");
-        create_zip_file(&output_path, &zip_path, content.as_bytes())
-            .map_err(|e| format!("Failed to create zip: {e}"))?;
-        true
-    } else {
-        false
-    };
-
-    // Optionally zero the original log (File::create truncates to zero)
-    let zeroed = if opts.zero_log {
-        fs::File::create(&opts.file_path).map_err(|e| format!("Failed to zero log: {e}"))?;
-        true
-    } else {
-        false
-    };
-
-    Ok(DoneInfo {
-        output_path: output_path.display().to_string(),
-        player_names,
-        line_count,
-        zipped,
-        zeroed,
-    })
-}
-
-fn create_zip_file(
-    source: &std::path::Path,
-    zip_path: &std::path::Path,
-    content: &[u8],
-) -> Result<(), String> {
-    let file = fs::File::create(zip_path).map_err(|e| e.to_string())?;
-    let mut zip_writer = zip::ZipWriter::new(file);
-
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-
-    let source_name = source.file_name().map_or_else(
-        || "log.txt".to_string(),
-        |n| n.to_string_lossy().to_string(),
-    );
-
-    zip_writer
-        .start_file(&source_name, options)
-        .map_err(|e| e.to_string())?;
-
-    zip_writer.write_all(content).map_err(|e| e.to_string())?;
-    zip_writer.finish().map_err(|e| e.to_string())?;
-
-    Ok(())
 }
