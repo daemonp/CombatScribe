@@ -102,6 +102,14 @@ pub struct ViewerState {
     /// Hovered second offset on the aura chart (for tooltip).
     pub aura_hover_second: Option<f64>,
 
+    // Timeline zoom (click-drag to select a time range)
+    /// Drag start second (set on mouse-down, cleared on release).
+    pub zoom_drag_start: Option<f64>,
+    /// Current drag end second (updated on mouse-move while dragging).
+    pub zoom_drag_end: Option<f64>,
+    /// Committed zoom range — `Some((start, end))` when zoomed in.
+    pub zoom_range: Option<(f64, f64)>,
+
     // Detail overlay
     pub detail: Option<DetailView>,
 }
@@ -245,6 +253,14 @@ pub enum ViewerMessage {
     ApplyAuraPreset(usize),
     /// Clear all tracked auras.
     ClearAuras,
+    /// Begin a click-drag zoom selection at the given second.
+    ZoomDragStart(f64),
+    /// Update the drag endpoint as the cursor moves.
+    ZoomDragUpdate(f64),
+    /// Commit the zoom range on mouse release.
+    ZoomDragEnd(f64),
+    /// Reset zoom back to the full encounter.
+    ZoomReset,
     /// Request to load a new file (handled by App).
     LoadFile,
     /// Request to open the export modal (handled by App).
@@ -302,6 +318,9 @@ impl ViewerState {
             aura_picker_open: false,
             aura_search: String::new(),
             aura_hover_second: None,
+            zoom_drag_start: None,
+            zoom_drag_end: None,
+            zoom_range: None,
         }
     }
 
@@ -328,6 +347,9 @@ impl ViewerState {
                     .build_timeline(&self.encounter_filter, BIG_HIT_THRESHOLD);
                 self.timeline_hover = None;
                 self.timeline_clicked_second = None;
+                self.zoom_range = None;
+                self.zoom_drag_start = None;
+                self.zoom_drag_end = None;
                 self.timeline_cache.clear();
                 self.alive_cache.clear();
                 self.aura_cache.clear();
@@ -452,6 +474,41 @@ impl ViewerState {
             ViewerMessage::ClearAuras => {
                 self.tracked_auras.clear();
                 self.aura_cache.clear();
+            }
+            ViewerMessage::ZoomDragStart(second) => {
+                self.zoom_drag_start = Some(second);
+                self.zoom_drag_end = Some(second);
+            }
+            ViewerMessage::ZoomDragUpdate(second) => {
+                if self.zoom_drag_start.is_some() {
+                    self.zoom_drag_end = Some(second);
+                }
+            }
+            ViewerMessage::ZoomDragEnd(second) => {
+                if let Some(start) = self.zoom_drag_start {
+                    let end = second;
+                    let lo = start.min(end);
+                    let hi = start.max(end);
+                    // Only commit if the selection is at least 2 seconds wide
+                    if hi - lo >= 2.0 {
+                        self.zoom_range = Some((lo, hi));
+                        self.timeline_cache.clear();
+                        self.alive_cache.clear();
+                        self.aura_cache.clear();
+                        self.dispel_cache.clear();
+                    }
+                }
+                self.zoom_drag_start = None;
+                self.zoom_drag_end = None;
+            }
+            ViewerMessage::ZoomReset => {
+                self.zoom_range = None;
+                self.zoom_drag_start = None;
+                self.zoom_drag_end = None;
+                self.timeline_cache.clear();
+                self.alive_cache.clear();
+                self.aura_cache.clear();
+                self.dispel_cache.clear();
             }
             // These are intercepted and handled by App::update() in main.rs
             ViewerMessage::LoadFile
@@ -1448,12 +1505,69 @@ impl ViewerState {
         .spacing(8)
         .align_y(Center);
 
+        // ── Zoom info bar (shown when zoomed in) ────────────────────────
+        let zoom_bar: Element<ViewerMessage> = if let Some((lo, hi)) = self.zoom_range {
+            let range_text = format!(
+                "Zoomed: {} – {} ({:.0}s)",
+                format_encounter_time(lo),
+                format_encounter_time(hi),
+                hi - lo,
+            );
+            row![
+                text(range_text)
+                    .size(11)
+                    .color(Color::from_rgb8(100, 180, 255)),
+                horizontal_space(),
+                button(
+                    text("Reset Zoom")
+                        .size(10)
+                        .color(Color::from_rgb8(100, 180, 255))
+                )
+                .on_press(ViewerMessage::ZoomReset)
+                .padding([3, 8])
+                .style(|_theme: &iced::Theme, status| {
+                    let bg = match status {
+                        button::Status::Hovered => Some(iced::Background::Color(
+                            Color::from_rgba8(100, 180, 255, 0.2),
+                        )),
+                        _ => Some(iced::Background::Color(Color::from_rgba8(
+                            100, 180, 255, 0.08,
+                        ))),
+                    };
+                    button::Style {
+                        background: bg,
+                        text_color: Color::from_rgb8(100, 180, 255),
+                        border: iced::Border {
+                            radius: 4.0.into(),
+                            color: Color::from_rgba8(100, 180, 255, 0.4),
+                            width: 1.0,
+                        },
+                        shadow: iced::Shadow::default(),
+                    }
+                }),
+            ]
+            .spacing(8)
+            .align_y(Center)
+            .width(Fill)
+            .into()
+        } else {
+            column![].into()
+        };
+
         // ── Canvas sparkline chart ─────────────────────────────────────
+        // Build active drag tuple for highlight overlay
+        let active_drag = self
+            .zoom_drag_start
+            .zip(self.zoom_drag_end)
+            .map(|(s, e)| (s.min(e), s.max(e)));
+
         let chart_canvas = canvas::Canvas::new(TimelineChart {
             data: td,
             visibility: vis,
             shared_y: self.timeline_shared_y,
             hover_idx: self.timeline_hover,
+            drag: active_drag,
+            zoom: self.zoom_range,
         })
         .width(Fill)
         .height(220);
@@ -1469,9 +1583,12 @@ impl ViewerState {
             ]
             .width(Fill);
 
-            let alive_canvas = canvas::Canvas::new(AliveChart { data: td })
-                .width(Fill)
-                .height(40);
+            let alive_canvas = canvas::Canvas::new(AliveChart {
+                data: td,
+                zoom: self.zoom_range,
+            })
+            .width(Fill)
+            .height(40);
 
             column![alive_label, alive_canvas]
                 .spacing(4)
@@ -1735,6 +1852,7 @@ impl ViewerState {
                 data: td,
                 layout: aura_layout,
                 hover_second: self.aura_hover_second,
+                zoom: self.zoom_range,
             })
             .width(Fill)
             .height(chart_height);
@@ -1778,6 +1896,7 @@ impl ViewerState {
                     data: td,
                     combatants: &self.log_data.combatants,
                     hover_second: self.aura_hover_second,
+                    zoom: self.zoom_range,
                 })
                 .width(Fill)
                 .height(chart_height);
@@ -1806,6 +1925,7 @@ impl ViewerState {
             column![
                 header,
                 legend,
+                zoom_bar,
                 aura_picker,
                 horizontal_rule(1),
                 chart_canvas,
@@ -3377,6 +3497,10 @@ struct TimelineChart<'a> {
     visibility: &'a TimelineVisibility,
     shared_y: bool,
     hover_idx: Option<usize>,
+    /// Active drag selection `(start_second, end_second)` for highlight overlay.
+    drag: Option<(f64, f64)>,
+    /// Committed zoom range `(start_second, end_second)`.
+    zoom: Option<(f64, f64)>,
 }
 
 impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
@@ -3411,8 +3535,15 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
             Color::from_rgba8(0, 0, 0, 0.3),
         );
 
-        let n = td.buckets.len();
-        let x_scale = w / n.max(1) as f32;
+        let chart_w = (w - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
+
+        // Zoom: if a zoom range is active, scale to show only that window.
+        let (view_lo, view_hi) = self.zoom.map_or((0.0_f32, td.duration as f32), |(lo, hi)| {
+            (lo as f32, hi as f32)
+        });
+        let view_span = (view_hi - view_lo).max(0.001);
+        let x_scale = chart_w / view_span;
+        let x_offset = CHART_LEFT_MARGIN - view_lo * x_scale;
 
         // Compute Y-axis maximums
         let shared_max = td
@@ -3450,6 +3581,7 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
                 &td.buckets,
                 &|b| b.damage,
                 x_scale,
+                x_offset,
                 h,
                 dps_max,
                 theme::TIMELINE_DPS,
@@ -3461,6 +3593,7 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
                 &td.buckets,
                 &|b| b.boss_healing,
                 x_scale,
+                x_offset,
                 h,
                 boss_hps_max,
                 theme::TIMELINE_BOSS_HEAL,
@@ -3472,6 +3605,7 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
                 &td.buckets,
                 &|b| b.healing,
                 x_scale,
+                x_offset,
                 h,
                 hps_max,
                 theme::TIMELINE_HPS,
@@ -3483,6 +3617,7 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
                 &td.buckets,
                 &|b| b.damage_taken,
                 x_scale,
+                x_offset,
                 h,
                 dtps_max,
                 theme::TIMELINE_DTPS,
@@ -3499,7 +3634,7 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
             if !visible {
                 continue;
             }
-            let x = (event.offset as f32 / td.duration as f32) * w;
+            let x = x_offset + event.offset as f32 * x_scale;
             let marker_color = match event.kind {
                 TimelineEventKind::Death => theme::TIMELINE_DEATH,
                 TimelineEventKind::BigHit => theme::TIMELINE_BIG_HIT,
@@ -3525,7 +3660,7 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
 
         // Hover line
         if let Some(idx) = self.hover_idx {
-            let x = (idx as f32 + 0.5) * x_scale;
+            let x = x_offset + (idx as f32 + 0.5) * x_scale;
             let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
             frame.stroke(
                 &line,
@@ -3572,17 +3707,22 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
         }
 
         // X-axis time labels
-        let label_interval = if td.duration > 300.0 {
+        let view_duration = f64::from(view_span);
+        let label_interval = if view_duration > 300.0 {
             60.0
-        } else if td.duration > 120.0 {
+        } else if view_duration > 120.0 {
             30.0
-        } else {
+        } else if view_duration > 30.0 {
             15.0
+        } else {
+            5.0
         };
 
-        let mut t = 0.0;
-        while t < td.duration {
-            let x = (t as f32 / td.duration as f32) * w;
+        // Start labels from the first whole interval at or after view_lo
+        let t_start = (f64::from(view_lo) / label_interval).ceil() * label_interval;
+        let mut t = t_start;
+        while t < f64::from(view_hi) {
+            let x = x_offset + t as f32 * x_scale;
             let label_text = format_encounter_time(t);
             frame.fill_text(canvas::Text {
                 content: label_text,
@@ -3597,6 +3737,31 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
             t += label_interval;
         }
 
+        // ── Drag selection highlight ────────────────────────────────────
+        if let Some((drag_lo, drag_hi)) = self.drag {
+            let x_lo = x_offset + drag_lo as f32 * x_scale;
+            let x_hi = x_offset + drag_hi as f32 * x_scale;
+            let sel_x = x_lo.max(CHART_LEFT_MARGIN);
+            let sel_w = (x_hi - x_lo).abs().min(chart_w);
+            frame.fill_rectangle(
+                Point::new(sel_x, 0.0),
+                iced::Size::new(sel_w, h),
+                Color::from_rgba8(100, 180, 255, 0.15),
+            );
+            // Selection border lines
+            for &edge_x in &[x_lo, x_hi] {
+                if edge_x >= CHART_LEFT_MARGIN && edge_x <= CHART_LEFT_MARGIN + chart_w {
+                    let edge = canvas::Path::line(Point::new(edge_x, 0.0), Point::new(edge_x, h));
+                    frame.stroke(
+                        &edge,
+                        canvas::Stroke::default()
+                            .with_color(Color::from_rgba8(100, 180, 255, 0.7))
+                            .with_width(1.0),
+                    );
+                }
+            }
+        }
+
         vec![frame.into_geometry()]
     }
 
@@ -3607,17 +3772,34 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> (canvas::event::Status, Option<ViewerMessage>) {
+        let td = self.data;
+        let chart_w = (bounds.width - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
+        let (view_lo, view_hi) = self.zoom.map_or((0.0, td.duration), |(lo, hi)| (lo, hi));
+        let view_span = (view_hi - view_lo).max(0.001);
+
+        // Convert pixel x → seconds within the current view
+        let px_to_second = |px: f32| -> f64 {
+            let frac = f64::from((px - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0);
+            view_lo + frac * view_span
+        };
+
         match event {
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if let Some(pos) = cursor.position_in(bounds) {
-                    let n = self.data.buckets.len();
+                    let second = px_to_second(pos.x);
+                    let n = td.buckets.len();
                     if n > 0 {
-                        let x_scale = bounds.width / n as f32;
-                        let idx = (pos.x / x_scale) as usize;
-                        let clamped = idx.min(n.saturating_sub(1));
+                        let idx = (second.floor() as usize).min(n.saturating_sub(1));
+                        // If dragging, update the drag endpoint
+                        if self.drag.is_some() {
+                            return (
+                                canvas::event::Status::Captured,
+                                Some(ViewerMessage::ZoomDragUpdate(second)),
+                            );
+                        }
                         return (
                             canvas::event::Status::Captured,
-                            Some(ViewerMessage::TimelineHover(Some(clamped))),
+                            Some(ViewerMessage::TimelineHover(Some(idx))),
                         );
                     }
                 } else {
@@ -3629,16 +3811,20 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
             }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(pos) = cursor.position_in(bounds) {
-                    let n = self.data.buckets.len();
-                    if n > 0 {
-                        let x_scale = bounds.width / n as f32;
-                        let idx = (pos.x / x_scale) as usize;
-                        let clamped = idx.min(n.saturating_sub(1));
-                        return (
-                            canvas::event::Status::Captured,
-                            Some(ViewerMessage::TimelineClick(clamped)),
-                        );
-                    }
+                    let second = px_to_second(pos.x);
+                    return (
+                        canvas::event::Status::Captured,
+                        Some(ViewerMessage::ZoomDragStart(second)),
+                    );
+                }
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    let second = px_to_second(pos.x);
+                    return (
+                        canvas::event::Status::Captured,
+                        Some(ViewerMessage::ZoomDragEnd(second)),
+                    );
                 }
             }
             _ => {}
@@ -3647,15 +3833,23 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
     }
 }
 
+/// Left margin reserved for labels across all timeline charts.
+const CHART_LEFT_MARGIN: f32 = 80.0;
+/// Right margin reserved for count labels across all timeline charts.
+const CHART_RIGHT_MARGIN: f32 = 30.0;
+
 /// Draw a single filled sparkline area on the frame.
 ///
 /// Builds a closed path from the bucket values, fills with semi-transparent
-/// color, then strokes the top edge with a solid line.
+/// color, then strokes the top edge with a solid line. Data is drawn within
+/// `[x_offset .. x_offset + chart_w]` to align with shared chart margins.
+#[allow(clippy::too_many_arguments)] // Drawing helper — x_offset needed for chart margin alignment
 fn draw_sparkline_area(
     frame: &mut canvas::Frame,
     buckets: &[crate::log_data::TimelineBucket],
     get_val: &dyn Fn(&crate::log_data::TimelineBucket) -> u64,
     x_scale: f32,
+    x_offset: f32,
     height: f32,
     y_max: f32,
     color: Color,
@@ -3667,7 +3861,7 @@ fn draw_sparkline_area(
     // Build the line path (top edge)
     let line_path = canvas::Path::new(|b| {
         for (i, bucket) in buckets.iter().enumerate() {
-            let x = (i as f32 + 0.5) * x_scale;
+            let x = x_offset + (i as f32 + 0.5) * x_scale;
             let val = get_val(bucket) as f32;
             let y = height - (val / y_max) * height;
             if i == 0 {
@@ -3681,17 +3875,17 @@ fn draw_sparkline_area(
     // Build the filled area path (line + close back to baseline)
     let area_path = canvas::Path::new(|b| {
         // Start at bottom-left
-        b.move_to(Point::new(0.5 * x_scale, height));
+        b.move_to(Point::new(x_offset + 0.5 * x_scale, height));
 
         for (i, bucket) in buckets.iter().enumerate() {
-            let x = (i as f32 + 0.5) * x_scale;
+            let x = x_offset + (i as f32 + 0.5) * x_scale;
             let val = get_val(bucket) as f32;
             let y = height - (val / y_max) * height;
             b.line_to(Point::new(x, y));
         }
 
         // Close back to bottom-right
-        let last_x = ((buckets.len() - 1) as f32 + 0.5) * x_scale;
+        let last_x = x_offset + ((buckets.len() - 1) as f32 + 0.5) * x_scale;
         b.line_to(Point::new(last_x, height));
         b.close();
     });
@@ -3712,6 +3906,7 @@ fn draw_sparkline_area(
 /// Canvas program for the alive-count sparkline below the main chart.
 struct AliveChart<'a> {
     data: &'a TimelineData,
+    zoom: Option<(f64, f64)>,
 }
 
 impl canvas::Program<ViewerMessage> for AliveChart<'_> {
@@ -3744,18 +3939,24 @@ impl canvas::Program<ViewerMessage> for AliveChart<'_> {
         );
 
         let n = td.buckets.len();
-        let x_scale = w / n.max(1) as f32;
+        let chart_w = (w - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
+        let (view_lo, view_hi) = self
+            .zoom
+            .map_or((0.0_f32, n as f32), |(lo, hi)| (lo as f32, hi as f32));
+        let view_span = (view_hi - view_lo).max(0.001);
+        let x_scale = chart_w / view_span;
+        let x_offset = CHART_LEFT_MARGIN - view_lo * x_scale;
         let y_max = td.raid_count.max(1) as f32;
 
         // Filled area
         let area_path = canvas::Path::new(|b| {
-            b.move_to(Point::new(0.5 * x_scale, h));
+            b.move_to(Point::new(x_offset + 0.5 * x_scale, h));
             for (i, bucket) in td.buckets.iter().enumerate() {
-                let x = (i as f32 + 0.5) * x_scale;
+                let x = x_offset + (i as f32 + 0.5) * x_scale;
                 let y = h - (bucket.alive_count as f32 / y_max) * h;
                 b.line_to(Point::new(x, y));
             }
-            let last_x = ((n - 1) as f32 + 0.5) * x_scale;
+            let last_x = x_offset + ((n - 1) as f32 + 0.5) * x_scale;
             b.line_to(Point::new(last_x, h));
             b.close();
         });
@@ -3771,7 +3972,7 @@ impl canvas::Program<ViewerMessage> for AliveChart<'_> {
         // Stroke line
         let line_path = canvas::Path::new(|b| {
             for (i, bucket) in td.buckets.iter().enumerate() {
-                let x = (i as f32 + 0.5) * x_scale;
+                let x = x_offset + (i as f32 + 0.5) * x_scale;
                 let y = h - (bucket.alive_count as f32 / y_max) * h;
                 if i == 0 {
                     b.move_to(Point::new(x, y));
@@ -3805,6 +4006,7 @@ struct DispelChart<'a> {
     data: &'a TimelineData,
     combatants: &'a HashMap<String, Combatant>,
     hover_second: Option<f64>,
+    zoom: Option<(f64, f64)>,
 }
 
 /// Draw a small diamond marker on the canvas at (`cx`, `cy`) with the given
@@ -3854,10 +4056,9 @@ impl canvas::Program<ViewerMessage> for DispelChart<'_> {
             Color::from_rgba8(0, 0, 0, 0.2),
         );
 
-        // Reserve margins: left for player names, right for count labels.
-        let left_margin: f32 = 80.0;
-        let right_margin: f32 = 30.0;
-        let chart_w = (w - left_margin - right_margin).max(1.0);
+        let chart_w = (w - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
+        let (view_lo, view_hi) = self.zoom.map_or((0.0, td.duration), |(lo, hi)| (lo, hi));
+        let view_span = (view_hi - view_lo).max(0.001) as f32;
 
         for (lane_idx, caster) in td.dispel_casters.iter().enumerate() {
             let lane_y = lane_idx as f32 * DISPEL_LANE_HEIGHT;
@@ -3897,7 +4098,8 @@ impl canvas::Program<ViewerMessage> for DispelChart<'_> {
             for mark in &td.dispel_marks {
                 if mark.caster == *caster {
                     count += 1;
-                    let x = left_margin + (mark.offset as f32 / td.duration as f32) * chart_w;
+                    let x = CHART_LEFT_MARGIN
+                        + ((mark.offset as f32 - view_lo as f32) / view_span) * chart_w;
                     draw_diamond(&mut frame, x, lane_center_y, 3.0, class_color);
                 }
             }
@@ -3905,7 +4107,7 @@ impl canvas::Program<ViewerMessage> for DispelChart<'_> {
             // Count label on the right edge
             frame.fill_text(canvas::Text {
                 content: count.to_string(),
-                position: Point::new(w - right_margin + 6.0, lane_y + 2.0),
+                position: Point::new(w - CHART_RIGHT_MARGIN + 6.0, lane_y + 2.0),
                 color: Color {
                     a: 0.6,
                     ..class_color
@@ -3917,8 +4119,8 @@ impl canvas::Program<ViewerMessage> for DispelChart<'_> {
 
         // Hover line (shared time cursor with aura chart)
         if let Some(second) = self.hover_second {
-            let x = left_margin + (second as f32 / td.duration as f32) * chart_w;
-            if x >= left_margin && x <= left_margin + chart_w {
+            let x = CHART_LEFT_MARGIN + ((second as f32 - view_lo as f32) / view_span) * chart_w;
+            if x >= CHART_LEFT_MARGIN && x <= CHART_LEFT_MARGIN + chart_w {
                 let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
                 frame.stroke(
                     &line,
@@ -3939,16 +4141,18 @@ impl canvas::Program<ViewerMessage> for DispelChart<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> (canvas::event::Status, Option<ViewerMessage>) {
-        // Match the same margins used in draw() for mouse→time mapping.
-        let left_margin: f32 = 80.0;
-        let right_margin: f32 = 30.0;
-        let chart_w = (bounds.width - left_margin - right_margin).max(1.0);
+        let chart_w = (bounds.width - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
+        let (view_lo, view_hi) = self
+            .zoom
+            .map_or((0.0, self.data.duration), |(lo, hi)| (lo, hi));
+        let view_span = (view_hi - view_lo).max(0.001);
         match event {
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if let Some(pos) = cursor.position_in(bounds) {
                     if self.data.duration > 0.0 {
-                        let second = f64::from((pos.x - left_margin) / chart_w).clamp(0.0, 1.0)
-                            * self.data.duration;
+                        let second = view_lo
+                            + f64::from((pos.x - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0)
+                                * view_span;
                         return (
                             canvas::event::Status::Captured,
                             Some(ViewerMessage::AuraHover(Some(second))),
@@ -3985,6 +4189,7 @@ struct AuraChart<'a> {
     /// Pre-computed layout: (`aura_name`, color, players) in display order.
     layout: Vec<AuraLaneGroup<'a>>,
     hover_second: Option<f64>,
+    zoom: Option<(f64, f64)>,
 }
 
 /// A group of player lanes for one aura.
@@ -4075,6 +4280,10 @@ impl canvas::Program<ViewerMessage> for AuraChart<'_> {
             Color::from_rgba8(0, 0, 0, 0.2),
         );
 
+        let aura_chart_w = (w - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
+        let (view_lo, view_hi) = self.zoom.map_or((0.0, td.duration), |(lo, hi)| (lo, hi));
+        let view_span = (view_hi - view_lo).max(0.001) as f32;
+
         let mut y_cursor: f32 = 0.0;
 
         for group in &self.layout {
@@ -4128,8 +4337,10 @@ impl canvas::Program<ViewerMessage> for AuraChart<'_> {
 
                     // Draw bars for this player's intervals
                     for interval in intervals.iter().filter(|iv| iv.player == player) {
-                        let x_start = (interval.start as f32 / td.duration as f32) * w;
-                        let x_end = (interval.end as f32 / td.duration as f32) * w;
+                        let x_start = CHART_LEFT_MARGIN
+                            + ((interval.start as f32 - view_lo as f32) / view_span) * aura_chart_w;
+                        let x_end = CHART_LEFT_MARGIN
+                            + ((interval.end as f32 - view_lo as f32) / view_span) * aura_chart_w;
                         let bar_w = (x_end - x_start).max(2.0);
 
                         // Filled bar
@@ -4159,7 +4370,8 @@ impl canvas::Program<ViewerMessage> for AuraChart<'_> {
 
         // Hover line (shared time cursor with main chart)
         if let Some(second) = self.hover_second {
-            let x = (second as f32 / td.duration as f32) * w;
+            let x =
+                CHART_LEFT_MARGIN + ((second as f32 - view_lo as f32) / view_span) * aura_chart_w;
             let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
             frame.stroke(
                 &line,
@@ -4179,11 +4391,18 @@ impl canvas::Program<ViewerMessage> for AuraChart<'_> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> (canvas::event::Status, Option<ViewerMessage>) {
+        let chart_w = (bounds.width - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
+        let (view_lo, view_hi) = self
+            .zoom
+            .map_or((0.0, self.data.duration), |(lo, hi)| (lo, hi));
+        let view_span = (view_hi - view_lo).max(0.001);
         match event {
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if let Some(pos) = cursor.position_in(bounds) {
                     if self.data.duration > 0.0 {
-                        let second = f64::from(pos.x / bounds.width) * self.data.duration;
+                        let second = view_lo
+                            + f64::from((pos.x - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0)
+                                * view_span;
                         return (
                             canvas::event::Status::Captured,
                             Some(ViewerMessage::AuraHover(Some(second))),
@@ -4199,8 +4418,9 @@ impl canvas::Program<ViewerMessage> for AuraChart<'_> {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(pos) = cursor.position_in(bounds) {
                     if self.data.duration > 0.0 {
-                        let second =
-                            (f64::from(pos.x / bounds.width) * self.data.duration) as usize;
+                        let second = (view_lo
+                            + f64::from((pos.x - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0)
+                                * view_span) as usize;
                         return (
                             canvas::event::Status::Captured,
                             Some(ViewerMessage::TimelineClick(second)),
