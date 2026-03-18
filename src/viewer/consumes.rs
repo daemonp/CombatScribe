@@ -1,4 +1,4 @@
-//! Consumes tab: per-player consumable breakdown and encounter matrix.
+//! Consumes tab: raid overview, per-player breakdown, and encounter matrix.
 
 #[allow(clippy::wildcard_imports)]
 // viewer UI — many shared component functions used throughout
@@ -24,6 +24,7 @@ struct MatrixRow {
 impl ViewerState {
     pub(super) fn view_consumes_tab(&self) -> Element<'_, ViewerMessage> {
         let modes = vec![
+            ConsumesViewMode::RaidOverview,
             ConsumesViewMode::PlayerBreakdown,
             ConsumesViewMode::EncounterMatrix,
         ];
@@ -45,6 +46,7 @@ impl ViewerState {
         .align_y(Center);
 
         let content = match self.consumes_mode {
+            ConsumesViewMode::RaidOverview => self.view_raid_overview(&consumables),
             ConsumesViewMode::PlayerBreakdown => self.view_player_breakdown(&consumables),
             ConsumesViewMode::EncounterMatrix => self.view_encounter_matrix(&consumables),
         };
@@ -61,6 +63,154 @@ impl ViewerState {
         )
         .height(Fill)
         .into()
+    }
+
+    // ── Raid Overview View ──────────────────────────────────────────────
+
+    /// Raid-wide per-player expandable list: each player's consumables grouped
+    /// by category, sorted by total usage descending. Click a player header to
+    /// expand/collapse their consumable list.
+    #[allow(clippy::too_many_lines)] // iced UI layout — per-player expandable list with category sections
+    fn view_raid_overview<'a>(
+        &'a self,
+        consumables: &[&log_data::ConsumableUse],
+    ) -> Element<'a, ViewerMessage> {
+        if consumables.is_empty() {
+            return empty_state("No consumable usage recorded");
+        }
+
+        // Aggregate: player → category → item → count
+        let mut player_data: HashMap<&str, HashMap<ConsumableCategory, HashMap<&str, u64>>> =
+            HashMap::new();
+        for c in consumables {
+            if self.log_data.combatants.contains_key(c.player.as_str()) {
+                *player_data
+                    .entry(&c.player)
+                    .or_default()
+                    .entry(c.category)
+                    .or_default()
+                    .entry(&c.consumable)
+                    .or_insert(0) += 1;
+            }
+        }
+
+        if player_data.is_empty() {
+            return empty_state("No consumable usage recorded");
+        }
+
+        // Sort players by total consumable count descending
+        let mut player_totals: Vec<(&str, u64)> = player_data
+            .iter()
+            .map(|(&player, cats)| {
+                let total: u64 = cats.values().flat_map(HashMap::values).sum();
+                (player, total)
+            })
+            .collect();
+        player_totals.sort_by_key(|p| std::cmp::Reverse(p.1));
+
+        let mut content = Column::new().spacing(4);
+
+        for &(player, total) in &player_totals {
+            let class = self.log_data.player_class(player);
+            let class_color = theme::class_color(class);
+            let is_collapsed = self.collapsed_consume_players.contains(player);
+
+            // Player header row: icon + name + total + expand/collapse indicator
+            let icon = image(theme::class_icon(class)).width(20).height(20);
+            let arrow = if is_collapsed { "\u{25B6}" } else { "\u{25BC}" }; // ▶ or ▼
+
+            let player_header: Element<ViewerMessage> = row![
+                icon,
+                text(player.to_string()).size(13).color(class_color),
+                Space::new().width(Fill),
+                text(format!("{total} uses"))
+                    .size(12)
+                    .color(theme::TEXT_SECONDARY),
+                text(arrow).size(10).color(theme::TEXT_MUTED),
+            ]
+            .spacing(6)
+            .align_y(Center)
+            .width(Fill)
+            .into();
+
+            let header_btn = button(player_header)
+                .on_press(ViewerMessage::ToggleConsumePlayer(player.to_string()))
+                .padding([6, 8])
+                .width(Fill)
+                .style(player_header_button_style);
+
+            content = content.push(header_btn);
+
+            // If expanded, show consumables grouped by category
+            if !is_collapsed && let Some(cats) = player_data.get(player) {
+                let mut sorted_cats: Vec<ConsumableCategory> = cats.keys().copied().collect();
+                sorted_cats.sort();
+
+                let mut items_col = Column::new().spacing(1);
+
+                for cat in &sorted_cats {
+                    let cat_color = theme::consumable_category_color(*cat);
+                    let items = &cats[cat];
+
+                    // Sort items by count descending
+                    let mut sorted_items: Vec<(&str, u64)> =
+                        items.iter().map(|(&name, &count)| (name, count)).collect();
+                    sorted_items.sort_by_key(|i| std::cmp::Reverse(i.1));
+
+                    let cat_total: u64 = sorted_items.iter().map(|(_, c)| *c).sum();
+
+                    // Category sub-header
+                    let dot: Element<ViewerMessage> = container("")
+                        .width(6)
+                        .height(6)
+                        .style(move |_theme: &iced::Theme| container::Style {
+                            background: Some(iced::Background::Color(cat_color)),
+                            border: iced::Border {
+                                radius: 3.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .into();
+
+                    items_col = items_col.push(
+                        row![
+                            Space::new().width(28), // indent past icon
+                            dot,
+                            text(cat.to_string()).size(11).color(cat_color),
+                            text(format!("({cat_total})"))
+                                .size(10)
+                                .color(theme::TEXT_MUTED),
+                        ]
+                        .spacing(4)
+                        .align_y(Center),
+                    );
+
+                    // Item rows
+                    for (name, count) in &sorted_items {
+                        items_col = items_col.push(
+                            row![
+                                Space::new().width(44), // indent past icon + dot
+                                text((*name).to_string())
+                                    .size(11)
+                                    .color(Color::from_rgb8(200, 205, 210))
+                                    .width(Length::FillPortion(4)),
+                                text(count.to_string())
+                                    .size(11)
+                                    .color(theme::TEXT_SECONDARY)
+                                    .width(Length::FillPortion(1)),
+                            ]
+                            .spacing(4),
+                        );
+                    }
+                }
+
+                content = content.push(items_col);
+                content = content.push(Space::new().height(4));
+            }
+        }
+
+        content.width(Fill).into()
     }
 
     // ── Player Breakdown View ───────────────────────────────────────────
@@ -263,5 +413,25 @@ fn category_short_label(cat: ConsumableCategory) -> &'static str {
         ConsumableCategory::Bandage => "Band.",
         ConsumableCategory::Utility => "Util.",
         ConsumableCategory::Other => "Other",
+    }
+}
+
+/// Button style for player headers in the raid overview — subtle background
+/// with a slightly more visible hover state than transparent buttons.
+fn player_header_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 0.08),
+        _ => Color::from_rgba(1.0, 1.0, 1.0, 0.03),
+    };
+    button::Style {
+        background: Some(iced::Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: iced::Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.05),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        snap: true,
     }
 }

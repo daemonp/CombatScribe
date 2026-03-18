@@ -79,6 +79,8 @@ pub struct ViewerState {
 
     // Consumes tab
     pub consumes_mode: ConsumesViewMode,
+    /// Players whose consumable list is collapsed in Raid Overview mode.
+    pub collapsed_consume_players: HashSet<String>,
 
     // Death Log tab
     pub death_log_mode: death_log::DeathLogMode,
@@ -292,7 +294,9 @@ impl std::fmt::Display for DeathSubType {
 /// View mode for the Consumes tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsumesViewMode {
-    /// Per-player ranked list (default).
+    /// Raid-wide per-player expandable list with category grouping (default).
+    RaidOverview,
+    /// Per-player ranked bar chart by total uses.
     PlayerBreakdown,
     /// Players x categories per encounter.
     EncounterMatrix,
@@ -301,6 +305,7 @@ pub enum ConsumesViewMode {
 impl std::fmt::Display for ConsumesViewMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RaidOverview => write!(f, "Raid Overview"),
             Self::PlayerBreakdown => write!(f, "Player Breakdown"),
             Self::EncounterMatrix => write!(f, "Encounter Matrix"),
         }
@@ -338,6 +343,8 @@ pub enum ViewerMessage {
     SetDispelType(DispelSubType),
     SetDeathType(DeathSubType),
     SetConsumesMode(ConsumesViewMode),
+    /// Toggle expand/collapse for a player in the Consumes raid overview.
+    ToggleConsumePlayer(String),
     ShowDetail(String, DetailType),
     CloseDetail,
     SetLootSearch(String),
@@ -427,7 +434,8 @@ impl ViewerState {
             view_prefs_dirty: false,
             dispel_type: DispelSubType::Dispels,
             death_type: DeathSubType::Deaths,
-            consumes_mode: ConsumesViewMode::PlayerBreakdown,
+            consumes_mode: ConsumesViewMode::RaidOverview,
+            collapsed_consume_players: HashSet::new(),
             death_log_mode: death_log::DeathLogMode::PlayerDeaths,
             loot_search: String::new(),
             collapsed_bosses: HashSet::new(),
@@ -508,6 +516,13 @@ impl ViewerState {
             ViewerMessage::SetDispelType(dt) => self.dispel_type = dt,
             ViewerMessage::SetDeathType(dt) => self.death_type = dt,
             ViewerMessage::SetConsumesMode(mode) => self.consumes_mode = mode,
+            ViewerMessage::ToggleConsumePlayer(name) => {
+                if self.collapsed_consume_players.contains(&name) {
+                    self.collapsed_consume_players.remove(&name);
+                } else {
+                    self.collapsed_consume_players.insert(name);
+                }
+            }
             ViewerMessage::SetDeathTabFilter(m) => self.death_log_mode = m,
             ViewerMessage::ShowDetail(name, dtype) => {
                 self.detail = Some(DetailView {
