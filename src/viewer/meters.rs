@@ -217,10 +217,12 @@ impl ViewerState {
                 0.0
             };
 
+            let eff_ps = per_second(player.effective, duration);
             let value_text = format!(
-                "{} eff ({} oh {player_oh_pct:.1}%)",
+                "{} eff ({} oh {player_oh_pct:.1}%) - {}/s",
                 theme::format_number(player.effective),
                 theme::format_number(player.overheal),
+                theme::format_number_f64(eff_ps),
             );
 
             let class_str = player.class.clone();

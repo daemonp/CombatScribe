@@ -478,17 +478,7 @@ impl ViewerState {
                 ..Default::default()
             });
 
-            // Float the picker over the chart — clamp so it stays on screen
-            float(picker_content)
-                .translate(|bounds, viewport| {
-                    let x: f32 = 0.0;
-                    let y: f32 = bounds.height;
-                    // Keep the dropdown on screen
-                    let max_x = viewport.width - 300.0;
-                    let max_y = viewport.height - bounds.y - 360.0;
-                    iced::Vector::new(x.min(max_x).max(0.0), y.min(max_y).max(0.0))
-                })
-                .into()
+            picker_content.into()
         } else {
             column![].into()
         };
@@ -625,24 +615,38 @@ impl ViewerState {
                 .width(Fill)
                 .into();
 
-        let charts_panel = container(
-            column![
-                header,
-                legend,
-                zoom_bar,
-                aura_picker,
-                rule::horizontal(1),
-                chart_canvas,
-                tooltip,
-                rule::horizontal(1),
-                tracker_panel,
-            ]
-            .spacing(6)
-            .width(Fill),
-        )
-        .padding(12)
-        .width(Fill)
-        .style(panel_style);
+        // Build the main chart column without the aura picker inline.
+        // The picker is overlaid via a Stack so it doesn't consume layout space.
+        let charts_col = column![
+            header,
+            legend,
+            zoom_bar,
+            rule::horizontal(1),
+            chart_canvas,
+            tooltip,
+            rule::horizontal(1),
+            tracker_panel,
+        ]
+        .spacing(6)
+        .width(Fill);
+
+        // Layer the aura picker dropdown on top of the chart area.
+        // The picker is positioned below the legend row (~55px from top of panel).
+        let charts_stack: Element<ViewerMessage> = if self.aura_picker_open {
+            let picker_layer = container(aura_picker)
+                .padding(iced::Padding::from([55.0, 0.0]))
+                .width(Fill);
+            iced::widget::stack![charts_col, picker_layer]
+                .width(Fill)
+                .into()
+        } else {
+            charts_col.into()
+        };
+
+        let charts_panel = container(charts_stack)
+            .padding(12)
+            .width(Fill)
+            .style(panel_style);
 
         // ── Event log filter bar ────────────────────────────────────────
         let mode_buttons: Element<ViewerMessage> = {

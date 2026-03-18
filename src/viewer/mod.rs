@@ -23,8 +23,8 @@ mod meters;
 mod timeline;
 
 use iced::widget::{
-    Column, Row, Space, button, canvas, column, container, float, image, pick_list, row, rule,
-    scrollable, text, text_input, tooltip,
+    Column, Row, Space, button, canvas, column, container, image, pick_list, row, rule, scrollable,
+    text, text_input, tooltip,
 };
 use iced::{Center, Color, Element, Fill, Length};
 use std::cmp::Reverse;
