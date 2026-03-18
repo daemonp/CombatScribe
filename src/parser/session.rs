@@ -426,20 +426,23 @@ fn finalize_sessions(sessions: Vec<SessionBuilder>) -> Vec<Session> {
                 zone_info
             };
 
-            // Karazhan disambiguation: the "karazhan" zone alias defaults to
-            // "lower karazhan", but the older addon sends bare "Karazhan" for
-            // both Lower (map 532) and Upper (map 814).  When no boss kills
-            // confirm the instance, use NPC deaths to disambiguate — the trash
-            // mob lists are completely disjoint between Lower and Upper Kara.
-            let zone = if zone == "lower karazhan" && boss_zone.is_none() {
-                if s.npc_raid_zones.contains("upper karazhan") {
-                    "upper karazhan"
+            // Karazhan disambiguation: The addon reports both Lower and Upper
+            // Karazhan with ambiguous zone names ("Karazhan" or "Tower of Karazhan").
+            // When no boss kills confirm the instance, use NPC deaths to disambiguate
+            // — the trash mob lists are completely disjoint between Lower and Upper.
+            let zone =
+                if (zone == "lower karazhan" || zone == "upper karazhan") && boss_zone.is_none() {
+                    if s.npc_raid_zones.contains("lower karazhan") {
+                        "lower karazhan"
+                    } else if s.npc_raid_zones.contains("upper karazhan") {
+                        "upper karazhan"
+                    } else {
+                        // No NPC evidence either way — trust the zone alias default
+                        zone
+                    }
                 } else {
                     zone
-                }
-            } else {
-                zone
-            };
+                };
 
             let zone_display = raid_data::format_zone_name(zone);
 

@@ -61,6 +61,14 @@ Filter by **All Combat**, **All Kills**, **All Wipes**, **Trash**, or any indivi
 
 The export pipeline cleans raw logs for upload: resolves "You/Your" to your character name, attributes pet and totem damage to owners, normalizes apostrophes, annotates self-damage, and fixes loot formatting. Optionally compresses to `.zip` and can zero the original log file after export.
 
+**Batch export** — The UI supports exporting all raid sessions as individual dated zip files with one click. A CLI mode is also available:
+
+```sh
+combat-scribe --export WoWCombatLog.txt [output_dir] [--zero]
+```
+
+Each raid session is exported as `Player-Raid-YYYY-MM-DD-export.txt.zip`. Multiple sessions on the same day get collision-safe suffixes (`-2`, `-3`, etc.).
+
 ---
 
 ## Screenshots

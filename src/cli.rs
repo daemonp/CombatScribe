@@ -1,11 +1,13 @@
-// ── CLI Diagnostic Modes ────────────────────────────────────────────────────
+// ── CLI Modes ───────────────────────────────────────────────────────────────
 //
-// Non-GUI commands: --bench, --debug-sessions, --debug-wipes.
+// Non-GUI commands: --bench, --debug-sessions, --debug-wipes, --export.
 // These read a file, run the format/parse pipeline, and print to stdout/stderr.
 
 use std::fs;
+use std::path::Path;
 use std::time::Instant;
 
+use crate::export;
 use crate::file_io::{is_zip_file, read_text_from_zip_bytes};
 use crate::{formatter, log_parser, parser};
 
@@ -224,5 +226,67 @@ pub fn run_debug_wipes(path: &str, session_num: Option<usize>) {
 
         prev_end = Some(enc.end);
         eprintln!();
+    }
+}
+
+// ── Batch Export ────────────────────────────────────────────────────────────
+
+/// Export all raid sessions as individual zip files.
+///
+/// Usage: `combat-scribe --export <file> [output_dir] [--zero]`
+///
+/// Each raid session is extracted, formatted, and written to a separate
+/// `Player-Raid-Date-export.txt.zip` file. If no output directory is
+/// specified, files are written to the current working directory.
+pub fn run_export(path: &str, output_dir: Option<&str>, zero: bool) {
+    eprintln!("Reading file...");
+    let lines = read_log_lines(path);
+    eprintln!("  {} total lines\n", lines.len());
+
+    let sessions = parser::detect_sessions(&lines);
+    let raid_count = sessions.iter().filter(|s| s.is_raid).count();
+    eprintln!(
+        "Detected {} sessions ({} raid)\n",
+        sessions.len(),
+        raid_count
+    );
+
+    if raid_count == 0 {
+        eprintln!("No raid sessions found. Nothing to export.");
+        return;
+    }
+
+    // List what will be exported
+    for (i, s) in sessions.iter().filter(|s| s.is_raid).enumerate() {
+        eprintln!("  {:>2}. {}", i + 1, s);
+    }
+    eprintln!();
+
+    let out_dir = output_dir.map_or_else(
+        || std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        Into::into,
+    );
+
+    let source_path = Path::new(path);
+
+    let t0 = Instant::now();
+    match export::do_batch_export(&lines, &sessions, &out_dir, zero, Some(source_path)) {
+        Ok(result) => {
+            let elapsed = t0.elapsed();
+            eprintln!(
+                "Exported {} sessions ({} total lines) in {elapsed:.2?}:",
+                result.sessions_exported, result.total_lines
+            );
+            for f in &result.files {
+                eprintln!("  {}", out_dir.join(f).display());
+            }
+            if result.zeroed {
+                eprintln!("\nOriginal log file has been zeroed: {path}");
+            }
+        }
+        Err(e) => {
+            eprintln!("Export failed: {e}");
+            std::process::exit(1);
+        }
     }
 }

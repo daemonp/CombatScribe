@@ -11,7 +11,7 @@ mod theme;
 mod update;
 mod viewer;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use iced::widget::{
@@ -20,7 +20,7 @@ use iced::widget::{
 };
 use iced::{Center, Color, Element, Fill, Length, Task, Theme};
 
-use crate::export::{DoneInfo, ExportOptions};
+use crate::export::{BatchExportResult, DoneInfo, ExportOptions};
 use crate::file_io::{load_file, pick_file};
 
 fn main() -> iced::Result {
@@ -42,6 +42,16 @@ fn main() -> iced::Result {
     if args.len() >= 3 && args[1] == "--debug-wipes" {
         let session_num = args.get(3).and_then(|s| s.parse::<usize>().ok());
         cli::run_debug_wipes(&args[2], session_num);
+        return Ok(());
+    }
+
+    // Batch export: `combat-scribe --export <file> [output_dir] [--zero]`
+    if args.len() >= 3 && args[1] == "--export" {
+        let zero = args.iter().any(|a| a == "--zero");
+        let output_dir = args.get(3).and_then(|a| {
+            if a.starts_with('-') { None } else { Some(a.as_str()) }
+        });
+        cli::run_export(&args[2], output_dir, zero);
         return Ok(());
     }
 
@@ -101,10 +111,12 @@ struct App {
     create_zip: bool,
     zero_log: bool,
     rename_output: bool,
+    export_all: bool,
 
     // Export modal
     show_export_modal: bool,
     export_result: Option<Result<DoneInfo, String>>,
+    batch_export_result: Option<Result<BatchExportResult, String>>,
 
     // Update notification
     update_available: Option<update::NewRelease>,
@@ -124,8 +136,10 @@ impl App {
             create_zip: true,
             zero_log: false,
             rename_output: true,
+            export_all: false,
             show_export_modal: false,
             export_result: None,
+            batch_export_result: None,
             update_available: None,
         }
     }
@@ -176,8 +190,10 @@ enum Message {
     ToggleZip(bool),
     ToggleZeroLog(bool),
     ToggleRename(bool),
+    ToggleExportAll(bool),
     Export,
     ExportComplete(Result<DoneInfo, String>),
+    BatchExportComplete(Result<BatchExportResult, String>),
     DismissExportResult,
 
     // Update notification
@@ -285,6 +301,8 @@ impl App {
             Message::CloseExportModal | Message::DismissExportResult => {
                 self.show_export_modal = false;
                 self.export_result = None;
+                self.batch_export_result = None;
+                self.export_all = false;
                 Task::none()
             }
 
@@ -303,6 +321,11 @@ impl App {
                 Task::none()
             }
 
+            Message::ToggleExportAll(val) => {
+                self.export_all = val;
+                Task::none()
+            }
+
             Message::Export => {
                 let Some(file_path) = self.file_path.clone() else {
                     self.export_result = Some(Err("No file selected".to_string()));
@@ -311,6 +334,28 @@ impl App {
 
                 let lines = Arc::clone(&self.lines);
                 let sessions = self.sessions.clone();
+
+                // Batch export: all raid sessions as individual zips
+                if self.export_all {
+                    let output_dir = file_path
+                        .parent()
+                        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+                    let zero_log = self.zero_log;
+                    return Task::perform(
+                        async move {
+                            export::do_batch_export(
+                                &lines,
+                                &sessions,
+                                &output_dir,
+                                zero_log,
+                                Some(&file_path),
+                            )
+                        },
+                        Message::BatchExportComplete,
+                    );
+                }
+
+                // Single session export
                 let selected = self.selected_session.clone();
 
                 // Look up session metadata for descriptive filename.
@@ -351,6 +396,11 @@ impl App {
 
             Message::ExportComplete(result) => {
                 self.export_result = Some(result);
+                Task::none()
+            }
+
+            Message::BatchExportComplete(result) => {
+                self.batch_export_result = Some(result);
                 Task::none()
             }
 
@@ -672,122 +722,107 @@ impl App {
 
     #[allow(clippy::too_many_lines)] // iced UI layout — modal with conditional result display
     fn view_export_modal(&self) -> Element<'_, Message> {
-        let title = text("Export Session").size(18).color(Color::WHITE);
+        let title = if self.export_all {
+            text("Export All Sessions").size(18).color(Color::WHITE)
+        } else {
+            text("Export Session").size(18).color(Color::WHITE)
+        };
 
-        let session_label = if let Some(ref sel) = self.selected_session {
-            text(sel.as_str()).size(12).color(theme::TEXT_SECONDARY)
+        let session_label: Element<Message> = if self.export_all {
+            let raid_count = self.sessions.iter().filter(|s| s.is_raid).count();
+            text(format!("{raid_count} raid sessions will be exported as individual zip files"))
+                .size(12)
+                .color(theme::TEXT_SECONDARY)
+                .into()
+        } else if let Some(ref sel) = self.selected_session {
+            text(sel.as_str())
+                .size(12)
+                .color(theme::TEXT_SECONDARY)
+                .into()
         } else {
             text("No session selected")
                 .size(12)
                 .color(theme::TEXT_SECONDARY)
+                .into()
         };
 
         let rename_label = self.export_filename_preview();
 
-        let options = column![
-            checkbox("Create ZIP archive", self.create_zip)
-                .on_toggle(Message::ToggleZip)
-                .size(18),
-            checkbox(rename_label.as_str(), self.rename_output)
-                .on_toggle(Message::ToggleRename)
-                .size(18),
-            checkbox("Zero (clear) original log file after export", self.zero_log)
-                .on_toggle(Message::ToggleZeroLog)
-                .size(18),
-        ]
-        .spacing(10);
+        let export_all_label = format!(
+            "Export all raid sessions ({} sessions)",
+            self.sessions.iter().filter(|s| s.is_raid).count()
+        );
+
+        let mut options = Column::new().spacing(10);
+
+        // "Export all" checkbox (only shown when multiple raid sessions exist)
+        if self.sessions.iter().filter(|s| s.is_raid).count() > 1 {
+            options = options.push(
+                checkbox(export_all_label.as_str(), self.export_all)
+                    .on_toggle(Message::ToggleExportAll)
+                    .size(18),
+            );
+        }
+
+        // Single-session options (hidden when export_all is active)
+        if !self.export_all {
+            options = options.push(
+                checkbox("Create ZIP archive", self.create_zip)
+                    .on_toggle(Message::ToggleZip)
+                    .size(18),
+            );
+            options = options.push(
+                checkbox(rename_label.as_str(), self.rename_output)
+                    .on_toggle(Message::ToggleRename)
+                    .size(18),
+            );
+        }
+
+        options = options.push(
+            checkbox(
+                "Zero (clear) original log file after export",
+                self.zero_log,
+            )
+            .on_toggle(Message::ToggleZeroLog)
+            .size(18),
+        );
 
         let warning: Element<Message> = if self.zero_log {
-            text("The original log file will be emptied after export.")
-                .size(12)
-                .color(Color::from_rgb(1.0, 0.6, 0.2))
-                .into()
+            column![
+                text("The original log file will be emptied after export.")
+                    .size(12)
+                    .color(Color::from_rgb(1.0, 0.6, 0.2)),
+                text("Only use this for the live WoWCombatLog.txt so WoW starts a fresh log.")
+                    .size(11)
+                    .color(theme::TEXT_MUTED),
+            ]
+            .spacing(2)
+            .into()
         } else {
             column![].into()
         };
 
-        // Show export result or action buttons
-        let bottom_section: Element<Message> = if let Some(ref result) = self.export_result {
-            match result {
-                Ok(info) => {
-                    let mut details = Column::new().spacing(4);
-                    details = details.push(
-                        text(format!("Exported {} lines", info.line_count))
-                            .size(13)
-                            .color(Color::from_rgb(0.3, 0.8, 0.5)),
-                    );
-                    details = details.push(
-                        text(&info.output_path)
-                            .size(11)
-                            .color(theme::TEXT_SECONDARY),
-                    );
-                    if !info.player_names.is_empty() {
-                        details = details.push(
-                            text(format!("Players: {}", info.player_names.join(", ")))
-                                .size(11)
-                                .color(theme::TEXT_SECONDARY),
-                        );
-                    }
-                    if info.zipped {
-                        details = details.push(
-                            text("ZIP archive created")
-                                .size(11)
-                                .color(theme::TEXT_SECONDARY),
-                        );
-                    }
-                    if info.zeroed {
-                        details = details.push(
-                            text("Original log file cleared")
-                                .size(11)
-                                .color(Color::from_rgb(1.0, 0.6, 0.2)),
-                        );
-                    }
-                    column![
-                        details,
-                        button(text("Done").size(14).center().color(Color::WHITE))
-                            .on_press(Message::DismissExportResult)
-                            .padding([8, 24])
-                            .width(Fill)
-                            .style(primary_button_style),
-                    ]
-                    .spacing(12)
-                    .into()
-                }
-                Err(e) => column![
-                    text(format!("Export failed: {e}"))
-                        .size(13)
-                        .color(Color::from_rgb(1.0, 0.3, 0.3)),
-                    row![
-                        button(text("Cancel").size(14).center())
-                            .on_press(Message::CloseExportModal)
-                            .padding([8, 24])
-                            .width(Fill),
-                        button(text("Retry").size(14).center().color(Color::WHITE))
-                            .on_press(Message::Export)
-                            .padding([8, 24])
-                            .width(Fill)
-                            .style(primary_button_style),
-                    ]
-                    .spacing(8),
+        // Show batch result, single result, or action buttons
+        let bottom_section: Element<Message> =
+            if let Some(ref result) = self.batch_export_result {
+                Self::view_batch_result(result)
+            } else if let Some(ref result) = self.export_result {
+                Self::view_single_result(result)
+            } else {
+                row![
+                    button(text("Cancel").size(14).center())
+                        .on_press(Message::CloseExportModal)
+                        .padding([8, 24])
+                        .width(Fill),
+                    button(text("Export").size(14).center().color(Color::WHITE))
+                        .on_press(Message::Export)
+                        .padding([8, 24])
+                        .width(Fill)
+                        .style(primary_button_style),
                 ]
-                .spacing(12)
-                .into(),
-            }
-        } else {
-            row![
-                button(text("Cancel").size(14).center())
-                    .on_press(Message::CloseExportModal)
-                    .padding([8, 24])
-                    .width(Fill),
-                button(text("Export").size(14).center().color(Color::WHITE))
-                    .on_press(Message::Export)
-                    .padding([8, 24])
-                    .width(Fill)
-                    .style(primary_button_style),
-            ]
-            .spacing(8)
-            .into()
-        };
+                .spacing(8)
+                .into()
+            };
 
         let modal_content = column![
             title,
@@ -830,6 +865,133 @@ impl App {
             .width(Fill)
             .height(Fill)
             .into()
+    }
+
+    /// Render the result section for a single-session export.
+    fn view_single_result(result: &Result<DoneInfo, String>) -> Element<'_, Message> {
+        match result {
+            Ok(info) => {
+                let mut details = Column::new().spacing(4);
+                details = details.push(
+                    text(format!("Exported {} lines", info.line_count))
+                        .size(13)
+                        .color(Color::from_rgb(0.3, 0.8, 0.5)),
+                );
+                details = details.push(
+                    text(&info.output_path)
+                        .size(11)
+                        .color(theme::TEXT_SECONDARY),
+                );
+                if !info.player_names.is_empty() {
+                    details = details.push(
+                        text(format!("Players: {}", info.player_names.join(", ")))
+                            .size(11)
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                }
+                if info.zipped {
+                    details = details.push(
+                        text("ZIP archive created")
+                            .size(11)
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                }
+                if info.zeroed {
+                    details = details.push(
+                        text("Original log file cleared")
+                            .size(11)
+                            .color(Color::from_rgb(1.0, 0.6, 0.2)),
+                    );
+                }
+                column![
+                    details,
+                    button(text("Done").size(14).center().color(Color::WHITE))
+                        .on_press(Message::DismissExportResult)
+                        .padding([8, 24])
+                        .width(Fill)
+                        .style(primary_button_style),
+                ]
+                .spacing(12)
+                .into()
+            }
+            Err(e) => column![
+                text(format!("Export failed: {e}"))
+                    .size(13)
+                    .color(Color::from_rgb(1.0, 0.3, 0.3)),
+                row![
+                    button(text("Cancel").size(14).center())
+                        .on_press(Message::CloseExportModal)
+                        .padding([8, 24])
+                        .width(Fill),
+                    button(text("Retry").size(14).center().color(Color::WHITE))
+                        .on_press(Message::Export)
+                        .padding([8, 24])
+                        .width(Fill)
+                        .style(primary_button_style),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+        }
+    }
+
+    /// Render the result section for a batch export.
+    fn view_batch_result(result: &Result<BatchExportResult, String>) -> Element<'_, Message> {
+        match result {
+            Ok(info) => {
+                let mut details = Column::new().spacing(4);
+                details = details.push(
+                    text(format!(
+                        "Exported {} sessions ({} total lines)",
+                        info.sessions_exported, info.total_lines
+                    ))
+                    .size(13)
+                    .color(Color::from_rgb(0.3, 0.8, 0.5)),
+                );
+                for f in &info.files {
+                    details = details.push(
+                        text(f).size(11).color(theme::TEXT_SECONDARY),
+                    );
+                }
+                if info.zeroed {
+                    details = details.push(
+                        text("Original log file cleared")
+                            .size(11)
+                            .color(Color::from_rgb(1.0, 0.6, 0.2)),
+                    );
+                }
+                column![
+                    details,
+                    button(text("Done").size(14).center().color(Color::WHITE))
+                        .on_press(Message::DismissExportResult)
+                        .padding([8, 24])
+                        .width(Fill)
+                        .style(primary_button_style),
+                ]
+                .spacing(12)
+                .into()
+            }
+            Err(e) => column![
+                text(format!("Export failed: {e}"))
+                    .size(13)
+                    .color(Color::from_rgb(1.0, 0.3, 0.3)),
+                row![
+                    button(text("Cancel").size(14).center())
+                        .on_press(Message::CloseExportModal)
+                        .padding([8, 24])
+                        .width(Fill),
+                    button(text("Retry").size(14).center().color(Color::WHITE))
+                        .on_press(Message::Export)
+                        .padding([8, 24])
+                        .width(Fill)
+                        .style(primary_button_style),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+        }
     }
 }
 
