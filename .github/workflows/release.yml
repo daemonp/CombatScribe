@@ -32,13 +32,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path staging
           Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" staging/
-          Compress-Archive -Path staging/* -DestinationPath "${{ env.BINARY_NAME }}-${{ github.ref_name }}-windows-x86_64.zip"
+          Compress-Archive -Path staging/* -DestinationPath "${{ env.BINARY_NAME }}-windows-x86_64.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
-          path: "${{ env.BINARY_NAME }}-${{ github.ref_name }}-windows-x86_64.zip"
+          path: "${{ env.BINARY_NAME }}-windows-x86_64.zip"
 
   # ── macOS (universal binary) ─────────────────────────────────────────────────
   build-macos:
@@ -70,7 +70,7 @@ jobs:
 
       - name: Create DMG
         run: |
-          DMG_NAME="${{ env.BINARY_NAME }}-${{ github.ref_name }}-macos-universal.dmg"
+          DMG_NAME="${{ env.BINARY_NAME }}-macos-universal.dmg"
           hdiutil create -volname "${{ env.BINARY_NAME }}" \
             -srcfolder staging \
             -ov -format UDZO \
@@ -80,7 +80,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: macos-universal
-          path: "${{ env.BINARY_NAME }}-${{ github.ref_name }}-macos-universal.dmg"
+          path: "${{ env.BINARY_NAME }}-macos-universal.dmg"
 
   # ── Linux ────────────────────────────────────────────────────────────────────
   build-linux:
@@ -108,13 +108,13 @@ jobs:
       - name: Package
         run: |
           tar cf - -C target/release "${{ env.BINARY_NAME }}" | \
-            zstd -19 -o "${{ env.BINARY_NAME }}-${{ github.ref_name }}-linux-x86_64.tar.zst"
+            zstd -19 -o "${{ env.BINARY_NAME }}-linux-x86_64.tar.zst"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
-          path: "${{ env.BINARY_NAME }}-${{ github.ref_name }}-linux-x86_64.tar.zst"
+          path: "${{ env.BINARY_NAME }}-linux-x86_64.tar.zst"
 
   # ── GitHub Release ───────────────────────────────────────────────────────────
   release:

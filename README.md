@@ -1,82 +1,113 @@
 # CombatScribe
 
-A native desktop application for parsing, formatting, and analyzing World of Warcraft 1.12 (Turtle WoW) combat logs. Built in Rust with the [iced](https://github.com/iced-rs/iced) GUI framework.
+A fast, native desktop combat log parser and viewer for Turtle WoW. Load a `WoWCombatLog.txt` and get instant raid analysis — damage meters, healing meters, timelines, loot, and full ability breakdowns — without uploading anything to a website.
 
-## Features
+**Why local?** Your logs stay on your machine. No upload wait, no internet required, no privacy concerns. Parse a full raid night in under a second.
 
-- **Log Export** -- Load a `WoWCombatLog.txt`, detect raid sessions, format the log for upload (player name resolution, pet attribution, apostrophe normalization, self-damage annotation, loot fixes), and export as a cleaned-up `.txt` or `.zip` file suitable for upload to log analysis sites like MonkeyLogs / TurtLogs.
-- **Log Viewer** -- Parse combat logs into structured data and browse an interactive analysis UI with:
-  - Damage and healing meters with per-player ability breakdowns
-  - Encounter detection with kill/wipe tracking and per-boss attempt numbering
-  - Utility tracking: dispels, interrupts, deaths, resurrections, absorbs, avoidance, buffs
-  - Loot tables grouped by boss with item quality colors and trade tracking
-  - Filterable event log
+## Install
 
-## Combat Log Generation
+### Windows
 
-This parser expects combat logs produced by the [SuperWowCombatLogger](https://github.com/pepopo978/SuperWowCombatLogger) addon. Standard WoW combat logs are missing critical information that this parser depends on. **You must use SuperWowCombatLogger to generate your logs.**
+Download **[combat-scribe-windows-x86_64.zip](https://github.com/daemonp/CombatScribe/releases/latest/download/combat-scribe-windows-x86_64.zip)**, extract, and double-click `combat-scribe.exe`.
 
-### What SuperWowCombatLogger does
+### Linux
 
-SuperWowCombatLogger is a WoW addon that produces enhanced combat logs with additional data not present in the default combat log. It requires the [SuperWoW](https://github.com/balakethelock/SuperWoW) client modification to function. Key enhancements over the default combat log include:
+```sh
+curl -sL https://github.com/daemonp/CombatScribe/releases/latest/download/combat-scribe-linux-x86_64.tar.zst | tar --zstd -xf - && chmod +x combat-scribe && ./combat-scribe
+```
 
-- **Zone and combatant metadata** -- Writes `ZONE_INFO` and `COMBATANT_INFO` lines containing the current instance, player names, classes, talents, and GUIDs, which the parser uses for session detection, roster building, and class-colored UI display.
-- **Pet and totem attribution** -- Rewrites pet autoattacks as "Auto Attack (pet)" under the owner and attributes shaman totem damage, Greater Feral Spirit, Battle Chicken, and Arcanite Dragonling to their respective owners.
-- **Self-damage separation** -- Annotates damage a player deals to themselves (e.g. Power Overwhelming) as `(self damage)` so it can be excluded from regular damage meters.
-- **Missing spell tracking** -- Logs caster and target for spells the default combat log omits entirely: Faerie Fire, Sunder Armor, Curse of the Elements/Recklessness/Shadow/Weakness/Tongues, Expose Armor, and HoT cast events (Rejuvenation, Regrowth, Renew).
-- **Buff/debuff stack counts** -- Adds initial stack counts `(1)` to buff/debuff gain messages so parsers can track stacking correctly.
-- **No helper addon requirement** -- Unlike its predecessor (AdvancedVanillaCombatLog), no other raiders need to run a companion addon.
+Or download from the [releases page](https://github.com/daemonp/CombatScribe/releases/latest) manually.
 
-### Installation
+### macOS
 
-1. Install [SuperWoW](https://github.com/balakethelock/SuperWoW) (client-side modification, required).
-2. Clone or download [SuperWowCombatLogger](https://github.com/pepopo978/SuperWowCombatLogger) into your `Interface/AddOns/` directory so the folder structure is:
-   ```
-   Interface/AddOns/SuperWowCombatLogger/
-     SuperWowCombatLogger.toc
-     core.lua
-     RPLLCollector.xml
-     ...
-   ```
-3. Remove `AdvancedVanillaCombatLog` and `AdvancedVanillaCombatLog_Helper` from your addons folder if they exist.
-4. Enable the addon in-game. Combat logging will produce an enhanced `WoWCombatLog.txt` in your WoW `Logs/` directory.
+A universal `.dmg` is available on the [releases page](https://github.com/daemonp/CombatScribe/releases/latest). Mount it and drag to Applications.
 
-## Building
+## Quick Start
+
+1. **Load** — Click **Load File** (or drag a `.txt` / `.zip` onto the window) and pick your `WoWCombatLog.txt`.
+2. **Pick a session** — CombatScribe auto-detects raid sessions (Molten Core, BWL, Naxx, etc.) and names them for you.
+3. **Browse** — Switch between tabs to explore your raid.
+4. **Export** — Click **Export** to save a cleaned-up log (`.txt` or `.zip`) ready for upload to MonkeyLogs / TurtLogs.
+
+---
+
+## Features at a Glance
+
+| Tab | What you get |
+|---|---|
+| **Damage/Healing** | Side-by-side meters for the full raid. Damage done, damage done + pets, damage taken, effective healing, raw healing, overhealing. Click any player to drill down. |
+| **Utility** | Dispels, interrupts, deaths, resurrections, absorbs, avoidance (dodge/parry/block), buff uptime, and consumable usage. |
+| **Timeline** | Encounter timeline charting raid DPS, DTPS, HPS, deaths, big hits, and alive count. Aura waterfall with consumable/world buff presets. Zoomable. Event log with death replay. |
+| **Loot** | Boss-grouped loot with WoW item quality colors. Search by item, player, or boss. Trade tracking included. |
+| **Events** | Raw combat log browser, color-coded by event type, filterable by player. |
+
+### Player Detail Overlay
+
+Click any player on a meter to open a detailed breakdown:
+
+- **Summary stats** — total, per-second, duration, hits, crits, crit rate
+- **Opener sequence** — first 10 seconds of ability casts with timing gaps
+- **Ability table** — every ability ranked by total damage/healing with hit count, crit%, average, and percentage
+- **Damage taken** — grouped by attacker with full mitigation columns (absorb, resist, block, crush)
+- **Class, race, guild, talent spec, gear count** shown in the header
+
+### Encounter Detection
+
+Automatic boss detection for all Turtle WoW content: Molten Core, BWL, AQ20, AQ40, ZG, Onyxia, Naxxramas, Lower & Upper Karazhan, Emerald Sanctum, Scarlet Citadel, and 8 dungeon instances. Kill/wipe tracking with per-boss attempt numbering.
+
+Filter by **All Combat**, **All Kills**, **All Wipes**, **Trash**, or any individual encounter.
+
+### Export & Formatting
+
+The export pipeline cleans raw logs for upload: resolves "You/Your" to your character name, attributes pet and totem damage to owners, normalizes apostrophes, annotates self-damage, and fixes loot formatting. Optionally compresses to `.zip` and can zero the original log file after export.
+
+---
+
+## Screenshots
+
+### Damage and Healing Meters
+
+Side-by-side damage and healing for an Upper Karazhan 40-player raid. Every player is ranked with class icon, class-colored name, total damage or healing, per-second throughput, and raid percentage. The encounter dropdown (top) lets you filter by boss, kills, wipes, or trash.
+
+<img alt="Damage and healing meters showing a 40-player Upper Karazhan raid with ranked player bars, class icons, and per-second throughput" src="https://github.com/user-attachments/assets/b912166b-6a99-4f53-ba91-5df4e443bc3e" />
+
+### Player Damage Breakdown
+
+Clicking a player opens their full ability breakdown. This shows a Rogue's damage profile: opener sequence with cast timing, then a table of every ability sorted by total damage — Auto Attack, Backstab, Blade Flurry, Eviscerate — with hit counts, crit rates, and averages. Player info (class, race, guild, gear count) is shown at the top.
+
+<img alt="Detailed damage breakdown for a Rogue showing opener sequence, ability table with hit counts, crit rates, and averages" src="https://github.com/user-attachments/assets/4c214449-3210-4869-89e0-21f301e64fb4" />
+
+### Damage Taken Breakdown
+
+A tank's damage taken view grouped by source. Each attacker (Mephistroth, Desolate Doomguard, Hellfire Imp, etc.) has its own ability table with full mitigation columns — absorb, resist, block, and crushing blows — so you can see exactly where incoming damage is coming from and how it's being mitigated.
+
+<img alt="Tank damage taken breakdown grouped by attacker source with mitigation columns for absorb, resist, block, and crush" src="https://github.com/user-attachments/assets/b293aa76-e52a-4a87-8d96-c696ee30cf4a" />
+
+### Encounter Timeline
+
+A per-fight timeline showing raid DPS, damage taken, healing, deaths (red vertical lines), and big hits overlaid on a time axis. The alive count chart below tracks how many players are still standing. Click and drag to zoom into any time window. Toggle data series on/off from the legend. The event log below syncs to chart position for death replay analysis.
+
+<img alt="Encounter timeline chart with raid DPS, HPS, DTPS, death markers, and alive count over a 1:34 boss fight" src="https://github.com/user-attachments/assets/2a885836-13d1-4fab-98d5-c91d90fcfc9e" />
+
+---
+
+## Combat Log Addon
+
+CombatScribe requires logs from **[SuperWowCombatLogger](https://github.com/pepopo978/SuperWowCombatLogger)**, which produces enhanced combat logs with class/talent info, pet attribution, and spell tracking that the default WoW log doesn't include. It requires the **[SuperWoW](https://github.com/balakethelock/SuperWoW)** client modification.
+
+**Setup:**
+1. Install [SuperWoW](https://github.com/balakethelock/SuperWoW)
+2. Drop [SuperWowCombatLogger](https://github.com/pepopo978/SuperWowCombatLogger) into `Interface/AddOns/`
+3. Remove `AdvancedVanillaCombatLog` if present
+4. Enable in-game — logs go to your WoW `Logs/` folder
+
+## Building from Source
 
 ```sh
 cargo build --release
+# Binary: target/release/combat-scribe
 ```
 
-The binary is produced at `target/release/wow-parse-rs`.
+## License
 
-## Usage
-
-Run the application:
-
-```sh
-cargo run --release
-```
-
-1. Click **Open Log File** and select a `WoWCombatLog.txt`.
-2. The application detects raid sessions in the log. Select the session(s) you want to work with.
-3. **Export** -- Format and export the log for upload to MonkeyLogs / TurtLogs.
-4. **View** -- Open the interactive log viewer to browse damage meters, healing, utility, loot, and events.
-
-### Screenshots
-
-# Damage and Healing View
-<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/b912166b-6a99-4f53-ba91-5df4e443bc3e" />
-
-### Damage issuer breakdown
-
-<img width="2523" height="876" alt="image" src="https://github.com/user-attachments/assets/4c214449-3210-4869-89e0-21f301e64fb4" />
-
-### Tank damage taken player stats
-
-<img width="2508" height="902" alt="image" src="https://github.com/user-attachments/assets/b293aa76-e52a-4a87-8d96-c696ee30cf4a" />
-
-### Timeline view
-
-Per fight timeline to better understand mechanics 
-
-<img width="2510" height="721" alt="image" src="https://github.com/user-attachments/assets/2a885836-13d1-4fab-98d5-c91d90fcfc9e" />
+BSD-2-Clause
