@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use crate::raid_data;
 
+use super::Session;
 use super::boss::{
     get_boss_count, instance_from_boss_kills, is_known_boss, is_raid_zone, normalize_zone_name,
 };
@@ -12,7 +13,6 @@ use super::extraction::{
     extract_you_player_name, extract_zone,
 };
 use super::timestamp::parse_timestamp_fast;
-use super::Session;
 
 /// Session gap threshold (30 minutes in seconds).
 const SESSION_GAP_SECS: f64 = 30.0 * 60.0;
@@ -76,18 +76,18 @@ fn scan_events(lines: &[String]) -> (Vec<String>, Vec<ScanEvent>, Option<i32>) {
             continue;
         };
 
-        if trimmed.contains("ZONE_INFO:") {
-            if let Some(zone) = extract_zone(trimmed) {
-                let canonical = normalize_zone_name(zone);
-                let idx = names.len() as u32;
-                names.push(canonical);
-                events.push(ScanEvent {
-                    timestamp_secs: ts_secs,
-                    line_index: i,
-                    event_type: EventType::Zone,
-                    name_idx: idx,
-                });
-            }
+        if trimmed.contains("ZONE_INFO:")
+            && let Some(zone) = extract_zone(trimmed)
+        {
+            let canonical = normalize_zone_name(zone);
+            let idx = names.len() as u32;
+            names.push(canonical);
+            events.push(ScanEvent {
+                timestamp_secs: ts_secs,
+                line_index: i,
+                event_type: EventType::Zone,
+                name_idx: idx,
+            });
         }
 
         if trimmed.contains("COMBATANT_INFO:") {
@@ -108,17 +108,17 @@ fn scan_events(lines: &[String]) -> (Vec<String>, Vec<ScanEvent>, Option<i32>) {
                 });
 
                 // Check if this is a "full" COMBATANT_INFO (2 '}' = has talent data)
-                if bytecount_char(bytes, b'}') == 2 {
-                    if let Some(amp_name) = extract_you_player_name(trimmed) {
-                        let fidx = names.len() as u32;
-                        names.push(amp_name.to_string());
-                        events.push(ScanEvent {
-                            timestamp_secs: ts_secs,
-                            line_index: i,
-                            event_type: EventType::FullPlayer,
-                            name_idx: fidx,
-                        });
-                    }
+                if bytecount_char(bytes, b'}') == 2
+                    && let Some(amp_name) = extract_you_player_name(trimmed)
+                {
+                    let fidx = names.len() as u32;
+                    names.push(amp_name.to_string());
+                    events.push(ScanEvent {
+                        timestamp_secs: ts_secs,
+                        line_index: i,
+                        event_type: EventType::FullPlayer,
+                        name_idx: fidx,
+                    });
                 }
             }
         }
@@ -140,29 +140,29 @@ fn scan_events(lines: &[String]) -> (Vec<String>, Vec<ScanEvent>, Option<i32>) {
             });
         }
 
-        if trimmed.contains("UNIT_DIED:") {
-            if let Some(dead_unit) = extract_unit_died(trimmed) {
-                if is_known_boss(dead_unit) {
-                    let idx = names.len() as u32;
-                    names.push(dead_unit.to_string());
-                    events.push(ScanEvent {
-                        timestamp_secs: ts_secs,
-                        line_index: i,
-                        event_type: EventType::BossKill,
-                        name_idx: idx,
-                    });
-                } else if let Some(raid_zone) = raid_data::npc_raid(dead_unit) {
-                    // Non-boss NPC mapped to an instance — record for zone
-                    // disambiguation (e.g. Lower vs Upper Karazhan trash).
-                    let idx = names.len() as u32;
-                    names.push(raid_zone.to_string());
-                    events.push(ScanEvent {
-                        timestamp_secs: ts_secs,
-                        line_index: i,
-                        event_type: EventType::NpcZone,
-                        name_idx: idx,
-                    });
-                }
+        if trimmed.contains("UNIT_DIED:")
+            && let Some(dead_unit) = extract_unit_died(trimmed)
+        {
+            if is_known_boss(dead_unit) {
+                let idx = names.len() as u32;
+                names.push(dead_unit.to_string());
+                events.push(ScanEvent {
+                    timestamp_secs: ts_secs,
+                    line_index: i,
+                    event_type: EventType::BossKill,
+                    name_idx: idx,
+                });
+            } else if let Some(raid_zone) = raid_data::npc_raid(dead_unit) {
+                // Non-boss NPC mapped to an instance — record for zone
+                // disambiguation (e.g. Lower vs Upper Karazhan trash).
+                let idx = names.len() as u32;
+                names.push(raid_zone.to_string());
+                events.push(ScanEvent {
+                    timestamp_secs: ts_secs,
+                    line_index: i,
+                    event_type: EventType::NpcZone,
+                    name_idx: idx,
+                });
             }
         }
     }
@@ -233,10 +233,11 @@ fn build_sessions(
                         return cur_inst != boss_inst;
                     }
                     // If the session has a raid zone set and boss is from a different raid -> split
-                    if let Some(pz) = cur.primary_zone.as_ref() {
-                        if is_raid_zone(pz) && pz != boss_inst {
-                            return true;
-                        }
+                    if let Some(pz) = cur.primary_zone.as_ref()
+                        && is_raid_zone(pz)
+                        && pz != boss_inst
+                    {
+                        return true;
                     }
                 }
                 false
@@ -248,19 +249,18 @@ fn build_sessions(
                 if event.timestamp_secs - cur.end_time_secs > SESSION_GAP_SECS {
                     return true;
                 }
-                if let Some(zone) = zone_name {
-                    if is_raid_zone(zone) {
-                        let cur_is_raid =
-                            cur.primary_zone.as_ref().is_some_and(|pz| is_raid_zone(pz));
-                        if !cur_is_raid {
-                            // Entering a raid zone from a non-raid session -> split
-                            return true;
-                        }
-                        // Already in a raid — only split if it's a DIFFERENT raid
-                        let same_raid = cur.primary_zone.as_ref().is_some_and(|pz| pz == zone);
-                        if !same_raid {
-                            return true;
-                        }
+                if let Some(zone) = zone_name
+                    && is_raid_zone(zone)
+                {
+                    let cur_is_raid = cur.primary_zone.as_ref().is_some_and(|pz| is_raid_zone(pz));
+                    if !cur_is_raid {
+                        // Entering a raid zone from a non-raid session -> split
+                        return true;
+                    }
+                    // Already in a raid — only split if it's a DIFFERENT raid
+                    let same_raid = cur.primary_zone.as_ref().is_some_and(|pz| pz == zone);
+                    if !same_raid {
+                        return true;
                     }
                 }
                 false

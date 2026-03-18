@@ -22,10 +22,14 @@ impl ViewerState {
         .width(Length::FillPortion(1))
         .padding(4);
 
-        let header = row![text("Events").size(14), horizontal_space(), player_picker,]
-            .spacing(8)
-            .align_y(Center)
-            .width(Fill);
+        let header = row![
+            text("Events").size(14),
+            Space::new().width(Fill),
+            player_picker,
+        ]
+        .spacing(8)
+        .align_y(Center)
+        .width(Fill);
 
         // Filter entries
         let filtered: Vec<&LogEntry> = self
@@ -56,7 +60,7 @@ impl ViewerState {
 
         scrollable(
             container(
-                column![header, horizontal_rule(1), entries_col]
+                column![header, rule::horizontal(1), entries_col]
                     .spacing(4)
                     .width(Fill),
             )

@@ -10,35 +10,80 @@ use super::combat::KILL_GRACE_SECS;
 
 /// Post-process: assign bosses to loot, link trades, number encounter attempts,
 /// and build filtered combatant roster.
+#[cfg(debug_assertions)]
 pub(super) fn post_process(data: &mut LogData) {
-    // Extend encounter windows to include combat activity after the logging
-    // player's PLAYER_REGEN_ENABLED.  When the logger dies mid-fight, their
-    // client drops combat immediately but the rest of the raid keeps fighting.
-    // The raw entries still contain all of that activity — we just need to
-    // widen the encounter's [start, end] window to include it.
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let mut timings = Vec::new();
+
+    macro_rules! time_phase {
+        ($name:expr, $phase:expr) => {{
+            let phase_start = Instant::now();
+            $phase(data);
+            let elapsed = phase_start.elapsed();
+            timings.push(($name, elapsed));
+        }};
+    }
+
+    time_phase!("extend_encounters", extend_encounters_to_last_activity);
+    time_phase!("merge_encounters", merge_encounters);
+    time_phase!("assign_loot", assign_loot);
+    time_phase!("link_trades", link_trades);
+    time_phase!("classify_wipes", classify_wipes);
+    time_phase!("number_attempts", number_attempts);
+    time_phase!("filter_combatants", filter_combatants);
+
+    let total = start.elapsed();
+
+    // Only print if any phase took >1ms or total >10ms
+    if total.as_millis() > 10 {
+        eprintln!("\n[post_process] Performance:");
+        for (name, elapsed) in timings {
+            if elapsed.as_millis() > 0 {
+                eprintln!("  {:20} {:>6}ms", name, elapsed.as_millis());
+            }
+        }
+        eprintln!("  {:20} {:>6}ms", "TOTAL", total.as_millis());
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub(super) fn post_process(data: &mut LogData) {
     extend_encounters_to_last_activity(data);
+    merge_encounters(data);
+    assign_loot(data);
+    link_trades(data);
+    classify_wipes(data);
+    number_attempts(data);
+    filter_combatants(data);
+}
 
-    // Merge fragmented boss encounters.
-    // Boss abilities like Hakkar's Mind Control cause brief combat drops
-    // (PLAYER_REGEN_ENABLED → PLAYER_REGEN_DISABLED) mid-fight, creating
-    // spurious short encounters.  Merge consecutive boss encounters for the
-    // same boss when the gap is < 60 seconds.
+// ── Phase Functions ─────────────────────────────────────────────────────────
+
+/// Merge fragmented boss encounters (Hakkar MC, combat drops).
+fn merge_encounters(data: &mut LogData) {
     merge_boss_encounters(&mut data.encounters);
+}
 
-    // Assign bosses to loot (within 2 minutes after encounter end)
+/// Assign boss names to loot events (within 2 minutes after encounter end).
+fn assign_loot(data: &mut LogData) {
     for loot in &mut data.loot {
         let mut boss = "Trash/Other".to_string();
         for enc in &data.encounters {
-            if loot.timestamp >= enc.start && loot.timestamp <= enc.end + 120.0 {
-                if let Some(name) = &enc.name {
-                    boss.clone_from(name);
-                }
+            if loot.timestamp >= enc.start
+                && loot.timestamp <= enc.end + 120.0
+                && let Some(name) = &enc.name
+            {
+                boss.clone_from(name);
             }
         }
         loot.boss = boss;
     }
+}
 
-    // Link trades to loot items
+/// Link trade events to loot items (updates `loot.traded_to`).
+fn link_trades(data: &mut LogData) {
     for trade in &data.trades {
         for loot in &mut data.loot {
             if loot.item_name == trade.item_name
@@ -50,12 +95,10 @@ pub(super) fn post_process(data: &mut LogData) {
             }
         }
     }
+}
 
-    // Downgrade combat-drop encounters to non-boss.
-    // Boss abilities (e.g. Hakkar's Mind Control) can cause brief combat drops
-    // where nobody dies.  These are not real wipe attempts — they're just
-    // the boss resetting or a phase transition.  A real wipe requires at
-    // least ~50% of active players to die (accounting for DI/soulstone/ankh).
+/// Classify wipe attempts (downgrade combat-drop encounters if death ratio too low).
+fn classify_wipes(data: &mut LogData) {
     for enc in &mut data.encounters {
         if enc.is_boss && !enc.is_kill && enc.active_players > 0 {
             #[allow(clippy::cast_precision_loss)] // small player counts
@@ -66,26 +109,25 @@ pub(super) fn post_process(data: &mut LogData) {
             }
         }
     }
+}
 
-    // Number encounter attempts (case-insensitive boss name matching)
+/// Number boss attempts sequentially (case-insensitive boss name matching).
+fn number_attempts(data: &mut LogData) {
     let mut boss_attempts: HashMap<String, usize> = HashMap::new();
     for enc in &mut data.encounters {
-        if enc.is_boss {
-            if let Some(name) = &enc.name {
-                let key = name.to_lowercase();
-                let count = boss_attempts.entry(key).or_insert(0);
-                *count += 1;
-                enc.attempt = Some(*count);
-            }
+        if enc.is_boss
+            && let Some(name) = &enc.name
+        {
+            let key = name.to_lowercase();
+            let count = boss_attempts.entry(key).or_insert(0);
+            *count += 1;
+            enc.attempt = Some(*count);
         }
     }
+}
 
-    // Build filtered combatants from encounter participation.
-    // COMBATANT_INFO fires for ALL nearby players (cities, open world), not just
-    // raid/party members.  A time-window heuristic pulls in too many bystanders
-    // (e.g. 276 "players" in a 40-man raid).  Instead, require actual combat
-    // participation: the player must appear in player_stats (dealt/took damage
-    // or healed during an encounter).
+/// Build filtered combatants from encounter participation.
+fn filter_combatants(data: &mut LogData) {
     for (name, combatant) in &data.all_combatants {
         if data.player_stats.contains_key(name) {
             data.combatants.insert(name.clone(), combatant.clone());
@@ -290,10 +332,10 @@ fn merge_boss_encounters(encounters: &mut Vec<Encounter>) {
             prev.player_deaths += enc.player_deaths;
             prev.active_players = prev.active_players.max(enc.active_players);
             // Prefer the title-cased name (from UNIT_DIED) over lowercase
-            if let Some(name) = &enc.name {
-                if name.chars().next().is_some_and(char::is_uppercase) {
-                    prev.name = Some(name.clone());
-                }
+            if let Some(name) = &enc.name
+                && name.chars().next().is_some_and(char::is_uppercase)
+            {
+                prev.name = Some(name.clone());
             }
         } else {
             merged.push(enc);

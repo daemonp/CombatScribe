@@ -2,16 +2,17 @@
 
 use std::collections::{HashMap, HashSet};
 
+use iced::widget::Action;
 use iced::widget::canvas;
-use iced::{mouse, Color, Point, Rectangle, Renderer, Theme};
+use iced::{Color, Event, Point, Rectangle, Renderer, Theme, mouse};
 
 use crate::log_data::{
     Combatant, TimelineBucket, TimelineData, TimelineEventKind, TimelineVisibility,
 };
 use crate::theme;
 
-use super::components::format_encounter_time;
 use super::ViewerMessage;
+use super::components::format_encounter_time;
 
 // ── Timeline Canvas Programs ────────────────────────────────────────────────
 
@@ -295,10 +296,10 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
     fn update(
         &self,
         _state: &mut (),
-        event: canvas::Event,
+        event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-    ) -> (canvas::event::Status, Option<ViewerMessage>) {
+    ) -> Option<Action<ViewerMessage>> {
         let td = self.data;
         let chart_w = (bounds.width - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
         let (view_lo, view_hi) = self.zoom.map_or((0.0, td.duration), |(lo, hi)| (lo, hi));
@@ -311,7 +312,7 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
         };
 
         match event {
-            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if let Some(pos) = cursor.position_in(bounds) {
                     let second = px_to_second(pos.x);
                     let n = td.buckets.len();
@@ -319,44 +320,36 @@ impl canvas::Program<ViewerMessage> for TimelineChart<'_> {
                         let idx = (second.floor() as usize).min(n.saturating_sub(1));
                         // If dragging, update the drag endpoint
                         if self.drag.is_some() {
-                            return (
-                                canvas::event::Status::Captured,
-                                Some(ViewerMessage::ZoomDragUpdate(second)),
+                            return Some(
+                                Action::publish(ViewerMessage::ZoomDragUpdate(second))
+                                    .and_capture(),
                             );
                         }
-                        return (
-                            canvas::event::Status::Captured,
-                            Some(ViewerMessage::TimelineHover(Some(idx))),
+                        return Some(
+                            Action::publish(ViewerMessage::TimelineHover(Some(idx))).and_capture(),
                         );
                     }
                 } else {
-                    return (
-                        canvas::event::Status::Ignored,
-                        Some(ViewerMessage::TimelineHover(None)),
+                    return Some(Action::publish(ViewerMessage::TimelineHover(None)));
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    let second = px_to_second(pos.x);
+                    return Some(
+                        Action::publish(ViewerMessage::ZoomDragStart(second)).and_capture(),
                     );
                 }
             }
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if let Some(pos) = cursor.position_in(bounds) {
                     let second = px_to_second(pos.x);
-                    return (
-                        canvas::event::Status::Captured,
-                        Some(ViewerMessage::ZoomDragStart(second)),
-                    );
-                }
-            }
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                if let Some(pos) = cursor.position_in(bounds) {
-                    let second = px_to_second(pos.x);
-                    return (
-                        canvas::event::Status::Captured,
-                        Some(ViewerMessage::ZoomDragEnd(second)),
-                    );
+                    return Some(Action::publish(ViewerMessage::ZoomDragEnd(second)).and_capture());
                 }
             }
             _ => {}
         }
-        (canvas::event::Status::Ignored, None)
+        None
     }
 }
 
@@ -664,43 +657,36 @@ impl canvas::Program<ViewerMessage> for DispelChart<'_> {
     fn update(
         &self,
         _state: &mut (),
-        event: canvas::Event,
+        event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-    ) -> (canvas::event::Status, Option<ViewerMessage>) {
+    ) -> Option<Action<ViewerMessage>> {
         let chart_w = (bounds.width - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
         let (view_lo, view_hi) = self
             .zoom
             .map_or((0.0, self.data.duration), |(lo, hi)| (lo, hi));
         let view_span = (view_hi - view_lo).max(0.001);
         match event {
-            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if let Some(pos) = cursor.position_in(bounds) {
                     if self.data.duration > 0.0 {
                         let second = view_lo
                             + f64::from((pos.x - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0)
                                 * view_span;
-                        return (
-                            canvas::event::Status::Captured,
-                            Some(ViewerMessage::AuraHover(Some(second))),
+                        return Some(
+                            Action::publish(ViewerMessage::AuraHover(Some(second))).and_capture(),
                         );
                     }
                 } else {
-                    return (
-                        canvas::event::Status::Ignored,
-                        Some(ViewerMessage::AuraHover(None)),
-                    );
+                    return Some(Action::publish(ViewerMessage::AuraHover(None)));
                 }
             }
-            canvas::Event::Mouse(mouse::Event::CursorLeft) => {
-                return (
-                    canvas::event::Status::Ignored,
-                    Some(ViewerMessage::AuraHover(None)),
-                );
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                return Some(Action::publish(ViewerMessage::AuraHover(None)));
             }
             _ => {}
         }
-        (canvas::event::Status::Ignored, None)
+        None
     }
 }
 
@@ -914,49 +900,44 @@ impl canvas::Program<ViewerMessage> for AuraChart<'_> {
     fn update(
         &self,
         _state: &mut (),
-        event: canvas::Event,
+        event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-    ) -> (canvas::event::Status, Option<ViewerMessage>) {
+    ) -> Option<Action<ViewerMessage>> {
         let chart_w = (bounds.width - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
         let (view_lo, view_hi) = self
             .zoom
             .map_or((0.0, self.data.duration), |(lo, hi)| (lo, hi));
         let view_span = (view_hi - view_lo).max(0.001);
         match event {
-            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if let Some(pos) = cursor.position_in(bounds) {
                     if self.data.duration > 0.0 {
                         let second = view_lo
                             + f64::from((pos.x - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0)
                                 * view_span;
-                        return (
-                            canvas::event::Status::Captured,
-                            Some(ViewerMessage::AuraHover(Some(second))),
+                        return Some(
+                            Action::publish(ViewerMessage::AuraHover(Some(second))).and_capture(),
                         );
                     }
                 } else {
-                    return (
-                        canvas::event::Status::Ignored,
-                        Some(ViewerMessage::AuraHover(None)),
-                    );
+                    return Some(Action::publish(ViewerMessage::AuraHover(None)));
                 }
             }
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                if let Some(pos) = cursor.position_in(bounds) {
-                    if self.data.duration > 0.0 {
-                        let second = (view_lo
-                            + f64::from((pos.x - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0)
-                                * view_span) as usize;
-                        return (
-                            canvas::event::Status::Captured,
-                            Some(ViewerMessage::TimelineClick(second)),
-                        );
-                    }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(pos) = cursor.position_in(bounds)
+                    && self.data.duration > 0.0
+                {
+                    let second = (view_lo
+                        + f64::from((pos.x - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0)
+                            * view_span) as usize;
+                    return Some(
+                        Action::publish(ViewerMessage::TimelineClick(second)).and_capture(),
+                    );
                 }
             }
             _ => {}
         }
-        (canvas::event::Status::Ignored, None)
+        None
     }
 }

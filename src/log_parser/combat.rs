@@ -3,9 +3,9 @@
 use crate::log_data::{Combatant, DeathEvent, Encounter, LogData, LogEntry};
 use crate::parser;
 
+use super::ParseState;
 use super::helpers::{contains_word, is_player_guid, title_case};
 use super::post_process::{parse_gear_slot, parse_players_in_combat};
-use super::ParseState;
 
 // ── Combat State & Boss Detection ───────────────────────────────────────────
 
@@ -45,19 +45,19 @@ pub(super) fn parse_metadata(trimmed: &str, data: &mut LogData, state: &mut Pars
         }
     }
 
-    if trimmed.contains("ZONE_INFO:") {
-        if let Some(zone) = parser::extract_zone(trimmed) {
-            let canonical = parser::normalize_zone_name(zone);
-            data.zone_name.clone_from(&canonical);
-            state.current_zone = Some(canonical);
-        }
+    if trimmed.contains("ZONE_INFO:")
+        && let Some(zone) = parser::extract_zone(trimmed)
+    {
+        let canonical = parser::normalize_zone_name(zone);
+        data.zone_name.clone_from(&canonical);
+        state.current_zone = Some(canonical);
     }
 
     // PLAYERS_IN_COMBAT: 32/40
-    if trimmed.contains("PLAYERS_IN_COMBAT:") {
-        if let Some(pic) = parse_players_in_combat(trimmed) {
-            data.raid_size = Some(pic);
-        }
+    if trimmed.contains("PLAYERS_IN_COMBAT:")
+        && let Some(pic) = parse_players_in_combat(trimmed)
+    {
+        data.raid_size = Some(pic);
     }
 }
 
@@ -76,33 +76,35 @@ pub(super) fn parse_combat_state(
     }
 
     if trimmed.contains("PLAYER_REGEN_ENABLED") {
-        if state.in_combat {
-            if let Some(start) = state.combat_start {
-                let duration = timestamp - start;
-                if duration > 5.0 {
-                    let is_boss = has_known_boss(state.current_boss.as_ref());
-                    #[allow(clippy::cast_possible_truncation)] // encounter won't have 4B players
-                    let player_deaths = state.encounter_deaths.len() as u32;
-                    #[allow(clippy::cast_possible_truncation)] // encounter won't have 4B players
-                    let active_players = state.encounter_active.len() as u32;
-                    data.encounters.push(Encounter {
-                        name: state.current_boss.clone(),
-                        start,
-                        end: timestamp,
-                        duration,
-                        is_boss,
-                        is_kill: is_boss && state.current_boss_killed,
-                        zone: state.current_zone.clone(),
-                        attempt: None,
-                        player_deaths,
-                        active_players,
-                    });
-                }
-                state.current_boss = None;
-                state.current_boss_killed = false;
-                state.encounter_deaths.clear();
-                state.encounter_active.clear();
+        if state.in_combat
+            && let Some(start) = state.combat_start
+        {
+            let duration = timestamp - start;
+            if duration > 5.0 {
+                let is_boss = has_known_boss(state.current_boss.as_ref());
+                #[allow(clippy::cast_possible_truncation)] // encounter won't have 4B players
+                let player_deaths = state.encounter_deaths.len() as u32;
+                #[allow(clippy::cast_possible_truncation)] // encounter won't have 4B players
+                let active_players = state.encounter_active.len() as u32;
+                data.encounters.push(Encounter {
+                    name: state.current_boss.clone(),
+                    start,
+                    end: timestamp,
+                    duration,
+                    is_boss,
+                    is_kill: is_boss && state.current_boss_killed,
+                    zone: state.current_zone.clone(),
+                    attempt: None,
+                    player_deaths,
+                    active_players,
+                });
             }
+            state.current_boss = None;
+            state.current_boss_killed = false;
+            state.encounter_deaths.clear();
+            state.encounter_active.clear();
+            // Clear last damage to prevent cross-encounter attribution
+            state.last_damage.clear();
         }
         state.in_combat = false;
     }
@@ -134,14 +136,33 @@ pub(super) fn parse_unit_died(
     };
 
     if is_player_guid(guid) {
+        // Attribute death to last damage received
+        let (killer, killing_blow, damage_amount) =
+            if let Some(last_dmg) = state.last_damage.get(dead_unit) {
+                (
+                    Some(last_dmg.source.clone()),
+                    Some(last_dmg.spell.clone()),
+                    Some(last_dmg.amount),
+                )
+            } else {
+                (None, None, None)
+            };
+
         data.deaths.push(DeathEvent {
             timestamp,
             player: dead_unit.to_string(),
+            killer,
+            killing_blow,
+            damage_amount,
         });
         data.entries.push(LogEntry::Death {
             timestamp,
             player: dead_unit.to_string(),
         });
+
+        // Clear last damage to prevent reuse
+        state.last_damage.remove(dead_unit);
+
         // Track per-encounter player deaths for wipe detection
         if state.in_combat {
             state.encounter_deaths.insert(dead_unit.to_string());
@@ -428,5 +449,113 @@ mod tests {
         );
         assert!(enc.is_boss, "Garr should be marked as boss");
         assert!(!enc.is_kill, "Wipe should not be marked as kill");
+    }
+
+    // ── Death Attribution Tests ────────────────────────────────────────
+
+    #[test]
+    fn test_death_attribution_basic() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 10:00:15.000  Patchwerk 's Hateful Strike hits Tank for 9500.".to_string(),
+            "1/27 10:00:16.000  Tank dies.".to_string(),
+            "1/27 10:00:16.000  UNIT_DIED:Tank:0x0000000000000001".to_string(),
+            "1/27 10:00:20.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.deaths.len(), 1);
+        let death = &data.deaths[0];
+        assert_eq!(death.player, "Tank");
+        assert_eq!(death.killer, Some("Patchwerk".to_string()));
+        assert_eq!(death.killing_blow, Some("Hateful Strike".to_string()));
+        assert_eq!(death.damage_amount, Some(9500));
+    }
+
+    #[test]
+    fn test_death_attribution_no_damage() {
+        // Environmental death or disconnect - no prior damage
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 10:00:15.000  Tank dies.".to_string(),
+            "1/27 10:00:15.000  UNIT_DIED:Tank:0x0000000000000001".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.deaths.len(), 1);
+        let death = &data.deaths[0];
+        assert_eq!(death.player, "Tank");
+        assert_eq!(death.killer, None);
+        assert_eq!(death.killing_blow, None);
+        assert_eq!(death.damage_amount, None);
+    }
+
+    #[test]
+    fn test_death_attribution_cleared_on_encounter_end() {
+        // Damage in encounter 1 should not attribute deaths in encounter 2
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            // Encounter 1
+            "1/27 10:00:10.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 10:00:15.000  Patchwerk hits Tank for 100.".to_string(),
+            "1/27 10:00:20.000  PLAYER_REGEN_ENABLED".to_string(),
+            // Encounter 2 - Tank dies with no damage in this encounter
+            "1/27 10:05:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 10:05:10.000  Tank dies.".to_string(),
+            "1/27 10:05:10.000  UNIT_DIED:Tank:0x0000000000000001".to_string(),
+            "1/27 10:05:15.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.deaths.len(), 1);
+        let death = &data.deaths[0];
+        assert_eq!(death.player, "Tank");
+        // Should NOT be attributed to Patchwerk from encounter 1
+        assert_eq!(death.killer, None);
+        assert_eq!(death.killing_blow, None);
+    }
+
+    #[test]
+    fn test_death_attribution_dot() {
+        // Death from DoT (periodic damage)
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&PRIEST&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 10:00:10.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 10:00:12.000  Tank suffers 1200 Shadow damage from Hakkar 's Corrupted Blood.".to_string(),
+            "1/27 10:00:13.000  Tank dies.".to_string(),
+            "1/27 10:00:13.000  UNIT_DIED:Tank:0x0000000000000002".to_string(),
+            "1/27 10:00:20.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.deaths.len(), 1);
+        let death = &data.deaths[0];
+        assert_eq!(death.player, "Tank");
+        assert_eq!(death.killer, Some("Hakkar".to_string()));
+        assert_eq!(death.killing_blow, Some("Corrupted Blood".to_string()));
+        assert_eq!(death.damage_amount, Some(1200));
+    }
+
+    #[test]
+    fn test_death_attribution_auto_attack() {
+        // Death from auto attack
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 10:00:15.000  Patchwerk hits Tank for 3500.".to_string(),
+            "1/27 10:00:16.000  Tank dies.".to_string(),
+            "1/27 10:00:16.000  UNIT_DIED:Tank:0x0000000000000001".to_string(),
+            "1/27 10:00:20.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.deaths.len(), 1);
+        let death = &data.deaths[0];
+        assert_eq!(death.player, "Tank");
+        assert_eq!(death.killer, Some("Patchwerk".to_string()));
+        assert_eq!(death.killing_blow, Some("Auto Attack".to_string()));
+        assert_eq!(death.damage_amount, Some(3500));
     }
 }

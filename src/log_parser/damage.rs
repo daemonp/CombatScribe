@@ -48,6 +48,17 @@ pub(super) struct TrailerData {
     pub(super) is_crushing: bool,
 }
 
+impl TrailerData {
+    /// Detect full mitigation: 0 damage dealt but mitigation trailer present.
+    pub(super) fn full_mitigation_flags(&self, amount: u64) -> (bool, bool, bool) {
+        (
+            amount == 0 && self.resisted > 0,
+            amount == 0 && self.absorbed > 0,
+            amount == 0 && self.blocked > 0,
+        )
+    }
+}
+
 /// Parse all mitigation data from the trailer portion of a damage line.
 pub(super) fn parse_trailer(trimmed: &str) -> TrailerData {
     TrailerData {
@@ -80,6 +91,7 @@ pub(super) fn parse_school(trimmed: &str) -> Option<&str> {
 /// All string fields borrow from the input line (`trimmed`) to avoid
 /// intermediate heap allocations.  Owned `String`s are created only at
 /// the point of insertion into `LogEntry` and `HashMap` keys.
+#[allow(clippy::struct_excessive_bools)] // Many boolean combat outcomes to track
 #[derive(Clone, Copy)]
 pub(super) struct DamageEvent<'a> {
     pub(super) timestamp: f64,
@@ -95,12 +107,16 @@ pub(super) struct DamageEvent<'a> {
     pub(super) is_crushing: bool,
     pub(super) school: Option<&'a str>,
     pub(super) pet_owner: Option<&'a str>,
+    pub(super) is_fully_resisted: bool,
+    pub(super) is_fully_absorbed: bool,
+    pub(super) is_fully_blocked: bool,
 }
 
 /// Record a parsed damage event into stats, entries, and health deficit.
 pub(super) fn record_damage(
     data: &mut LogData,
     health_deficit: &mut HashMap<String, u64>,
+    last_damage: &mut HashMap<String, super::LastDamageInfo>,
     event: DamageEvent<'_>,
 ) {
     // Record damage taken + source damage stats (both use &str directly).
@@ -118,6 +134,32 @@ pub(super) fn record_damage(
     // Increment target's health deficit for effective healing calculation
     *health_deficit.entry(event.target.to_string()).or_insert(0) += event.amount;
 
+    // Track last damage for death attribution (only for players)
+    if data.all_combatants.contains_key(event.target) {
+        last_damage.insert(
+            event.target.to_string(),
+            super::LastDamageInfo {
+                source: event.source.to_string(),
+                spell: event.spell.to_string(),
+                amount: event.amount,
+            },
+        );
+
+        // Count full mitigation events for avoidance stats
+        if event.is_fully_resisted || event.is_fully_absorbed || event.is_fully_blocked {
+            let av = data.avoidance.entry(event.target.to_string()).or_default();
+            if event.is_fully_resisted {
+                av.full_resists += 1;
+            }
+            if event.is_fully_absorbed {
+                av.full_absorbs += 1;
+            }
+            if event.is_fully_blocked {
+                av.full_blocks += 1;
+            }
+        }
+    }
+
     data.entries.push(LogEntry::Damage {
         timestamp: event.timestamp,
         source: event.source.to_string(),
@@ -131,6 +173,9 @@ pub(super) fn record_damage(
         is_glancing: event.is_glancing,
         is_crushing: event.is_crushing,
         school: event.school.map(str::to_string),
+        is_fully_resisted: event.is_fully_resisted,
+        is_fully_absorbed: event.is_fully_absorbed,
+        is_fully_blocked: event.is_fully_blocked,
     });
 }
 
@@ -141,6 +186,7 @@ pub(super) fn parse_damage_events(
     timestamp: f64,
     data: &mut LogData,
     health_deficit: &mut HashMap<String, u64>,
+    last_damage: &mut HashMap<String, super::LastDamageInfo>,
 ) {
     let is_crit = trimmed.contains(" crits ") || trimmed.contains(" critically ");
     let trailer = parse_trailer(trimmed);
@@ -162,9 +208,12 @@ pub(super) fn parse_damage_events(
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
         let pet_owner = extract_pet_owner(source, data);
+        let (is_fully_resisted, is_fully_absorbed, is_fully_blocked) =
+            trailer.full_mitigation_flags(amount);
         record_damage(
             data,
             health_deficit,
+            last_damage,
             DamageEvent {
                 timestamp,
                 source,
@@ -179,6 +228,9 @@ pub(super) fn parse_damage_events(
                 is_crushing: trailer.is_crushing,
                 school,
                 pet_owner: pet_owner.as_deref(),
+                is_fully_resisted,
+                is_fully_absorbed,
+                is_fully_blocked,
             },
         );
         return;
@@ -196,9 +248,12 @@ pub(super) fn parse_damage_events(
             .get(3)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
+        let (is_fully_resisted, is_fully_absorbed, is_fully_blocked) =
+            trailer.full_mitigation_flags(amount);
         record_damage(
             data,
             health_deficit,
+            last_damage,
             DamageEvent {
                 timestamp,
                 source,
@@ -213,6 +268,9 @@ pub(super) fn parse_damage_events(
                 is_crushing: trailer.is_crushing,
                 school,
                 pet_owner: None,
+                is_fully_resisted,
+                is_fully_absorbed,
+                is_fully_blocked,
             },
         );
         return;
@@ -234,9 +292,12 @@ pub(super) fn parse_damage_events(
             return;
         };
         let pet_owner = extract_pet_owner(source, data);
+        let (is_fully_resisted, is_fully_absorbed, is_fully_blocked) =
+            trailer.full_mitigation_flags(amount);
         record_damage(
             data,
             health_deficit,
+            last_damage,
             DamageEvent {
                 timestamp,
                 source,
@@ -251,6 +312,9 @@ pub(super) fn parse_damage_events(
                 is_crushing: trailer.is_crushing,
                 school,
                 pet_owner: pet_owner.as_deref(),
+                is_fully_resisted,
+                is_fully_absorbed,
+                is_fully_blocked,
             },
         );
     }
@@ -269,23 +333,23 @@ fn add_damage(
     ensure_stats(data, source).accumulate_damage(spell, amount, is_crit);
 
     // Attribute to pet owner
-    if let Some(owner) = pet_owner {
-        if owner != source {
-            let owner_stats = ensure_stats(data, owner);
-            owner_stats.pet_damage += amount;
-            let pet_spell = format!("Pet: {spell}");
-            let ab = owner_stats
-                .abilities
-                .entry(pet_spell)
-                .or_insert_with(|| AbilityStats {
-                    is_pet: true,
-                    ..AbilityStats::default()
-                });
-            ab.total += amount;
-            ab.hits += 1;
-            if is_crit {
-                ab.crits += 1;
-            }
+    if let Some(owner) = pet_owner
+        && owner != source
+    {
+        let owner_stats = ensure_stats(data, owner);
+        owner_stats.pet_damage += amount;
+        let pet_spell = format!("Pet: {spell}");
+        let ab = owner_stats
+            .abilities
+            .entry(pet_spell)
+            .or_insert_with(|| AbilityStats {
+                is_pet: true,
+                ..AbilityStats::default()
+            });
+        ab.total += amount;
+        ab.hits += 1;
+        if is_crit {
+            ab.crits += 1;
         }
     }
 }
@@ -540,5 +604,265 @@ mod tests {
             .get("Hateful Strike")
             .expect("Filtered should have Hateful Strike");
         assert_eq!(fhs.total, 15000);
+    }
+
+    // ── Full Mitigation Tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_full_resist_detection() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Boss 's Fireball hits Tank for 0. (1500 resisted)".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.entries.len(), 1);
+        if let LogEntry::Damage {
+            amount,
+            resisted,
+            is_fully_resisted,
+            is_fully_absorbed,
+            is_fully_blocked,
+            ..
+        } = &data.entries[0]
+        {
+            assert_eq!(*amount, 0);
+            assert_eq!(*resisted, 1500);
+            assert!(*is_fully_resisted);
+            assert!(!*is_fully_absorbed);
+            assert!(!*is_fully_blocked);
+        } else {
+            panic!("Expected Damage entry");
+        }
+    }
+
+    #[test]
+    fn test_partial_resist_detection() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Boss 's Fireball hits Tank for 500. (750 resisted)".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.entries.len(), 1);
+        if let LogEntry::Damage {
+            amount,
+            resisted,
+            is_fully_resisted,
+            ..
+        } = &data.entries[0]
+        {
+            assert_eq!(*amount, 500);
+            assert_eq!(*resisted, 750);
+            assert!(!*is_fully_resisted); // Partial - damage got through
+        } else {
+            panic!("Expected Damage entry");
+        }
+    }
+
+    #[test]
+    fn test_full_absorb_detection() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&PRIEST&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 10:00:10.000  Patchwerk hits Tank for 0. (5000 absorbed)".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.entries.len(), 1);
+        if let LogEntry::Damage {
+            amount,
+            absorbed,
+            is_fully_absorbed,
+            is_fully_resisted,
+            is_fully_blocked,
+            ..
+        } = &data.entries[0]
+        {
+            assert_eq!(*amount, 0);
+            assert_eq!(*absorbed, 5000);
+            assert!(*is_fully_absorbed);
+            assert!(!*is_fully_resisted);
+            assert!(!*is_fully_blocked);
+        } else {
+            panic!("Expected Damage entry");
+        }
+    }
+
+    #[test]
+    fn test_partial_absorb_detection() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&PRIEST&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 10:00:10.000  Patchwerk hits Tank for 2000. (1500 absorbed)".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.entries.len(), 1);
+        if let LogEntry::Damage {
+            amount,
+            absorbed,
+            is_fully_absorbed,
+            ..
+        } = &data.entries[0]
+        {
+            assert_eq!(*amount, 2000);
+            assert_eq!(*absorbed, 1500);
+            assert!(!*is_fully_absorbed); // Partial - damage got through
+        } else {
+            panic!("Expected Damage entry");
+        }
+    }
+
+    #[test]
+    fn test_full_block_detection() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Patchwerk hits Tank for 0. (300 blocked)".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.entries.len(), 1);
+        if let LogEntry::Damage {
+            amount,
+            blocked,
+            is_fully_blocked,
+            is_fully_resisted,
+            is_fully_absorbed,
+            ..
+        } = &data.entries[0]
+        {
+            assert_eq!(*amount, 0);
+            assert_eq!(*blocked, 300);
+            assert!(*is_fully_blocked);
+            assert!(!*is_fully_resisted);
+            assert!(!*is_fully_absorbed);
+        } else {
+            panic!("Expected Damage entry");
+        }
+    }
+
+    #[test]
+    fn test_mixed_mitigation() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Boss hits Tank for 1000. (500 resisted) (200 absorbed) (100 blocked)".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.entries.len(), 1);
+        if let LogEntry::Damage {
+            amount,
+            resisted,
+            absorbed,
+            blocked,
+            is_fully_resisted,
+            is_fully_absorbed,
+            is_fully_blocked,
+            ..
+        } = &data.entries[0]
+        {
+            assert_eq!(*amount, 1000);
+            assert_eq!(*resisted, 500);
+            assert_eq!(*absorbed, 200);
+            assert_eq!(*blocked, 100);
+            // All partial - damage got through
+            assert!(!*is_fully_resisted);
+            assert!(!*is_fully_absorbed);
+            assert!(!*is_fully_blocked);
+        } else {
+            panic!("Expected Damage entry");
+        }
+    }
+
+    #[test]
+    fn test_avoidance_full_resist_counted() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Boss 's Shadow Bolt hits Tank for 0 Shadow damage. (500 resisted)".to_string(),
+        ];
+        let data = parse_log(&lines);
+        let av = data
+            .avoidance
+            .get("Tank")
+            .expect("Tank should have avoidance stats");
+        assert_eq!(av.full_resists, 1);
+        assert_eq!(av.full_absorbs, 0);
+        assert_eq!(av.full_blocks, 0);
+    }
+
+    #[test]
+    fn test_avoidance_full_absorb_counted() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Boss hits Tank for 0. (500 absorbed)".to_string(),
+        ];
+        let data = parse_log(&lines);
+        let av = data
+            .avoidance
+            .get("Tank")
+            .expect("Tank should have avoidance stats");
+        assert_eq!(av.full_absorbs, 1);
+        assert_eq!(av.full_resists, 0);
+        assert_eq!(av.full_blocks, 0);
+    }
+
+    #[test]
+    fn test_avoidance_full_block_counted() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Patchwerk hits Tank for 0. (300 blocked)".to_string(),
+        ];
+        let data = parse_log(&lines);
+        let av = data
+            .avoidance
+            .get("Tank")
+            .expect("Tank should have avoidance stats");
+        assert_eq!(av.full_blocks, 1);
+        assert_eq!(av.full_resists, 0);
+        assert_eq!(av.full_absorbs, 0);
+    }
+
+    #[test]
+    fn test_avoidance_partial_not_counted() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Boss hits Tank for 1000. (500 resisted) (200 absorbed) (100 blocked)".to_string(),
+        ];
+        let data = parse_log(&lines);
+        // Partial mitigation should not create avoidance stats for full mitigation
+        let av = data.avoidance.get("Tank");
+        let full_mit = av.map_or(0, |a| a.total_full_mitigation());
+        assert_eq!(full_mit, 0);
+    }
+
+    #[test]
+    fn test_avoidance_full_mitigation_multiple() {
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Boss hits Tank for 0. (500 absorbed)".to_string(),
+            "1/27 10:00:11.000  Boss hits Tank for 0. (300 blocked)".to_string(),
+            "1/27 10:00:12.000  Boss hits Tank for 0. (400 absorbed)".to_string(),
+            "1/27 10:00:13.000  Boss hits Tank for 2000.".to_string(),
+        ];
+        let data = parse_log(&lines);
+        let av = data
+            .avoidance
+            .get("Tank")
+            .expect("Tank should have avoidance stats");
+        assert_eq!(av.full_absorbs, 2);
+        assert_eq!(av.full_blocks, 1);
+        assert_eq!(av.full_resists, 0);
+        assert_eq!(av.total_full_mitigation(), 3);
+    }
+
+    #[test]
+    fn test_avoidance_non_player_not_counted() {
+        // Damage against non-players should not create full mitigation avoidance stats
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Tank hits Boss for 0. (500 absorbed)".to_string(),
+        ];
+        let data = parse_log(&lines);
+        // Boss is not a combatant, so no avoidance should be recorded for it
+        assert!(data.avoidance.get("Boss").is_none());
     }
 }

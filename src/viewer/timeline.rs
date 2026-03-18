@@ -1,8 +1,8 @@
 //! Timeline tab rendering: DPS/DTPS/HPS charts, aura lanes, and event log filters.
 
 use super::charts::{
-    aura_chart_height, build_aura_layout, AliveChart, AuraChart, DispelChart, TimelineChart,
-    DISPEL_LANE_HEIGHT,
+    AliveChart, AuraChart, DISPEL_LANE_HEIGHT, DispelChart, TimelineChart, aura_chart_height,
+    build_aura_layout,
 };
 #[allow(clippy::wildcard_imports)]
 // viewer UI — many shared component functions used throughout
@@ -32,7 +32,7 @@ impl ViewerState {
 
         let header = row![
             text("Encounter Timeline").size(16).color(Color::WHITE),
-            horizontal_space(),
+            Space::new().width(Fill),
             text(format!(
                 "Duration: {} | Raid: {} players",
                 theme::format_duration(td.duration),
@@ -83,7 +83,8 @@ impl ViewerState {
                     ..Default::default()
                 }),
                 tooltip::Position::Bottom,
-            ),
+            )
+            .delay(std::time::Duration::from_millis(500)),
             legend_toggle(
                 theme::TIMELINE_HPS,
                 "Raid HPS",
@@ -161,10 +162,11 @@ impl ViewerState {
                                 width: if aura_count > 0 { 1.0 } else { 0.0 },
                             },
                             shadow: iced::Shadow::default(),
+                            snap: true,
                         }
                     })
             },
-            horizontal_space(),
+            Space::new().width(Fill),
             button(text(y_axis_label).size(10).color(theme::TEXT_SECONDARY))
                 .on_press(ViewerMessage::ToggleTimelineYAxis)
                 .padding([3, 8])
@@ -185,7 +187,7 @@ impl ViewerState {
                 text(range_text)
                     .size(11)
                     .color(Color::from_rgb8(100, 180, 255)),
-                horizontal_space(),
+                Space::new().width(Fill),
                 button(
                     text("Reset Zoom")
                         .size(10)
@@ -211,6 +213,7 @@ impl ViewerState {
                             width: 1.0,
                         },
                         shadow: iced::Shadow::default(),
+                        snap: true,
                     }
                 }),
             ]
@@ -244,7 +247,7 @@ impl ViewerState {
         let alive_section: Element<ViewerMessage> = if vis.show_alive {
             let alive_label = row![
                 text("Alive").size(11).color(theme::TIMELINE_ALIVE),
-                horizontal_space(),
+                Space::new().width(Fill),
                 text(format!("{} max", td.raid_count))
                     .size(10)
                     .color(theme::TEXT_MUTED),
@@ -313,7 +316,7 @@ impl ViewerState {
             column![].into()
         };
 
-        // ── Aura picker dropdown ───────────────────────────────────────
+        // ── Aura picker dropdown (floating over chart) ─────────────────
         let aura_picker: Element<ViewerMessage> = if self.aura_picker_open {
             let search_input = text_input("Search auras...", &self.aura_search)
                 .on_input(ViewerMessage::SetAuraSearch)
@@ -376,6 +379,7 @@ impl ViewerState {
                                     ..Default::default()
                                 },
                                 shadow: iced::Shadow::default(),
+                                snap: true,
                             }
                         }),
                 );
@@ -409,6 +413,7 @@ impl ViewerState {
                                     width: 1.0,
                                 },
                                 shadow: iced::Shadow::default(),
+                                snap: true,
                             }
                         })
                         .into()
@@ -438,16 +443,17 @@ impl ViewerState {
                                 ..Default::default()
                             },
                             shadow: iced::Shadow::default(),
+                            snap: true,
                         }
                     })
                     .into()
             };
 
-            container(
+            let picker_content = container(
                 column![
                     text("Presets").size(10).color(theme::TEXT_MUTED),
                     preset_row,
-                    horizontal_rule(1),
+                    rule::horizontal(1),
                     search_input,
                     scrollable_list,
                     clear_btn,
@@ -458,15 +464,31 @@ impl ViewerState {
             .padding(8)
             .width(Length::Fixed(300.0))
             .style(|_theme: &iced::Theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba8(25, 27, 35, 0.95))),
+                background: Some(iced::Background::Color(Color::from_rgba8(25, 27, 35, 0.98))),
                 border: iced::Border {
                     color: Color::from_rgba8(180, 140, 255, 0.3),
                     width: 1.0,
                     radius: 6.0.into(),
                 },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba8(0, 0, 0, 0.5),
+                    offset: iced::Vector::new(0.0, 4.0),
+                    blur_radius: 12.0,
+                },
                 ..Default::default()
-            })
-            .into()
+            });
+
+            // Float the picker over the chart — clamp so it stays on screen
+            float(picker_content)
+                .translate(|bounds, viewport| {
+                    let x: f32 = 0.0;
+                    let y: f32 = bounds.height;
+                    // Keep the dropdown on screen
+                    let max_x = viewport.width - 300.0;
+                    let max_y = viewport.height - bounds.y - 360.0;
+                    iced::Vector::new(x.min(max_x).max(0.0), y.min(max_y).max(0.0))
+                })
+                .into()
         } else {
             column![].into()
         };
@@ -555,7 +577,7 @@ impl ViewerState {
                     text("Dispel Activity")
                         .size(11)
                         .color(theme::TIMELINE_DISPEL),
-                    horizontal_space(),
+                    Space::new().width(Fill),
                     text(format!("{total_dispels} total"))
                         .size(10)
                         .color(theme::TEXT_MUTED),
@@ -609,10 +631,10 @@ impl ViewerState {
                 legend,
                 zoom_bar,
                 aura_picker,
-                horizontal_rule(1),
+                rule::horizontal(1),
                 chart_canvas,
                 tooltip,
-                horizontal_rule(1),
+                rule::horizontal(1),
                 tracker_panel,
             ]
             .spacing(6)
@@ -671,6 +693,7 @@ impl ViewerState {
                                 width: if active { 1.0 } else { 0.0 },
                             },
                             shadow: iced::Shadow::default(),
+                            snap: true,
                         }
                     }),
                 );
@@ -690,7 +713,7 @@ impl ViewerState {
             .padding(3)
             .into()
         } else {
-            horizontal_space().width(0).into()
+            Space::new().width(0).into()
         };
 
         let type_toggles: Element<ViewerMessage> = {
@@ -754,6 +777,7 @@ impl ViewerState {
                                     ..Default::default()
                                 },
                                 shadow: iced::Shadow::default(),
+                                snap: true,
                             }
                         }),
                 );
@@ -796,7 +820,7 @@ impl ViewerState {
                 mode_buttons,
                 window_picker,
                 type_toggles,
-                horizontal_space(),
+                Space::new().width(Fill),
                 player_picker,
                 copy_btn,
             ]

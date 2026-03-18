@@ -3,8 +3,8 @@
 //! `WoW` class colors, item quality colors, meter bar colors,
 //! class abbreviations, and number/duration formatting.
 
-use iced::widget::image;
 use iced::Color;
+use iced::widget::image;
 
 // ── Class Colors ────────────────────────────────────────────────────────────
 

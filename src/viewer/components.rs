@@ -4,9 +4,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{
-    button, container, horizontal_rule, horizontal_space, image, row, stack, text, Column, Row,
-};
+use iced::widget::{Column, Row, Space, button, container, image, row, rule, stack, text};
 use iced::{Center, Color, Element, Fill, Length};
 
 use crate::log_data::{
@@ -283,7 +281,7 @@ pub(super) fn build_meter_row<'a>(
     let inner: Row<'_, ViewerMessage> = row![
         text(format!("{rank}.")).size(12).color(theme::TEXT_MUTED),
         text(name.to_string()).size(12).color(class_color),
-        horizontal_space(),
+        Space::new().width(Fill),
         text(value_text.to_string())
             .size(12)
             .color(Color::from_rgb8(220, 225, 230)),
@@ -297,7 +295,7 @@ pub(super) fn build_meter_row<'a>(
 
     // Percentage label (outside the bar, right side)
     let pct_label: Element<ViewerMessage> = if pct_text.is_empty() {
-        horizontal_space().width(0).into()
+        Space::new().width(0).into()
     } else {
         text(pct_text.to_string())
             .size(12)
@@ -345,6 +343,7 @@ pub(super) fn header_action_button_style(
             radius: 4.0.into(),
         },
         shadow: iced::Shadow::default(),
+        snap: true,
     }
 }
 
@@ -364,6 +363,7 @@ pub fn transparent_button_style(_theme: &iced::Theme, status: button::Status) ->
         text_color: Color::WHITE,
         border: iced::Border::default(),
         shadow: iced::Shadow::default(),
+        snap: true,
     }
 }
 
@@ -503,6 +503,7 @@ pub(super) fn legend_toggle(
                     ..Default::default()
                 },
                 shadow: iced::Shadow::default(),
+                snap: true,
             }
         })
         .into()
@@ -564,7 +565,7 @@ pub(super) fn build_timeline_event_log<'a>(
         ]
         .spacing(8),
     );
-    col = col.push(horizontal_rule(1));
+    col = col.push(rule::horizontal(1));
 
     let mut offset_base: f64 = 0.0;
     let mut row_count: usize = 0;
@@ -942,14 +943,13 @@ fn build_death_windows<'a>(
     let mut windows = Vec::new();
     for enc in encounters {
         for entry in &log_data.entries {
-            if let LogEntry::Death { timestamp, player } = entry {
-                if *timestamp >= enc.start
-                    && *timestamp <= enc.end
-                    && log_data.combatants.contains_key(player.as_str())
-                {
-                    let window_start = (timestamp - window_secs).max(enc.start);
-                    windows.push((window_start, *timestamp, player.as_str()));
-                }
+            if let LogEntry::Death { timestamp, player } = entry
+                && *timestamp >= enc.start
+                && *timestamp <= enc.end
+                && log_data.combatants.contains_key(player.as_str())
+            {
+                let window_start = (timestamp - window_secs).max(enc.start);
+                windows.push((window_start, *timestamp, player.as_str()));
             }
         }
     }

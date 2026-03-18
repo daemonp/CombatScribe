@@ -26,7 +26,7 @@ impl ViewerState {
 
         let header = row![
             text("Loot").size(16),
-            horizontal_space(),
+            Space::new().width(Fill),
             search_input,
             expand_btn,
             collapse_btn,
@@ -125,7 +125,7 @@ impl ViewerState {
                         let mut item_row = Row::new().spacing(8).align_y(Center);
                         item_row = item_row.push(text("  ").size(12)); // indent
                         item_row = item_row.push(text(item_name).size(13).color(item_color));
-                        item_row = item_row.push(horizontal_space());
+                        item_row = item_row.push(Space::new().width(Fill));
                         item_row = item_row.push(text(&item.player).size(13).color(player_color));
 
                         if let Some(traded_to) = &item.traded_to {
@@ -145,7 +145,7 @@ impl ViewerState {
 
         scrollable(
             container(
-                column![header, horizontal_rule(1), content_col]
+                column![header, rule::horizontal(1), content_col]
                     .spacing(8)
                     .width(Fill),
             )
@@ -177,15 +177,15 @@ impl ViewerState {
                 .filter(|l| l.boss == "Trash/Other")
                 .collect(),
             EncounterFilter::Single(idx) => {
-                if let Some(enc) = self.log_data.encounters.get(*idx) {
-                    if let Some(name) = &enc.name {
-                        return self
-                            .log_data
-                            .loot
-                            .iter()
-                            .filter(|l| l.boss == *name)
-                            .collect();
-                    }
+                if let Some(enc) = self.log_data.encounters.get(*idx)
+                    && let Some(name) = &enc.name
+                {
+                    return self
+                        .log_data
+                        .loot
+                        .iter()
+                        .filter(|l| l.boss == *name)
+                        .collect();
                 }
                 Vec::new()
             }

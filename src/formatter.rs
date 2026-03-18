@@ -4,8 +4,8 @@
 //! Handles You/Your → player name conversion, pet attribution, apostrophe
 //! normalization, mob name handling, self-damage detection, and loot fixes.
 
+use rayon::prelude::*;
 use regex::Regex;
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::parser::{detect_player_names, extract_ts, get_player_name_for_timestamp};
@@ -26,43 +26,54 @@ fn name_pattern() -> String {
     format!("{l}[{L} ]+{l}")
 }
 
-/// A compiled replacement rule: regex pattern → replacement string.
-struct ReplacementRule {
-    regex: Regex,
-    replacement: String,
-    /// Optional cheap keyword pre-check: if set, skip the regex unless the
-    /// line contains this substring. Avoids regex evaluation on non-matching lines.
-    keyword: Option<&'static str>,
+/// A compiled replacement rule: either a regex or a literal string match.
+enum ReplacementRule {
+    /// Regex-based replacement for complex patterns with capture groups.
+    Regex {
+        regex: Regex,
+        replacement: String,
+        /// Optional cheap keyword pre-check: skip regex unless line contains this.
+        keyword: Option<&'static str>,
+    },
+    /// Simple literal string replacement (no regex overhead).
+    Literal { find: &'static str, replace: String },
 }
 
 /// Apply the first matching replacement from a list of rules to a line.
 ///
 /// Returns `Some(modified_line)` if a match was found, `None` otherwise.
 /// This avoids allocating a new `String` when no rules match.
-///
-/// Uses `replace_all` to match Python's `re.subn` which replaces ALL
-/// occurrences of the winning pattern within the line.
 #[inline]
 fn handle_replacements(line: &str, rules: &[ReplacementRule]) -> Option<String> {
     for rule in rules {
-        // Skip regex evaluation if the line doesn't contain the keyword
-        if let Some(kw) = rule.keyword {
-            if !line.contains(kw) {
-                continue;
+        match rule {
+            ReplacementRule::Literal { find, replace } => {
+                if line.contains(find) {
+                    return Some(line.replace(find, replace));
+                }
             }
-        }
-        let result = rule.regex.replace_all(line, rule.replacement.as_str());
-        // Cow::Owned means a replacement happened — O(1) check vs string comparison
-        if matches!(result, Cow::Owned(_)) {
-            return Some(result.into_owned());
+            ReplacementRule::Regex {
+                regex,
+                replacement,
+                keyword,
+            } => {
+                if let Some(kw) = keyword
+                    && !line.contains(kw)
+                {
+                    continue;
+                }
+                if regex.is_match(line) {
+                    return Some(regex.replace_all(line, replacement.as_str()).into_owned());
+                }
+            }
         }
     }
     None
 }
 
-/// Build a `ReplacementRule`, panicking if the regex is malformed (programming error).
+/// Build a regex `ReplacementRule`, panicking if the regex is malformed (programming error).
 fn rule(pattern: &str, replacement: String) -> ReplacementRule {
-    ReplacementRule {
+    ReplacementRule::Regex {
         regex: Regex::new(pattern).unwrap_or_else(|e| panic!("bad regex {pattern:?}: {e}")),
         replacement,
         keyword: None,
@@ -74,14 +85,28 @@ fn rule_ci(pattern: &str, replacement: String) -> ReplacementRule {
     rule(&format!("(?i){pattern}"), replacement)
 }
 
-/// Case-insensitive rule with a cheap keyword pre-check.
+/// Case-sensitive regex rule with a cheap keyword pre-check.
+fn rule_kw(pattern: &str, replacement: String, keyword: &'static str) -> ReplacementRule {
+    ReplacementRule::Regex {
+        regex: Regex::new(pattern).unwrap_or_else(|e| panic!("bad regex {pattern:?}: {e}")),
+        replacement,
+        keyword: Some(keyword),
+    }
+}
+
+/// Case-insensitive regex rule with a cheap keyword pre-check.
 fn rule_ci_kw(pattern: &str, replacement: String, keyword: &'static str) -> ReplacementRule {
-    ReplacementRule {
+    ReplacementRule::Regex {
         regex: Regex::new(&format!("(?i){pattern}"))
             .unwrap_or_else(|e| panic!("bad regex {pattern:?}: {e}")),
         replacement,
         keyword: Some(keyword),
     }
+}
+
+/// Literal string replacement (no regex, fastest path).
+fn rule_literal(find: &'static str, replace: String) -> ReplacementRule {
+    ReplacementRule::Literal { find, replace }
 }
 
 /// Build "You" replacement rules for a given player name.
@@ -92,106 +117,98 @@ fn build_you_replacements(player_name: &str) -> Vec<ReplacementRule> {
 
     vec![
         // Remove failed cast/perform lines
-        rule_ci_kw(r".*You fail to cast.*\n", String::new(), "fail to cast"),
-        rule_ci_kw(
+        rule_kw(r".*You fail to cast.*\n", String::new(), "fail to cast"),
+        rule_kw(
             r".*You fail to perform.*\n",
             String::new(),
             "fail to perform",
         ),
         // Self-suffer
-        rule_ci_kw(
+        rule_kw(
             r" You suffer (.*?) from your",
             format!(" {name} suffers $1 from {name} (self damage) 's"),
             "suffer",
         ),
         // Self-hit
-        rule_ci_kw(
+        rule_kw(
             r" Your (.*?) hits you for",
             format!(" {name} (self damage) 's $1 hits {name} for"),
             "hits you for",
         ),
         // Self parry (legacy 'was' instead of 'is')
-        rule_ci_kw(
+        rule_kw(
             r" Your (.*?) is parried by",
             format!(" {name} 's $1 was parried by"),
             "parried by",
         ),
         // Your X failed
-        rule_ci_kw(
+        rule_kw(
             r" Your (.*?) failed",
             format!(" {name} 's $1 fails"),
             "failed",
         ),
         // Failed. You are immune
-        rule_ci_kw(
+        rule_kw(
             r" failed\. You are immune",
             format!(" fails. {name} is immune"),
             "You are immune",
         ),
         // Your -> possessive (very common — matches most lines with "your"/"Your")
-        rule_ci_kw(r" [Yy]our ", format!(" {name} 's "), "our "),
+        rule_kw(r" [Yy]our ", format!(" {name} 's "), "our "),
         // You gain X from Y's -> gains from other player's spell
-        rule_ci_kw(
+        rule_kw(
             r" You gain (.*?) from (.*?)'s",
             format!(" {name} gains $1 from $2 's"),
             "You gain",
         ),
         // You gain X from -> gains from your own spell
-        rule_ci_kw(
+        rule_kw(
             r" You gain (.*?) from ",
             format!(" {name} gains $1 from {name} 's "),
             "You gain",
         ),
-        // You gain (buff gains)
-        rule_ci_kw(" You gain", format!(" {name} gains"), "You gain"),
-        rule_ci_kw(" You hit", format!(" {name} hits"), "You hit"),
-        rule_ci_kw(" You crit", format!(" {name} crits"), "You crit"),
-        rule_ci_kw(" You are", format!(" {name} is"), "You are"),
-        rule_ci_kw(" You suffer", format!(" {name} suffers"), "You suffer"),
-        rule_ci_kw(" You lose", format!(" {name} loses"), "You lose"),
-        rule_ci_kw(" You die", format!(" {name} dies"), "You die"),
-        rule_ci_kw(" You cast", format!(" {name} casts"), "You cast"),
-        rule_ci_kw(" You create", format!(" {name} creates"), "You create"),
-        rule_ci_kw(" You perform", format!(" {name} performs"), "You perform"),
-        rule_ci_kw(
-            " You interrupt",
-            format!(" {name} interrupts"),
-            "You interrupt",
-        ),
-        rule_ci_kw(" You miss", format!(" {name} misses"), "You miss"),
-        rule_ci_kw(" You attack", format!(" {name} attacks"), "You attack"),
-        rule_ci_kw(" You block", format!(" {name} blocks"), "You block"),
-        rule_ci_kw(" You parry", format!(" {name} parries"), "You parry"),
-        rule_ci_kw(" You dodge", format!(" {name} dodges"), "You dodge"),
-        rule_ci_kw(" You resist", format!(" {name} resists"), "You resist"),
-        rule_ci_kw(" You absorb", format!(" {name} absorbs"), "You absorb"),
-        rule_ci_kw(" You reflect", format!(" {name} reflects"), "You reflect"),
-        rule_ci_kw(" You receive", format!(" {name} receives"), "You receive"),
+        // You gain (buff gains) — literal replacements (no regex needed)
+        rule_literal(" You gain", format!(" {name} gains")),
+        rule_literal(" You hit", format!(" {name} hits")),
+        rule_literal(" You crit", format!(" {name} crits")),
+        rule_literal(" You are", format!(" {name} is")),
+        rule_literal(" You suffer", format!(" {name} suffers")),
+        rule_literal(" You lose", format!(" {name} loses")),
+        rule_literal(" You die", format!(" {name} dies")),
+        rule_literal(" You cast", format!(" {name} casts")),
+        rule_literal(" You create", format!(" {name} creates")),
+        rule_literal(" You perform", format!(" {name} performs")),
+        rule_literal(" You interrupt", format!(" {name} interrupts")),
+        rule_literal(" You miss", format!(" {name} misses")),
+        rule_literal(" You attack", format!(" {name} attacks")),
+        rule_literal(" You block", format!(" {name} blocks")),
+        rule_literal(" You parry", format!(" {name} parries")),
+        rule_literal(" You dodge", format!(" {name} dodges")),
+        rule_literal(" You resist", format!(" {name} resists")),
+        rule_literal(" You absorb", format!(" {name} absorbs")),
+        rule_literal(" You reflect", format!(" {name} reflects")),
+        rule_literal(" You receive", format!(" {name} receives")),
         // &You receive (LOOT etc)
-        rule_ci_kw("&You receive", format!("&{name} receives"), "&You"),
+        rule_literal("&You receive", format!("&{name} receives")),
         // &You (any remaining)
-        rule_ci_kw("&You", format!("&{name}"), "&You"),
-        rule_ci_kw(r" You deflect", format!(" {name} deflects"), "You deflect"),
+        rule_literal("&You", format!("&{name}")),
+        rule_literal(" You deflect", format!(" {name} deflects")),
         // Dodged (no 'You' in pattern — SPELLDODGEDOTHERSELF)
-        rule_ci_kw(r"was dodged\.", format!("was dodged by {name}."), "dodged"),
-        rule_ci_kw("causes you", format!("causes {name}"), "causes you"),
-        rule_ci_kw("heals you", format!("heals {name}"), "heals you"),
-        rule_ci_kw("hits you for", format!("hits {name} for"), "hits you"),
-        rule_ci_kw("crits you for", format!("crits {name} for"), "crits you"),
-        // You have slain
-        rule_ci_kw(
+        rule_literal("was dodged.", format!("was dodged by {name}.")),
+        rule_literal("causes you", format!("causes {name}")),
+        rule_literal("heals you", format!("heals {name}")),
+        rule_literal("hits you for", format!("hits {name} for")),
+        rule_literal("crits you for", format!("crits {name} for")),
+        // You have slain — needs regex for capture group
+        rule_kw(
             r" You have slain (.*?)!",
             format!(" $1 is slain by {name}."),
             "You have slain",
         ),
-        // non-whitespace before you.
-        rule_ci_kw(r"(\S)\syou\.", format!("$1 {name}."), "you."),
+        // non-whitespace before you. — needs regex for capture group
+        rule_kw(r"(\S)\syou\.", format!("$1 {name}."), "you."),
         // Fall damage
-        rule_ci_kw(
-            r" You fall and lose",
-            format!(" {name} falls and loses"),
-            "You fall",
-        ),
+        rule_literal(" You fall and lose", format!(" {name} falls and loses")),
     ]
 }
 
@@ -426,9 +443,10 @@ fn first_pass(
     let mut owner_names: HashSet<String> = HashSet::new();
 
     for line in lines.iter_mut() {
-        // DPSMate logs have " 's" already which breaks parsing, remove the space
-        if line.contains(" 's") {
-            *line = line.replace(" 's", "'s");
+        // DPSMate logs have " 's" already which breaks parsing, remove the space.
+        // In-place removal avoids a new String allocation per matching line.
+        while let Some(pos) = line.find(" 's") {
+            line.replace_range(pos..=pos, "");
         }
 
         if line.contains("COMBATANT_INFO") {
@@ -475,12 +493,11 @@ fn first_pass(
             }
         } else {
             for summoned_name in SUMMONED_PET_NAMES {
-                if line.contains(summoned_name) {
-                    if let Some(caps) = summoned_pet_owner_re.captures(line) {
-                        if let Some(owner) = caps.get(2) {
-                            owner_names.insert(format!("({})", owner.as_str()));
-                        }
-                    }
+                if line.contains(summoned_name)
+                    && let Some(caps) = summoned_pet_owner_re.captures(line)
+                    && let Some(owner) = caps.get(2)
+                {
+                    owner_names.insert(format!("({})", owner.as_str()));
                 }
             }
         }
@@ -489,7 +506,7 @@ fn first_pass(
     (pet_rename_rules, owner_names)
 }
 
-/// Second pass: apply all replacement rules to every line.
+/// Second pass: apply all replacement rules to every line (parallelized with rayon).
 fn second_pass(
     lines: &mut [String],
     player_entries: &[crate::parser::PlayerEntry],
@@ -498,7 +515,7 @@ fn second_pass(
     owner_names: &HashSet<String>,
     rules: &FormatterRules,
 ) {
-    for line in lines.iter_mut() {
+    lines.par_iter_mut().for_each(|line| {
         // Mob names with apostrophes — literal string replacements
         if line.contains('\'') {
             for &(from, to) in MOB_APOSTROPHE_PAIRS {
@@ -510,10 +527,10 @@ fn second_pass(
         }
 
         // Pet renames
-        if !pet_rename_rules.is_empty() {
-            if let Some(replaced) = handle_replacements(line, pet_rename_rules) {
-                *line = replaced;
-            }
+        if !pet_rename_rules.is_empty()
+            && let Some(replaced) = handle_replacements(line, pet_rename_rules)
+        {
+            *line = replaced;
         }
 
         // Pet replacements — skip unless an owner name is present
@@ -526,76 +543,71 @@ fn second_pass(
             && !line.contains("dies.")
             && !line.contains("is killed by")
             && !IGNORED_PET_NAMES.iter().any(|ign| line.contains(ign))
+            && let Some(replaced) = handle_replacements(line, &rules.pet)
         {
-            if let Some(replaced) = handle_replacements(line, &rules.pet) {
-                *line = replaced;
-            }
+            *line = replaced;
         }
 
         // You/Your replacements — skip if no trigger words
-        if line.contains("you") || line.contains("You") || line.contains("dodged.") {
-            if let Some(line_ts) = extract_ts(line) {
-                if let Some(current_player) = get_player_name_for_timestamp(line_ts, player_entries)
-                {
-                    if let Some(rules) = player_you_rules.get(current_player) {
-                        // Apply once
-                        if let Some(replaced) = handle_replacements(line, rules) {
-                            *line = replaced;
-                        }
-                        // Apply twice for self-casting (matches Python behavior)
-                        if let Some(replaced) = handle_replacements(line, rules) {
-                            *line = replaced;
-                        }
-                    }
-                }
+        if (line.contains("you") || line.contains("You") || line.contains("dodged."))
+            && let Some(line_ts) = extract_ts(line)
+            && let Some(current_player) = get_player_name_for_timestamp(line_ts, player_entries)
+            && let Some(rules) = player_you_rules.get(current_player)
+        {
+            // Apply once
+            if let Some(replaced) = handle_replacements(line, rules) {
+                *line = replaced;
+            }
+            // Apply twice for self-casting (matches Python behavior)
+            if let Some(replaced) = handle_replacements(line, rules) {
+                *line = replaced;
             }
         }
 
         // Generic replacements — skip if no apostrophe or relevant keywords
-        if line.contains('\'')
+        if (line.contains('\'')
             || line.contains(" fades from ")
             || line.contains(" gains ")
-            || line.contains(" is afflicted by ")
+            || line.contains(" is afflicted by "))
+            && let Some(replaced) = handle_replacements(line, &rules.generic)
         {
-            if let Some(replaced) = handle_replacements(line, &rules.generic) {
-                *line = replaced;
-            }
+            *line = replaced;
         }
 
         // Renames — skip if no relevant keywords
-        if line.contains("Totem ")
+        if (line.contains("Totem ")
             || line.contains("Lightning Strike")
             || line.contains("Onyxias")
-            || line.contains("Sarturas")
+            || line.contains("Sarturas"))
+            && let Some(replaced) = handle_replacements(line, &rules.rename)
         {
-            if let Some(replaced) = handle_replacements(line, &rules.rename) {
-                *line = replaced;
-            }
+            *line = replaced;
         }
 
         // Friendly fire checks — skip if no "Power Overwhelming"
-        if line.contains("Power Overwhelming") {
-            if let Some(replaced) = handle_replacements(line, &rules.friendly_fire) {
-                *line = replaced;
-            }
+        if line.contains("Power Overwhelming")
+            && let Some(replaced) = handle_replacements(line, &rules.friendly_fire)
+        {
+            *line = replaced;
         }
 
         // Self damage checks — skip if no " 's " pattern
         if line.contains(" 's ") {
             for rule in &rules.self_damage {
-                if let Some(caps) = rule.regex.captures(line) {
+                if let ReplacementRule::Regex {
+                    regex, replacement, ..
+                } = rule
+                    && let Some(caps) = regex.captures(line)
+                {
                     // Check group 1 == group 4 (player hitting themselves)
-                    if let (Some(g1), Some(g4)) = (caps.get(1), caps.get(4)) {
-                        if g1.as_str().trim() == g4.as_str().trim() {
-                            *line = rule
-                                .regex
-                                .replace_all(line, rule.replacement.as_str())
-                                .into_owned();
-                            break;
-                        }
+                    if let (Some(g1), Some(g4)) = (caps.get(1), caps.get(4))
+                        && g1.as_str().trim() == g4.as_str().trim()
+                    {
+                        *line = regex.replace_all(line, replacement.as_str()).into_owned();
+                        break;
                     }
                 }
             }
         }
-    }
+    });
 }

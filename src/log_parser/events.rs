@@ -6,8 +6,8 @@ use crate::log_data::{
 };
 
 use super::regex::{
-    DISPEL_SPELLS, INTERRUPT_SPELLS, RESURRECT_SPELLS, RE_AFFLICTED, RE_BUFF_FADE, RE_BUFF_GAIN,
-    RE_CAST, RE_CONSUMABLE, RE_DODGE, RE_LOOT, RE_MISS, RE_PARRY, RE_PET_OWNER, RE_TRADE,
+    DISPEL_SPELLS, INTERRUPT_SPELLS, RE_AFFLICTED, RE_BUFF_FADE, RE_BUFF_GAIN, RE_CAST,
+    RE_CONSUMABLE, RE_DODGE, RE_LOOT, RE_MISS, RE_PARRY, RE_PET_OWNER, RE_TRADE, RESURRECT_SPELLS,
 };
 
 // ── Cast, Buff, Loot & Avoidance Parsing ────────────────────────────────────
@@ -144,26 +144,24 @@ pub(super) fn parse_pet_ownership(trimmed: &str, data: &mut LogData) {
 /// Uses `all_combatants` (built from `COMBATANT_INFO` during parsing) rather
 /// than `combatants` (which is only populated in post-processing).
 pub(super) fn parse_avoidance(trimmed: &str, data: &mut LogData) {
-    if let Some(caps) = RE_DODGE.captures(trimmed) {
-        if let Some(defender) = caps.get(2).map(|m| m.as_str()) {
-            if data.all_combatants.contains_key(defender) {
-                data.avoidance
-                    .entry(defender.to_string())
-                    .or_default()
-                    .dodges += 1;
-            }
-        }
+    if let Some(caps) = RE_DODGE.captures(trimmed)
+        && let Some(defender) = caps.get(2).map(|m| m.as_str())
+        && data.all_combatants.contains_key(defender)
+    {
+        data.avoidance
+            .entry(defender.to_string())
+            .or_default()
+            .dodges += 1;
     }
 
-    if let Some(caps) = RE_PARRY.captures(trimmed) {
-        if let Some(defender) = caps.get(2).map(|m| m.as_str()) {
-            if data.all_combatants.contains_key(defender) {
-                data.avoidance
-                    .entry(defender.to_string())
-                    .or_default()
-                    .parries += 1;
-            }
-        }
+    if let Some(caps) = RE_PARRY.captures(trimmed)
+        && let Some(defender) = caps.get(2).map(|m| m.as_str())
+        && data.all_combatants.contains_key(defender)
+    {
+        data.avoidance
+            .entry(defender.to_string())
+            .or_default()
+            .parries += 1;
     }
 
     if let Some(caps) = RE_MISS.captures(trimmed) {
@@ -197,133 +195,129 @@ pub(super) fn parse_avoidance(trimmed: &str, data: &mut LogData) {
 /// than `combatants` (which is only populated in post-processing).
 pub(super) fn parse_buff_events(trimmed: &str, timestamp: f64, data: &mut LogData) {
     if let Some(caps) = RE_BUFF_GAIN.captures(trimmed) {
-        if let Some(player) = caps.get(1).map(|m| m.as_str()) {
-            if let Some(buff) = caps.get(2).map(|m| m.as_str().trim().to_string()) {
-                if data.all_combatants.contains_key(player) {
-                    let stacks: u32 = caps
-                        .get(3)
-                        .and_then(|m| m.as_str().parse().ok())
-                        .unwrap_or(1);
-                    let buffs = data.buffs.entry(player.to_string()).or_default();
-                    let stats = buffs.entry(buff.clone()).or_default();
-                    stats.gains += 1;
-                    if stats.first_gain.is_none() {
-                        stats.first_gain = Some(timestamp);
-                    }
-                    data.entries.push(LogEntry::AuraGain {
-                        timestamp,
-                        player: player.to_string(),
-                        aura: buff,
-                        stacks,
-                    });
-                }
+        if let Some(player) = caps.get(1).map(|m| m.as_str())
+            && let Some(buff) = caps.get(2).map(|m| m.as_str().trim().to_string())
+            && data.all_combatants.contains_key(player)
+        {
+            let stacks: u32 = caps
+                .get(3)
+                .and_then(|m| m.as_str().parse().ok())
+                .unwrap_or(1);
+            let buffs = data.buffs.entry(player.to_string()).or_default();
+            let stats = buffs.entry(buff.clone()).or_default();
+            stats.gains += 1;
+            if stats.first_gain.is_none() {
+                stats.first_gain = Some(timestamp);
             }
+            data.entries.push(LogEntry::AuraGain {
+                timestamp,
+                player: player.to_string(),
+                aura: buff,
+                stacks,
+            });
         }
         return;
     }
 
     if let Some(caps) = RE_BUFF_FADE.captures(trimmed) {
-        if let Some(buff) = caps.get(1).map(|m| m.as_str().trim().to_string()) {
-            if let Some(player) = caps.get(2).map(|m| m.as_str()) {
-                if data.all_combatants.contains_key(player) {
-                    let buffs = data.buffs.entry(player.to_string()).or_default();
-                    let stats = buffs.entry(buff.clone()).or_default();
-                    stats.fades += 1;
-                    stats.last_fade = Some(timestamp);
-                    data.entries.push(LogEntry::AuraFade {
-                        timestamp,
-                        player: player.to_string(),
-                        aura: buff,
-                    });
-                }
-            }
+        if let Some(buff) = caps.get(1).map(|m| m.as_str().trim().to_string())
+            && let Some(player) = caps.get(2).map(|m| m.as_str())
+            && data.all_combatants.contains_key(player)
+        {
+            let buffs = data.buffs.entry(player.to_string()).or_default();
+            let stats = buffs.entry(buff.clone()).or_default();
+            stats.fades += 1;
+            stats.last_fade = Some(timestamp);
+            data.entries.push(LogEntry::AuraFade {
+                timestamp,
+                player: player.to_string(),
+                aura: buff,
+            });
         }
         return;
     }
 
     // "is afflicted by" — debuff application with optional stack count
-    if let Some(caps) = RE_AFFLICTED.captures(trimmed) {
-        if let Some(player) = caps.get(1).map(|m| m.as_str()) {
-            if let Some(debuff) = caps.get(2).map(|m| m.as_str().trim().to_string()) {
-                if data.all_combatants.contains_key(player) {
-                    let stacks: u32 = caps
-                        .get(3)
-                        .and_then(|m| m.as_str().parse().ok())
-                        .unwrap_or(1);
-                    let buffs = data.buffs.entry(player.to_string()).or_default();
-                    let stats = buffs.entry(debuff.clone()).or_default();
-                    stats.gains += 1;
-                    if stats.first_gain.is_none() {
-                        stats.first_gain = Some(timestamp);
-                    }
-                    data.entries.push(LogEntry::AuraGain {
-                        timestamp,
-                        player: player.to_string(),
-                        aura: debuff,
-                        stacks,
-                    });
-                }
-            }
+    if let Some(caps) = RE_AFFLICTED.captures(trimmed)
+        && let Some(player) = caps.get(1).map(|m| m.as_str())
+        && let Some(debuff) = caps.get(2).map(|m| m.as_str().trim().to_string())
+        && data.all_combatants.contains_key(player)
+    {
+        let stacks: u32 = caps
+            .get(3)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(1);
+        let buffs = data.buffs.entry(player.to_string()).or_default();
+        let stats = buffs.entry(debuff.clone()).or_default();
+        stats.gains += 1;
+        if stats.first_gain.is_none() {
+            stats.first_gain = Some(timestamp);
         }
+        data.entries.push(LogEntry::AuraGain {
+            timestamp,
+            player: player.to_string(),
+            aura: debuff,
+            stacks,
+        });
     }
 }
 
 /// Parse loot and trade events.
 pub(super) fn parse_loot_trade(trimmed: &str, timestamp: f64, data: &mut LogData) {
-    if trimmed.contains("LOOT:") {
-        if let Some(caps) = RE_LOOT.captures(trimmed) {
-            let Some(player) = caps.get(1).map(|m| m.as_str().to_string()) else {
-                return;
-            };
-            let Some(color_code) = caps.get(2).map(|m| m.as_str()) else {
-                return;
-            };
-            let item_id: u64 = caps
-                .get(3)
-                .and_then(|m| m.as_str().parse().ok())
-                .unwrap_or(0);
-            let Some(item_name) = caps.get(4).map(|m| m.as_str().to_string()) else {
-                return;
-            };
-            let quantity: u64 = caps
-                .get(5)
-                .and_then(|m| m.as_str().parse().ok())
-                .unwrap_or(1);
+    if trimmed.contains("LOOT:")
+        && let Some(caps) = RE_LOOT.captures(trimmed)
+    {
+        let Some(player) = caps.get(1).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let Some(color_code) = caps.get(2).map(|m| m.as_str()) else {
+            return;
+        };
+        let item_id: u64 = caps
+            .get(3)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let Some(item_name) = caps.get(4).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let quantity: u64 = caps
+            .get(5)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(1);
 
-            let quality = ItemQuality::from_color_code(color_code);
+        let quality = ItemQuality::from_color_code(color_code);
 
-            data.loot.push(LootEvent {
-                timestamp,
-                player,
-                item_name,
-                item_id,
-                quality,
-                quantity,
-                boss: String::new(),
-                traded_to: None,
-            });
-        }
+        data.loot.push(LootEvent {
+            timestamp,
+            player,
+            item_name,
+            item_id,
+            quality,
+            quantity,
+            boss: String::new(),
+            traded_to: None,
+        });
     }
 
-    if trimmed.contains("LOOT_TRADE:") {
-        if let Some(caps) = RE_TRADE.captures(trimmed) {
-            let Some(from_player) = caps.get(1).map(|m| m.as_str().to_string()) else {
-                return;
-            };
-            let Some(item_name) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
-                return;
-            };
-            let Some(to_player) = caps.get(3).map(|m| m.as_str().to_string()) else {
-                return;
-            };
+    if trimmed.contains("LOOT_TRADE:")
+        && let Some(caps) = RE_TRADE.captures(trimmed)
+    {
+        let Some(from_player) = caps.get(1).map(|m| m.as_str().to_string()) else {
+            return;
+        };
+        let Some(item_name) = caps.get(2).map(|m| m.as_str().trim().to_string()) else {
+            return;
+        };
+        let Some(to_player) = caps.get(3).map(|m| m.as_str().to_string()) else {
+            return;
+        };
 
-            data.trades.push(TradeEvent {
-                timestamp,
-                from_player,
-                item_name,
-                to_player,
-            });
-        }
+        data.trades.push(TradeEvent {
+            timestamp,
+            from_player,
+            item_name,
+            to_player,
+        });
     }
 }
 

@@ -29,6 +29,14 @@ use post_process::post_process;
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
+/// Last damage information for death attribution.
+#[derive(Debug, Clone)]
+pub(super) struct LastDamageInfo {
+    source: String,
+    spell: String,
+    amount: u64,
+}
+
 /// Mutable state tracked across the main parse loop.
 pub(super) struct ParseState {
     pub(super) in_combat: bool,
@@ -45,6 +53,11 @@ pub(super) struct ParseState {
     pub(super) encounter_deaths: HashSet<String>,
     /// Players who participated in the current encounter (dealt/took damage).
     pub(super) encounter_active: HashSet<String>,
+    /// Last damage received by each player (for death attribution).
+    ///
+    /// Maps target name → last damage info. Cleared on encounter boundaries
+    /// to prevent cross-encounter attribution.
+    pub(super) last_damage: HashMap<String, LastDamageInfo>,
 }
 
 /// Parse the session lines into a fully populated `LogData`.
@@ -62,6 +75,7 @@ pub fn parse_log(lines: &[String]) -> LogData {
         health_deficit: HashMap::new(),
         encounter_deaths: HashSet::new(),
         encounter_active: HashSet::new(),
+        last_damage: HashMap::new(),
     };
 
     for line in lines {
@@ -125,7 +139,13 @@ pub fn parse_log(lines: &[String]) -> LogData {
         // Damage: must contain " for " (hits X for N, crits X for N, suffers N from)
         // or " suffers " (suffer format)
         if trimmed.contains(" for ") || trimmed.contains(" suffers ") {
-            parse_damage_events(trimmed, timestamp, &mut data, &mut state.health_deficit);
+            parse_damage_events(
+                trimmed,
+                timestamp,
+                &mut data,
+                &mut state.health_deficit,
+                &mut state.last_damage,
+            );
         }
 
         // Healing: "heals" or "health from"
@@ -142,17 +162,17 @@ pub fn parse_log(lines: &[String]) -> LogData {
         // Track active players for per-encounter scoreboard (wipe detection).
         // Check the last entry added — if source or target is a known combatant
         // (player), record them as active in this encounter.
-        if state.in_combat {
-            if let Some(entry) = data.entries.last() {
-                let src = entry.source();
-                if data.all_combatants.contains_key(src) {
-                    state.encounter_active.insert(src.to_string());
-                }
-                if let Some(tgt) = entry.target() {
-                    if data.all_combatants.contains_key(tgt) {
-                        state.encounter_active.insert(tgt.to_string());
-                    }
-                }
+        if state.in_combat
+            && let Some(entry) = data.entries.last()
+        {
+            let src = entry.source();
+            if data.all_combatants.contains_key(src) {
+                state.encounter_active.insert(src.to_string());
+            }
+            if let Some(tgt) = entry.target()
+                && data.all_combatants.contains_key(tgt)
+            {
+                state.encounter_active.insert(tgt.to_string());
             }
         }
 

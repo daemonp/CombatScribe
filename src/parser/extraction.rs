@@ -39,11 +39,7 @@ pub(crate) fn extract_zone(line: &str) -> Option<&str> {
     let after = &rest[amp1 + 1..];
     let amp2 = after.find('&')?;
     let zone = &after[..amp2];
-    if zone.is_empty() {
-        None
-    } else {
-        Some(zone)
-    }
+    if zone.is_empty() { None } else { Some(zone) }
 }
 
 // ── Combatant Extraction ────────────────────────────────────────────────────
@@ -250,6 +246,8 @@ pub fn detect_player_names(lines: &[String]) -> Vec<PlayerEntry> {
 }
 
 /// Get the player name that applies for a given timestamp.
+///
+/// Uses binary search (`partition_point`) since entries are sorted by timestamp.
 pub fn get_player_name_for_timestamp<'a>(
     timestamp: &str,
     player_entries: &'a [PlayerEntry],
@@ -258,15 +256,15 @@ pub fn get_player_name_for_timestamp<'a>(
         return None;
     }
 
-    let mut current_player = &player_entries[0].name;
-    for entry in player_entries {
-        if entry.timestamp.as_str() <= timestamp {
-            current_player = &entry.name;
-        } else {
-            break;
-        }
+    // partition_point returns the first index where the predicate is false,
+    // i.e. the first entry with timestamp > our target. We want the one before it.
+    let idx = player_entries.partition_point(|e| e.timestamp.as_str() <= timestamp);
+    if idx == 0 {
+        // All entries are after this timestamp — use the first player
+        Some(&player_entries[0].name)
+    } else {
+        Some(&player_entries[idx - 1].name)
     }
-    Some(current_player)
 }
 
 /// Extract the timestamp substring from a line (public for formatter use).
@@ -282,11 +280,7 @@ pub(super) fn extract_you_player_name(line: &str) -> Option<&str> {
     let mut splits = line.splitn(3, '&');
     splits.next()?; // before first &
     let name = splits.next()?;
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 /// Count occurrences of a byte in a byte slice.

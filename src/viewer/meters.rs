@@ -120,7 +120,7 @@ impl ViewerState {
         }
 
         let damage_panel: Element<ViewerMessage> = container(
-            column![dmg_header, horizontal_rule(1), dmg_col]
+            column![dmg_header, rule::horizontal(1), dmg_col]
                 .spacing(8)
                 .width(Fill),
         )
@@ -166,7 +166,7 @@ impl ViewerState {
         }
 
         let healing_panel: Element<ViewerMessage> = container(
-            column![heal_header, horizontal_rule(1), heal_col]
+            column![heal_header, rule::horizontal(1), heal_col]
                 .spacing(8)
                 .width(Fill),
         )
@@ -245,7 +245,7 @@ impl ViewerState {
         );
 
         container(
-            column![header, horizontal_rule(1), meter_col]
+            column![header, rule::horizontal(1), meter_col]
                 .spacing(8)
                 .width(Fill),
         )
@@ -287,7 +287,7 @@ impl ViewerState {
         .align_y(Center);
 
         container(
-            column![header, horizontal_rule(1), content]
+            column![header, rule::horizontal(1), content]
                 .spacing(8)
                 .width(Fill),
         )
@@ -309,7 +309,7 @@ impl ViewerState {
             &players,
             theme::BAR_DEATH,
             "No deaths recorded",
-            None,
+            Some(DetailType::Deaths),
             "deaths",
         )
     }
@@ -388,6 +388,15 @@ impl ViewerState {
             }
             if av.missed_by > 0 {
                 breakdown.push(format!("{} miss", av.missed_by));
+            }
+            if av.full_resists > 0 {
+                breakdown.push(format!("{} full resist", av.full_resists));
+            }
+            if av.full_absorbs > 0 {
+                breakdown.push(format!("{} full absorb", av.full_absorbs));
+            }
+            if av.full_blocks > 0 {
+                breakdown.push(format!("{} full block", av.full_blocks));
             }
             let detail_str = format!("{} ({})", value, breakdown.join(", "));
 

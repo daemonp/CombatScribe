@@ -5,7 +5,38 @@
 use super::components::*;
 #[allow(clippy::wildcard_imports)] // viewer UI — many shared types/widgets used throughout
 use super::*;
-use iced::widget::column;
+use iced::widget::{column, table};
+
+// ── Row Types for Table Widget ──────────────────────────────────────────────
+
+/// Pre-computed row data for the ability breakdown table.
+#[derive(Clone)]
+struct AbilityRow {
+    spell: String,
+    display_total: u64,
+    hits: u64,
+    crits: u64,
+    crit_pct: f64,
+    avg: u64,
+    percent: f64,
+    /// Overheal percentage — present only for healing breakdowns.
+    oh_pct: Option<f64>,
+}
+
+/// Pre-computed row data for the damage-taken-per-ability table.
+#[derive(Clone)]
+struct DamageTakenRow {
+    spell: String,
+    total: u64,
+    hits: u64,
+    avg: u64,
+    crits: u64,
+    absorbed: u64,
+    resisted: u64,
+    blocked: u64,
+    crushing_hits: u64,
+    percent: f64,
+}
 
 // ── Detail Overlay ──────────────────────────────────────────────────────────
 
@@ -32,12 +63,13 @@ impl ViewerState {
             DetailType::Avoidance => format!("{} - Avoidance Breakdown", detail.player_name),
             DetailType::Buffs => format!("{} - Buff Breakdown", detail.player_name),
             DetailType::Consumables => format!("{} - Consumable Usage", detail.player_name),
+            DetailType::Deaths => format!("{} - Death Recap", detail.player_name),
         };
 
         // Player info bar (spec/race/guild) — shown for all detail types
         let player_info = self.view_player_info_bar(&detail.player_name);
 
-        let header = row![text(title).size(18), horizontal_space(), close_btn,]
+        let header = row![text(title).size(18), Space::new().width(Fill), close_btn,]
             .spacing(8)
             .align_y(Center)
             .width(Fill);
@@ -53,11 +85,12 @@ impl ViewerState {
             DetailType::Avoidance => self.view_avoidance_detail(&detail.player_name),
             DetailType::Buffs => self.view_buff_detail(&detail.player_name),
             DetailType::Consumables => self.view_consumable_detail(&detail.player_name),
+            DetailType::Deaths => self.view_death_detail(&detail.player_name),
         };
 
         scrollable(
             container(
-                column![header, player_info, horizontal_rule(1), content]
+                column![header, player_info, rule::horizontal(1), content]
                     .spacing(10)
                     .width(Fill),
             )
@@ -208,133 +241,141 @@ impl ViewerState {
 
         // Ability table — healing gets an extra "OH%" column
         let is_healing = dtype == DetailType::Healing;
-        let table_header = if is_healing {
-            row![
-                text("Ability").size(12).width(Length::FillPortion(3)),
-                text(heal_value_label)
-                    .size(12)
-                    .width(Length::FillPortion(1)),
-                text("OH%").size(12).width(Length::FillPortion(1)),
-                text("Hits").size(12).width(Length::FillPortion(1)),
-                text("Crits").size(12).width(Length::FillPortion(1)),
-                text("Crit%").size(12).width(Length::FillPortion(1)),
-                text("Avg").size(12).width(Length::FillPortion(1)),
-                text("%").size(12).width(Length::FillPortion(1)),
-            ]
-            .spacing(4)
-            .width(Fill)
-        } else {
-            row![
-                text("Ability").size(12).width(Length::FillPortion(3)),
-                text("Total").size(12).width(Length::FillPortion(1)),
-                text("Hits").size(12).width(Length::FillPortion(1)),
-                text("Crits").size(12).width(Length::FillPortion(1)),
-                text("Crit%").size(12).width(Length::FillPortion(1)),
-                text("Avg").size(12).width(Length::FillPortion(1)),
-                text("%").size(12).width(Length::FillPortion(1)),
-            ]
-            .spacing(4)
-            .width(Fill)
-        };
 
-        let mut table = Column::new().spacing(2);
-        table = table.push(text("Ability Breakdown").size(13).color([0.6, 0.6, 0.6]));
-        table = table.push(table_header);
-        table = table.push(horizontal_rule(1));
-
-        for (spell, ab) in &sorted {
-            let display_total = if is_healing {
-                match self.healing_type {
-                    HealingType::Effective => ab.effective,
-                    HealingType::Raw => ab.total,
-                    HealingType::Overhealing => ab.overheal,
-                }
-            } else {
-                ab.total
-            };
-            let percent = if total > 0 {
-                #[allow(clippy::cast_precision_loss)] // ability totals never approach 2^52
-                let pct = display_total as f64 / total as f64 * 100.0;
-                pct
-            } else {
-                0.0
-            };
-            let avg = display_total.checked_div(ab.hits).unwrap_or(0);
-            let crit_pct = if ab.hits > 0 {
-                #[allow(clippy::cast_precision_loss)] // hit counts never approach 2^52
-                let pct = ab.crits as f64 / ab.hits as f64 * 100.0;
-                pct
-            } else {
-                0.0
-            };
-
-            if is_healing {
-                let oh_pct = if ab.total > 0 {
-                    #[allow(clippy::cast_precision_loss)] // ability totals never approach 2^52
-                    let pct = ab.overheal as f64 / ab.total as f64 * 100.0;
-                    pct
+        // Pre-compute row data for the table widget
+        #[allow(clippy::cast_precision_loss)] // ability totals never approach 2^52
+        let rows: Vec<AbilityRow> = sorted
+            .iter()
+            .map(|(spell, ab)| {
+                let display_total = if is_healing {
+                    match self.healing_type {
+                        HealingType::Effective => ab.effective,
+                        HealingType::Raw => ab.total,
+                        HealingType::Overhealing => ab.overheal,
+                    }
+                } else {
+                    ab.total
+                };
+                let percent = if total > 0 {
+                    display_total as f64 / total as f64 * 100.0
                 } else {
                     0.0
                 };
-                table = table.push(
-                    row![
-                        text(spell.clone()).size(12).width(Length::FillPortion(3)),
-                        text(theme::format_number(display_total))
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(format!("{oh_pct:.1}%"))
-                            .size(12)
-                            .color(theme::TEXT_SECONDARY)
-                            .width(Length::FillPortion(1)),
-                        text(ab.hits.to_string())
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(ab.crits.to_string())
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(format!("{crit_pct:.1}%"))
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(theme::format_number(avg))
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(format!("{percent:.1}%"))
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                    ]
-                    .spacing(4)
-                    .width(Fill),
-                );
-            } else {
-                table = table.push(
-                    row![
-                        text(spell.clone()).size(12).width(Length::FillPortion(3)),
-                        text(theme::format_number(display_total))
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(ab.hits.to_string())
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(ab.crits.to_string())
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(format!("{crit_pct:.1}%"))
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(theme::format_number(avg))
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(format!("{percent:.1}%"))
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                    ]
-                    .spacing(4)
-                    .width(Fill),
-                );
-            }
-        }
+                let avg = display_total.checked_div(ab.hits).unwrap_or(0);
+                let crit_pct = if ab.hits > 0 {
+                    ab.crits as f64 / ab.hits as f64 * 100.0
+                } else {
+                    0.0
+                };
+                let oh_pct = if is_healing && ab.total > 0 {
+                    Some(ab.overheal as f64 / ab.total as f64 * 100.0)
+                } else {
+                    None
+                };
+                AbilityRow {
+                    spell: spell.clone(),
+                    display_total,
+                    hits: ab.hits,
+                    crits: ab.crits,
+                    crit_pct,
+                    avg,
+                    percent,
+                    oh_pct,
+                }
+            })
+            .collect();
 
-        column![summary, opener_section, table,]
+        let header = |label: &str| text(label.to_string()).size(12);
+        let value_label = if is_healing {
+            heal_value_label.to_string()
+        } else {
+            "Total".to_string()
+        };
+
+        let ability_table: Element<'_, ViewerMessage> = if is_healing {
+            let columns = [
+                table::column(header("Ability"), |r: AbilityRow| text(r.spell).size(12))
+                    .width(Length::FillPortion(3)),
+                table::column(header(&value_label), |r: AbilityRow| {
+                    text(theme::format_number(r.display_total)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("OH%"), |r: AbilityRow| {
+                    text(format!("{:.1}%", r.oh_pct.unwrap_or(0.0)))
+                        .size(12)
+                        .color(theme::TEXT_SECONDARY)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Hits"), |r: AbilityRow| {
+                    text(r.hits.to_string()).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Crits"), |r: AbilityRow| {
+                    text(r.crits.to_string()).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Crit%"), |r: AbilityRow| {
+                    text(format!("{:.1}%", r.crit_pct)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Avg"), |r: AbilityRow| {
+                    text(theme::format_number(r.avg)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("%"), |r: AbilityRow| {
+                    text(format!("{:.1}%", r.percent)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+            ];
+            table::table(columns, rows)
+                .padding_x(2)
+                .padding_y(2)
+                .separator_y(1)
+                .into()
+        } else {
+            let columns = [
+                table::column(header("Ability"), |r: AbilityRow| text(r.spell).size(12))
+                    .width(Length::FillPortion(3)),
+                table::column(header(&value_label), |r: AbilityRow| {
+                    text(theme::format_number(r.display_total)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Hits"), |r: AbilityRow| {
+                    text(r.hits.to_string()).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Crits"), |r: AbilityRow| {
+                    text(r.crits.to_string()).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Crit%"), |r: AbilityRow| {
+                    text(format!("{:.1}%", r.crit_pct)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Avg"), |r: AbilityRow| {
+                    text(theme::format_number(r.avg)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("%"), |r: AbilityRow| {
+                    text(format!("{:.1}%", r.percent)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+            ];
+            table::table(columns, rows)
+                .padding_x(2)
+                .padding_y(2)
+                .separator_y(1)
+                .into()
+        };
+
+        let ability_section = column![
+            text("Ability Breakdown").size(13).color([0.6, 0.6, 0.6]),
+            ability_table,
+        ]
+        .spacing(4)
+        .width(Fill);
+
+        column![summary, opener_section, ability_section,]
             .spacing(10)
             .width(Fill)
             .into()
@@ -388,6 +429,8 @@ impl ViewerState {
         let mut content = Column::new().spacing(12);
         content = content.push(summary);
 
+        let header = |label: &str| text(label.to_string()).size(11);
+
         for (source_name, source_total) in &source_totals {
             let Some(abilities) = ps.damage_taken_breakdown.get(source_name) else {
                 continue;
@@ -404,7 +447,7 @@ impl ViewerState {
                 text(source_name.clone())
                     .size(14)
                     .color(Color::from_rgb8(200, 160, 100)),
-                horizontal_space(),
+                Space::new().width(Fill),
                 text(format!(
                     "{} ({:.1}%)",
                     theme::format_number(*source_total),
@@ -417,104 +460,104 @@ impl ViewerState {
             .align_y(Center)
             .width(Fill);
 
-            // Sort abilities within this source by total descending
+            // Sort abilities within this source by total descending, pre-compute rows
             let mut sorted_abilities: Vec<(&String, &log_data::DamageTakenAbilityStats)> =
                 abilities.iter().collect();
             sorted_abilities.sort_by_key(|(_, a)| Reverse(a.total));
 
-            // Table header
-            let table_header = row![
-                text("Ability").size(11).width(Length::FillPortion(3)),
-                text("Total").size(11).width(Length::FillPortion(2)),
-                text("Hits").size(11).width(Length::FillPortion(1)),
-                text("Avg").size(11).width(Length::FillPortion(2)),
-                text("Crit").size(11).width(Length::FillPortion(1)),
-                text("Absorb").size(11).width(Length::FillPortion(2)),
-                text("Resist").size(11).width(Length::FillPortion(2)),
-                text("Block").size(11).width(Length::FillPortion(2)),
-                text("Crush").size(11).width(Length::FillPortion(1)),
-                text("%").size(11).width(Length::FillPortion(1)),
-            ]
-            .spacing(4)
-            .width(Fill);
+            #[allow(clippy::cast_precision_loss)] // damage values never approach 2^52
+            let rows: Vec<DamageTakenRow> = sorted_abilities
+                .iter()
+                .map(|(spell_name, ab)| {
+                    let avg = ab.total.checked_div(ab.hits).unwrap_or(0);
+                    let pct = if total > 0 {
+                        ab.total as f64 / total as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    DamageTakenRow {
+                        spell: (*spell_name).clone(),
+                        total: ab.total,
+                        hits: ab.hits,
+                        avg,
+                        crits: ab.crits,
+                        absorbed: ab.absorbed,
+                        resisted: ab.resisted,
+                        blocked: ab.blocked,
+                        crushing_hits: ab.crushing_hits,
+                        percent: pct,
+                    }
+                })
+                .collect();
 
-            let mut table = Column::new().spacing(2);
-            table = table.push(table_header);
-            table = table.push(horizontal_rule(1));
-
-            for (spell_name, ab) in &sorted_abilities {
-                let avg = ab.total.checked_div(ab.hits).unwrap_or(0);
-                #[allow(clippy::cast_precision_loss)] // damage values never approach 2^52
-                let pct = if total > 0 {
-                    ab.total as f64 / total as f64 * 100.0
-                } else {
-                    0.0
-                };
-
-                let absorb_str = if ab.absorbed > 0 {
-                    theme::format_number(ab.absorbed)
+            let fmt_or_dash = |val: u64| -> String {
+                if val > 0 {
+                    theme::format_number(val)
                 } else {
                     "-".to_string()
-                };
-                let resist_str = if ab.resisted > 0 {
-                    theme::format_number(ab.resisted)
-                } else {
-                    "-".to_string()
-                };
-                let block_str = if ab.blocked > 0 {
-                    theme::format_number(ab.blocked)
-                } else {
-                    "-".to_string()
-                };
-                let crush_str = if ab.crushing_hits > 0 {
-                    ab.crushing_hits.to_string()
-                } else {
-                    "-".to_string()
-                };
+                }
+            };
 
-                table = table.push(
-                    row![
-                        text((*spell_name).clone())
-                            .size(12)
-                            .width(Length::FillPortion(3)),
-                        text(theme::format_number(ab.total))
-                            .size(12)
-                            .width(Length::FillPortion(2)),
-                        text(ab.hits.to_string())
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(theme::format_number(avg))
-                            .size(12)
-                            .width(Length::FillPortion(2)),
-                        text(ab.crits.to_string())
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                        text(absorb_str)
-                            .size(12)
-                            .color(theme::TEXT_SECONDARY)
-                            .width(Length::FillPortion(2)),
-                        text(resist_str)
-                            .size(12)
-                            .color(theme::TEXT_SECONDARY)
-                            .width(Length::FillPortion(2)),
-                        text(block_str)
-                            .size(12)
-                            .color(theme::TEXT_SECONDARY)
-                            .width(Length::FillPortion(2)),
-                        text(crush_str)
-                            .size(12)
-                            .color(Color::from_rgb8(200, 100, 100))
-                            .width(Length::FillPortion(1)),
-                        text(format!("{pct:.1}%"))
-                            .size(12)
-                            .width(Length::FillPortion(1)),
-                    ]
-                    .spacing(4)
-                    .width(Fill),
-                );
-            }
+            let columns = [
+                table::column(header("Ability"), |r: DamageTakenRow| {
+                    text(r.spell).size(12)
+                })
+                .width(Length::FillPortion(3)),
+                table::column(header("Total"), |r: DamageTakenRow| {
+                    text(theme::format_number(r.total)).size(12)
+                })
+                .width(Length::FillPortion(2)),
+                table::column(header("Hits"), |r: DamageTakenRow| {
+                    text(r.hits.to_string()).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Avg"), |r: DamageTakenRow| {
+                    text(theme::format_number(r.avg)).size(12)
+                })
+                .width(Length::FillPortion(2)),
+                table::column(header("Crit"), |r: DamageTakenRow| {
+                    text(r.crits.to_string()).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Absorb"), move |r: DamageTakenRow| {
+                    text(fmt_or_dash(r.absorbed))
+                        .size(12)
+                        .color(theme::TEXT_SECONDARY)
+                })
+                .width(Length::FillPortion(2)),
+                table::column(header("Resist"), move |r: DamageTakenRow| {
+                    text(fmt_or_dash(r.resisted))
+                        .size(12)
+                        .color(theme::TEXT_SECONDARY)
+                })
+                .width(Length::FillPortion(2)),
+                table::column(header("Block"), move |r: DamageTakenRow| {
+                    text(fmt_or_dash(r.blocked))
+                        .size(12)
+                        .color(theme::TEXT_SECONDARY)
+                })
+                .width(Length::FillPortion(2)),
+                table::column(header("Crush"), |r: DamageTakenRow| {
+                    let s = if r.crushing_hits > 0 {
+                        r.crushing_hits.to_string()
+                    } else {
+                        "-".to_string()
+                    };
+                    text(s).size(12).color(Color::from_rgb8(200, 100, 100))
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("%"), |r: DamageTakenRow| {
+                    text(format!("{:.1}%", r.percent)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+            ];
 
-            content = content.push(column![source_header, table].spacing(4).width(Fill));
+            let source_table = table::table(columns, rows)
+                .padding_x(2)
+                .padding_y(2)
+                .separator_y(1);
+
+            content = content.push(column![source_header, source_table].spacing(4).width(Fill));
         }
 
         content.width(Fill).into()
@@ -541,34 +584,45 @@ impl ViewerState {
     }
 
     fn view_resurrect_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
-        let resurrects: Vec<&ResurrectEvent> = self
+        let resurrects: Vec<ResurrectEvent> = self
             .log_data
             .filtered_resurrects(&self.encounter_filter)
             .into_iter()
             .filter(|r| r.caster == player)
+            .cloned()
             .collect();
 
         let summary = text(format!("Total Resurrections: {}", resurrects.len()))
             .size(12)
             .color([0.5, 0.5, 0.5]);
 
-        let mut col = Column::new().spacing(4);
-        for r in &resurrects {
-            let ts = format_timestamp(r.timestamp);
-            col = col.push(
-                row![
-                    text(&r.target).size(13).width(Length::FillPortion(2)),
-                    text(&r.spell).size(13).width(Length::FillPortion(2)),
-                    text(ts)
-                        .size(12)
-                        .color([0.5, 0.5, 0.5])
-                        .width(Length::FillPortion(1)),
-                ]
-                .spacing(4),
-            );
+        if resurrects.is_empty() {
+            return column![summary,].spacing(8).width(Fill).into();
         }
 
-        column![summary, col,].spacing(8).width(Fill).into()
+        let header = |label| text(label).size(12);
+
+        let columns = [
+            table::column(header("Target"), |r: ResurrectEvent| {
+                text(r.target).size(13)
+            })
+            .width(Length::FillPortion(2)),
+            table::column(header("Spell"), |r: ResurrectEvent| text(r.spell).size(13))
+                .width(Length::FillPortion(2)),
+            table::column(header("Time"), |r: ResurrectEvent| {
+                text(format_timestamp(r.timestamp))
+                    .size(12)
+                    .color([0.5, 0.5, 0.5])
+            })
+            .width(Length::FillPortion(1)),
+        ];
+
+        let res_table = table::table(columns, resurrects)
+            .padding_x(2)
+            .padding_y(2)
+            .separator_y(1);
+
+        column![summary, res_table,].spacing(8).width(Fill).into()
     }
 
     fn view_avoidance_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
@@ -580,7 +634,7 @@ impl ViewerState {
             .size(12)
             .color([0.5, 0.5, 0.5]);
 
-        let rows = vec![
+        let avoidance_rows = vec![
             ("Dodges", av.dodges),
             ("Parries", av.parries),
             ("Blocks", av.blocks),
@@ -588,9 +642,9 @@ impl ViewerState {
             ("Your Attacks Missed", av.misses),
         ];
 
-        let mut col = Column::new().spacing(4);
-        for (label, count) in rows {
-            col = col.push(
+        let mut avoidance_col = Column::new().spacing(4);
+        for (label, count) in avoidance_rows {
+            avoidance_col = avoidance_col.push(
                 row![
                     text(label).size(13).width(Length::FillPortion(3)),
                     text(count.to_string())
@@ -601,7 +655,43 @@ impl ViewerState {
             );
         }
 
-        column![summary, col,].spacing(8).width(Fill).into()
+        // Full mitigation section (attacks that dealt 0 damage)
+        let full_mit = av.total_full_mitigation();
+        let mut content = column![summary, avoidance_col].spacing(8).width(Fill);
+
+        if full_mit > 0 {
+            let mit_header = text(format!("Full Mitigation: {full_mit}"))
+                .size(12)
+                .color([0.5, 0.5, 0.5]);
+
+            let mit_rows = vec![
+                ("Full Resists", av.full_resists),
+                ("Full Absorbs", av.full_absorbs),
+                ("Full Blocks", av.full_blocks),
+            ];
+
+            let mut mit_col = Column::new().spacing(4);
+            for (label, count) in mit_rows {
+                if count > 0 {
+                    mit_col = mit_col.push(
+                        row![
+                            text(label).size(13).width(Length::FillPortion(3)),
+                            text(count.to_string())
+                                .size(13)
+                                .width(Length::FillPortion(1)),
+                        ]
+                        .spacing(4),
+                    );
+                }
+            }
+
+            content = content
+                .push(rule::horizontal(1))
+                .push(mit_header)
+                .push(mit_col);
+        }
+
+        content.into()
     }
 
     fn view_buff_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
@@ -609,9 +699,9 @@ impl ViewerState {
             return text("No buff data").size(14).into();
         };
 
-        let mut sorted: Vec<(&str, &BuffStats)> = buffs
+        let mut sorted: Vec<(String, BuffStats)> = buffs
             .iter()
-            .map(|(name, stats)| (name.as_str(), stats))
+            .map(|(name, stats)| (name.clone(), stats.clone()))
             .collect();
         sorted.sort_by_key(|s| Reverse(s.1.gains));
 
@@ -619,33 +709,29 @@ impl ViewerState {
             .size(12)
             .color([0.5, 0.5, 0.5]);
 
-        let mut col = Column::new().spacing(4);
-        col = col.push(
-            row![
-                text("Buff").size(12).width(Length::FillPortion(3)),
-                text("Gains").size(12).width(Length::FillPortion(1)),
-                text("Fades").size(12).width(Length::FillPortion(1)),
-            ]
-            .spacing(4),
-        );
-        col = col.push(horizontal_rule(1));
+        let header = |label| text(label).size(12);
 
-        for (buff, stats) in &sorted {
-            col = col.push(
-                row![
-                    text(*buff).size(12).width(Length::FillPortion(3)),
-                    text(stats.gains.to_string())
-                        .size(12)
-                        .width(Length::FillPortion(1)),
-                    text(stats.fades.to_string())
-                        .size(12)
-                        .width(Length::FillPortion(1)),
-                ]
-                .spacing(4),
-            );
-        }
+        let columns = [
+            table::column(header("Buff"), |row: (String, BuffStats)| {
+                text(row.0).size(12)
+            })
+            .width(Length::FillPortion(3)),
+            table::column(header("Gains"), |row: (String, BuffStats)| {
+                text(row.1.gains.to_string()).size(12)
+            })
+            .width(Length::FillPortion(1)),
+            table::column(header("Fades"), |row: (String, BuffStats)| {
+                text(row.1.fades.to_string()).size(12)
+            })
+            .width(Length::FillPortion(1)),
+        ];
 
-        column![summary, col,].spacing(8).width(Fill).into()
+        let buff_table = table::table(columns, sorted)
+            .padding_x(2)
+            .padding_y(2)
+            .separator_y(1);
+
+        column![summary, buff_table,].spacing(8).width(Fill).into()
     }
 
     fn view_consumable_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
@@ -660,43 +746,42 @@ impl ViewerState {
         for c in &player_cons {
             *by_name.entry(&c.consumable).or_insert(0) += 1;
         }
-        let mut sorted: Vec<(&&str, &u64)> = by_name.iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        let mut sorted: Vec<(String, u64)> = by_name
+            .into_iter()
+            .map(|(name, count)| (name.to_string(), count))
+            .collect();
+        sorted.sort_by_key(|b| Reverse(b.1));
 
         let summary = text(format!("Total Consumable Uses: {}", player_cons.len()))
             .size(12)
             .color(theme::TEXT_SECONDARY);
 
-        let mut col = Column::new().spacing(4);
-        col = col.push(
-            row![
-                text("Consumable").size(12).width(Length::FillPortion(3)),
-                text("Uses").size(12).width(Length::FillPortion(1)),
-            ]
-            .spacing(4),
-        );
-        col = col.push(horizontal_rule(1));
-
-        for (name, count) in &sorted {
-            col = col.push(
-                row![
-                    text(**name)
-                        .size(12)
-                        .color(theme::BAR_CONSUMABLE)
-                        .width(Length::FillPortion(3)),
-                    text(count.to_string())
-                        .size(12)
-                        .width(Length::FillPortion(1)),
-                ]
-                .spacing(4),
-            );
-        }
-
         if sorted.is_empty() {
-            col = col.push(empty_state("No consumables used"));
+            return column![summary, empty_state("No consumables used"),]
+                .spacing(8)
+                .width(Fill)
+                .into();
         }
 
-        column![summary, col,].spacing(8).width(Fill).into()
+        let header = |label| text(label).size(12);
+
+        let columns = [
+            table::column(header("Consumable"), |row: (String, u64)| {
+                text(row.0).size(12).color(theme::BAR_CONSUMABLE)
+            })
+            .width(Length::FillPortion(3)),
+            table::column(header("Uses"), |row: (String, u64)| {
+                text(row.1.to_string()).size(12)
+            })
+            .width(Length::FillPortion(1)),
+        ];
+
+        let cons_table = table::table(columns, sorted)
+            .padding_x(2)
+            .padding_y(2)
+            .separator_y(1);
+
+        column![summary, cons_table,].spacing(8).width(Fill).into()
     }
 
     /// Player info bar showing spec, race, guild, and gear count.
@@ -806,6 +891,61 @@ impl ViewerState {
             bar_color,
             on_click,
         )
+    }
+
+    fn view_death_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
+        let deaths: Vec<DeathEvent> = self
+            .log_data
+            .filtered_deaths(&self.encounter_filter)
+            .into_iter()
+            .filter(|d| d.player == player)
+            .cloned()
+            .collect();
+
+        if deaths.is_empty() {
+            return text("No deaths recorded").size(14).into();
+        }
+
+        let summary = text(format!("Total Deaths: {}", deaths.len()))
+            .size(12)
+            .color([0.5, 0.5, 0.5]);
+
+        let header = |label| text(label).size(12).color([0.6, 0.6, 0.6]);
+
+        let columns = [
+            table::column(header("Time"), |death: DeathEvent| {
+                text(format_timestamp(death.timestamp))
+                    .size(12)
+                    .color([0.5, 0.5, 0.5])
+            })
+            .width(Length::FillPortion(2)),
+            table::column(header("Killed By"), |death: DeathEvent| {
+                text(death.killer.as_deref().unwrap_or("Unknown").to_string())
+                    .size(13)
+                    .color([0.9, 0.3, 0.3])
+            })
+            .width(Length::FillPortion(3)),
+            table::column(header("Ability"), |death: DeathEvent| {
+                text(death.killing_blow.as_deref().unwrap_or("").to_string()).size(13)
+            })
+            .width(Length::FillPortion(3)),
+            table::column(header("Damage"), |death: DeathEvent| {
+                text(
+                    death
+                        .damage_amount
+                        .map_or(String::new(), theme::format_number),
+                )
+                .size(13)
+            })
+            .width(Length::FillPortion(2)),
+        ];
+
+        let death_table = table::table(columns, deaths)
+            .padding_x(2)
+            .padding_y(3)
+            .separator_y(1);
+
+        column![summary, death_table,].spacing(8).width(Fill).into()
     }
 }
 

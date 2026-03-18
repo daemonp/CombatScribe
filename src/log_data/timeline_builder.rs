@@ -269,17 +269,17 @@ impl LogData {
                     LogEntry::AuraFade { player, aura, .. } => {
                         aura_names.insert(aura.clone());
                         // Pop the most recent open gain for this player+aura
-                        if let Some(starts) = open.get_mut(&(player.clone(), aura.clone())) {
-                            if let Some(start) = starts.pop() {
-                                intervals
-                                    .entry(aura.clone())
-                                    .or_default()
-                                    .push(AuraInterval {
-                                        player: player.clone(),
-                                        start,
-                                        end: relative,
-                                    });
-                            }
+                        if let Some(starts) = open.get_mut(&(player.clone(), aura.clone()))
+                            && let Some(start) = starts.pop()
+                        {
+                            intervals
+                                .entry(aura.clone())
+                                .or_default()
+                                .push(AuraInterval {
+                                    player: player.clone(),
+                                    start,
+                                    end: relative,
+                                });
                         }
                     }
                     _ => {}

@@ -21,8 +21,8 @@ mod meters;
 mod timeline;
 
 use iced::widget::{
-    button, canvas, column, container, horizontal_rule, horizontal_space, image, pick_list, row,
-    scrollable, text, text_input, tooltip, Column, Row,
+    Column, Row, Space, button, canvas, column, container, float, image, pick_list, row, rule,
+    scrollable, text, text_input, tooltip,
 };
 use iced::{Center, Color, Element, Fill, Length};
 use std::cmp::Reverse;
@@ -32,9 +32,9 @@ use std::sync::LazyLock;
 
 use crate::log_data;
 use crate::log_data::{
-    AbilityStats, AvoidanceStats, BuffStats, DeathLogWindow, EncounterFilter, EventLogMode,
-    EventLogTypeFilter, EventLogTypeKind, LogData, LogEntry, LootEvent, PlayerEventType,
-    ResurrectEvent, TimelineData, TimelineSeriesKind, TimelineVisibility,
+    AbilityStats, AvoidanceStats, BuffStats, DeathEvent, DeathLogWindow, EncounterFilter,
+    EventLogMode, EventLogTypeFilter, EventLogTypeKind, LogData, LogEntry, LootEvent,
+    PlayerEventType, ResurrectEvent, TimelineData, TimelineSeriesKind, TimelineVisibility,
 };
 use crate::theme;
 use components::build_timeline_event_log_text;
@@ -44,8 +44,8 @@ pub use components::transparent_button_style;
 use components::*;
 
 /// Scrollable ID for the timeline event log panel.
-static TIMELINE_LOG_ID: LazyLock<scrollable::Id> =
-    LazyLock::new(|| scrollable::Id::new("timeline_events"));
+static TIMELINE_LOG_ID: LazyLock<iced::widget::Id> =
+    LazyLock::new(|| iced::widget::Id::new("timeline_events"));
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -222,6 +222,7 @@ pub enum DetailType {
     Avoidance,
     Buffs,
     Consumables,
+    Deaths,
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -457,7 +458,7 @@ impl ViewerState {
                 let duration = self.timeline_data.duration;
                 if duration > 0.0 {
                     let proportion = second as f32 / duration as f32;
-                    return scrollable::snap_to(
+                    return iced::widget::operation::snap_to(
                         TIMELINE_LOG_ID.clone(),
                         scrollable::RelativeOffset {
                             x: 0.0,
@@ -600,11 +601,7 @@ impl ViewerState {
         let zone_raw = instance_zone
             .or_else(|| {
                 let z = self.log_data.zone_name.as_str();
-                if z.is_empty() {
-                    None
-                } else {
-                    Some(z)
-                }
+                if z.is_empty() { None } else { Some(z) }
             })
             .unwrap_or("Combat Log");
         let zone = crate::parser::format_zone_name(zone_raw);
@@ -660,7 +657,7 @@ impl ViewerState {
         );
 
         // ── Assemble header row ─────────────────────────────────────
-        row![left_row, horizontal_space(), right_row,]
+        row![left_row, Space::new().width(Fill), right_row,]
             .spacing(12)
             .align_y(Center)
             .width(Fill)
@@ -670,13 +667,15 @@ impl ViewerState {
     // ── Controls ────────────────────────────────────────────────────────
 
     fn view_controls(&self) -> Element<'_, ViewerMessage> {
-        row![pick_list(
-            self.encounter_names.clone(),
-            self.selected_encounter_name.clone(),
-            ViewerMessage::SelectEncounter,
-        )
-        .width(Length::FillPortion(2))
-        .padding(6),]
+        row![
+            pick_list(
+                self.encounter_names.clone(),
+                self.selected_encounter_name.clone(),
+                ViewerMessage::SelectEncounter,
+            )
+            .width(Length::FillPortion(2))
+            .padding(6),
+        ]
         .spacing(8)
         .width(Fill)
         .into()
@@ -737,6 +736,7 @@ impl ViewerState {
                         text_color: label_color,
                         border,
                         shadow: iced::Shadow::default(),
+                        snap: true,
                     }
                 });
 

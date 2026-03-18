@@ -15,8 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use iced::widget::{
-    button, center, checkbox, column, container, horizontal_rule, horizontal_space, row, stack,
-    text, Column,
+    Column, Space, button, center, checkbox, column, container, row, rule, stack, text,
 };
 use iced::{Center, Color, Element, Fill, Length, Task, Theme};
 
@@ -49,7 +48,11 @@ fn main() -> iced::Result {
     if args.len() >= 3 && args[1] == "--export" {
         let zero = args.iter().any(|a| a == "--zero");
         let output_dir = args.get(3).and_then(|a| {
-            if a.starts_with('-') { None } else { Some(a.as_str()) }
+            if a.starts_with('-') {
+                None
+            } else {
+                Some(a.as_str())
+            }
         });
         cli::run_export(&args[2], output_dir, zero);
         return Ok(());
@@ -62,24 +65,29 @@ fn main() -> iced::Result {
         None
     };
 
-    iced::application("WoW Log Viewer", App::update, App::view)
-        .theme(|_| Theme::Dark)
-        .window_size((1200.0, 800.0))
-        .run_with(move || {
+    iced::application(
+        move || {
             let app = App::new();
             // Always check for updates on startup (runs in background)
             let update_task = Task::perform(
                 async { update::check_for_update() },
                 Message::UpdateCheckResult,
             );
-            let init_task = if let Some(path) = initial_file {
-                let p = path.clone();
-                Task::done(Message::FileSelected(Some(p)))
+            let init_task = if let Some(ref path) = initial_file {
+                Task::done(Message::FileSelected(Some(path.clone())))
             } else {
                 Task::none()
             };
             (app, Task::batch([update_task, init_task]))
-        })
+        },
+        App::update,
+        App::view,
+    )
+    .subscription(App::subscription)
+    .title("WoW Log Viewer")
+    .theme(|_: &App| Theme::Dark)
+    .window_size((1200.0, 800.0))
+    .run()
 }
 
 // ── Application State ───────────────────────────────────────────────────────
@@ -107,6 +115,10 @@ struct App {
     session_names: Vec<String>,
     selected_session: Option<String>,
 
+    // Loading indicator
+    loading_phase: &'static str,
+    spinner_tick: usize,
+
     // Export options
     create_zip: bool,
     zero_log: bool,
@@ -133,6 +145,8 @@ impl App {
             sessions: Vec::new(),
             session_names: Vec::new(),
             selected_session: None,
+            loading_phase: "",
+            spinner_tick: 0,
             create_zip: true,
             zero_log: false,
             rename_output: true,
@@ -202,6 +216,9 @@ enum Message {
     DismissUpdate,
     DismissUpdateForever,
 
+    // Loading spinner
+    SpinnerTick,
+
     // Viewer messages
     Viewer(viewer::ViewerMessage),
 }
@@ -228,6 +245,7 @@ impl App {
                         .unwrap_or_default();
                     self.file_path = Some(p.clone());
                     self.state = AppState::Loading;
+                    self.loading_phase = "Reading file...";
 
                     Task::perform(async move { load_file(p).await }, Message::FileLoaded)
                 }
@@ -238,6 +256,7 @@ impl App {
                 Ok(lines) => {
                     self.lines = Arc::clone(&lines);
                     self.state = AppState::Loading;
+                    self.loading_phase = "Detecting sessions...";
 
                     Task::perform(
                         async move { parser::detect_sessions(&lines) },
@@ -271,6 +290,7 @@ impl App {
                     // No sessions detected — parse entire log as one session
                     let lines = Arc::clone(&self.lines);
                     self.state = AppState::Loading;
+                    self.loading_phase = "Formatting and parsing log...";
                     return Task::perform(
                         async move {
                             let (formatted_lines, _player_names) =
@@ -283,6 +303,7 @@ impl App {
 
                 // Parse the first session automatically
                 self.state = AppState::Loading;
+                self.loading_phase = "Formatting and parsing log...";
                 self.parse_session()
             }
 
@@ -435,6 +456,12 @@ impl App {
                 Task::none()
             }
 
+            // ── Loading spinner ──────────────────────────────────────────
+            Message::SpinnerTick => {
+                self.spinner_tick = self.spinner_tick.wrapping_add(1);
+                Task::none()
+            }
+
             // ── Viewer messages ─────────────────────────────────────────
             Message::Viewer(viewer_msg) => {
                 // Intercept viewer messages that need app-level handling
@@ -451,11 +478,10 @@ impl App {
                     viewer::ViewerMessage::SwitchSession(name) => {
                         self.selected_session = Some(name);
                         self.state = AppState::Loading;
+                        self.loading_phase = "Switching session...";
                         self.parse_session()
                     }
-                    viewer::ViewerMessage::Quit => {
-                        iced::window::get_latest().and_then(iced::window::close)
-                    }
+                    viewer::ViewerMessage::Quit => iced::exit(),
                     viewer::ViewerMessage::ToggleAura(_)
                     | viewer::ViewerMessage::ApplyAuraPreset(_)
                     | viewer::ViewerMessage::ClearAuras => {
@@ -480,6 +506,16 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    // ── Subscription ────────────────────────────────────────────────────────
+
+    fn subscription(&self) -> iced::Subscription<Message> {
+        if matches!(self.state, AppState::Loading) {
+            iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::SpinnerTick)
+        } else {
+            iced::Subscription::none()
         }
     }
 
@@ -523,7 +559,7 @@ impl App {
                 .on_press(Message::OpenFile)
                 .padding([6, 16])
                 .style(header_button_style),
-            horizontal_space(),
+            Space::new().width(Fill),
             button(text("Quit").size(11).color(theme::TEXT_SECONDARY))
                 .on_press(Message::Viewer(viewer::ViewerMessage::Quit))
                 .style(viewer::transparent_button_style)
@@ -567,23 +603,32 @@ impl App {
 
     // ── Loading State ───────────────────────────────────────────────────
 
-    #[allow(clippy::unused_self)] // iced view pattern
     fn view_loading(&self) -> Element<'_, Message> {
         let header_row = row![
             button(text("Load File").size(12).color(theme::TEXT_MUTED))
                 .padding([6, 16])
                 .style(header_button_style),
-            horizontal_space(),
+            Space::new().width(Fill),
         ]
         .spacing(8)
         .align_y(Center)
         .width(Fill);
 
+        let spinner_frames = ["   ", ".  ", ".. ", "..."];
+        let frame = spinner_frames[self.spinner_tick % spinner_frames.len()];
+
+        let file_hint = if self.file_name.is_empty() {
+            String::new()
+        } else {
+            self.file_name.clone()
+        };
+
         let loading = column![
-            text("Loading...").size(20).color(Color::WHITE),
-            text("Parsing combat log data...")
+            text(format!("Loading{frame}")).size(20).color(Color::WHITE),
+            text(self.loading_phase)
                 .size(13)
                 .color(theme::TEXT_SECONDARY),
+            text(file_hint).size(11).color(theme::TEXT_MUTED),
         ]
         .spacing(8)
         .align_x(Center);
@@ -605,7 +650,7 @@ impl App {
                 .on_press(Message::OpenFile)
                 .padding([6, 16])
                 .style(header_button_style),
-            horizontal_space(),
+            Space::new().width(Fill),
             button(text("Quit").size(11).color(theme::TEXT_SECONDARY))
                 .on_press(Message::Viewer(viewer::ViewerMessage::Quit))
                 .style(viewer::transparent_button_style)
@@ -661,19 +706,21 @@ impl App {
             .style(viewer::transparent_button_style)
             .padding([4, 10]);
 
-        let skip_btn = button(
-            text("Skip this version")
-                .size(11)
-                .color(theme::TEXT_MUTED),
-        )
-        .on_press(Message::DismissUpdateForever)
-        .style(viewer::transparent_button_style)
-        .padding([4, 10]);
+        let skip_btn = button(text("Skip this version").size(11).color(theme::TEXT_MUTED))
+            .on_press(Message::DismissUpdateForever)
+            .style(viewer::transparent_button_style)
+            .padding([4, 10]);
 
-        let banner = row![label, horizontal_space(), download_btn, dismiss_btn, skip_btn,]
-            .spacing(8)
-            .align_y(Center)
-            .width(Fill);
+        let banner = row![
+            label,
+            Space::new().width(Fill),
+            download_btn,
+            dismiss_btn,
+            skip_btn,
+        ]
+        .spacing(8)
+        .align_y(Center)
+        .width(Fill);
 
         container(banner)
             .padding([8, 16])
@@ -730,10 +777,12 @@ impl App {
 
         let session_label: Element<Message> = if self.export_all {
             let raid_count = self.sessions.iter().filter(|s| s.is_raid).count();
-            text(format!("{raid_count} raid sessions will be exported as individual zip files"))
-                .size(12)
-                .color(theme::TEXT_SECONDARY)
-                .into()
+            text(format!(
+                "{raid_count} raid sessions will be exported as individual zip files"
+            ))
+            .size(12)
+            .color(theme::TEXT_SECONDARY)
+            .into()
         } else if let Some(ref sel) = self.selected_session {
             text(sel.as_str())
                 .size(12)
@@ -758,7 +807,8 @@ impl App {
         // "Export all" checkbox (only shown when multiple raid sessions exist)
         if self.sessions.iter().filter(|s| s.is_raid).count() > 1 {
             options = options.push(
-                checkbox(export_all_label.as_str(), self.export_all)
+                checkbox(self.export_all)
+                    .label(export_all_label.clone())
                     .on_toggle(Message::ToggleExportAll)
                     .size(18),
             );
@@ -767,24 +817,24 @@ impl App {
         // Single-session options (hidden when export_all is active)
         if !self.export_all {
             options = options.push(
-                checkbox("Create ZIP archive", self.create_zip)
+                checkbox(self.create_zip)
+                    .label("Create ZIP archive")
                     .on_toggle(Message::ToggleZip)
                     .size(18),
             );
             options = options.push(
-                checkbox(rename_label.as_str(), self.rename_output)
+                checkbox(self.rename_output)
+                    .label(rename_label.clone())
                     .on_toggle(Message::ToggleRename)
                     .size(18),
             );
         }
 
         options = options.push(
-            checkbox(
-                "Zero (clear) original log file after export",
-                self.zero_log,
-            )
-            .on_toggle(Message::ToggleZeroLog)
-            .size(18),
+            checkbox(self.zero_log)
+                .label("Zero (clear) original log file after export")
+                .on_toggle(Message::ToggleZeroLog)
+                .size(18),
         );
 
         let warning: Element<Message> = if self.zero_log {
@@ -803,34 +853,33 @@ impl App {
         };
 
         // Show batch result, single result, or action buttons
-        let bottom_section: Element<Message> =
-            if let Some(ref result) = self.batch_export_result {
-                Self::view_batch_result(result)
-            } else if let Some(ref result) = self.export_result {
-                Self::view_single_result(result)
-            } else {
-                row![
-                    button(text("Cancel").size(14).center())
-                        .on_press(Message::CloseExportModal)
-                        .padding([8, 24])
-                        .width(Fill),
-                    button(text("Export").size(14).center().color(Color::WHITE))
-                        .on_press(Message::Export)
-                        .padding([8, 24])
-                        .width(Fill)
-                        .style(primary_button_style),
-                ]
-                .spacing(8)
-                .into()
-            };
+        let bottom_section: Element<Message> = if let Some(ref result) = self.batch_export_result {
+            Self::view_batch_result(result)
+        } else if let Some(ref result) = self.export_result {
+            Self::view_single_result(result)
+        } else {
+            row![
+                button(text("Cancel").size(14).center())
+                    .on_press(Message::CloseExportModal)
+                    .padding([8, 24])
+                    .width(Fill),
+                button(text("Export").size(14).center().color(Color::WHITE))
+                    .on_press(Message::Export)
+                    .padding([8, 24])
+                    .width(Fill)
+                    .style(primary_button_style),
+            ]
+            .spacing(8)
+            .into()
+        };
 
         let modal_content = column![
             title,
             session_label,
-            horizontal_rule(1),
+            rule::horizontal(1),
             options,
             warning,
-            horizontal_rule(1),
+            rule::horizontal(1),
             bottom_section,
         ]
         .spacing(12)
@@ -859,6 +908,7 @@ impl App {
                 text_color: Color::TRANSPARENT,
                 border: iced::Border::default(),
                 shadow: iced::Shadow::default(),
+                snap: true,
             });
 
         stack![backdrop, center(modal_card).width(Fill).height(Fill),]
@@ -950,9 +1000,7 @@ impl App {
                     .color(Color::from_rgb(0.3, 0.8, 0.5)),
                 );
                 for f in &info.files {
-                    details = details.push(
-                        text(f).size(11).color(theme::TEXT_SECONDARY),
-                    );
+                    details = details.push(text(f).size(11).color(theme::TEXT_SECONDARY));
                 }
                 if info.zeroed {
                     details = details.push(
@@ -1012,6 +1060,7 @@ fn header_button_style(_theme: &iced::Theme, status: button::Status) -> button::
             radius: 4.0.into(),
         },
         shadow: iced::Shadow::default(),
+        snap: true,
     }
 }
 
@@ -1030,6 +1079,7 @@ fn update_download_button_style(_theme: &iced::Theme, status: button::Status) ->
             radius: 4.0.into(),
         },
         shadow: iced::Shadow::default(),
+        snap: true,
     }
 }
 
@@ -1048,5 +1098,6 @@ fn primary_button_style(_theme: &iced::Theme, status: button::Status) -> button:
             radius: 6.0.into(),
         },
         shadow: iced::Shadow::default(),
+        snap: true,
     }
 }

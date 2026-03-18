@@ -1,16 +1,17 @@
 [package]
 name = "combat-scribe"
 version = "0.9.0"
-edition = "2021"
+edition = "2024"
 authors = ["daemonp"]
 description = "WoW Vanilla 1.12.1 combat log parser and viewer with DPS/HPS analysis"
 license = "BSD-2-Clause"
 repository = "https://github.com/daemonp/CombatScribe"
 
 [dependencies]
-iced = { version = "0.13", features = ["tokio", "image", "canvas"] }
+iced = { version = "0.14", features = ["tokio", "image", "canvas"] }
 rfd = "0.15"
 regex = "1"
+rayon = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 chrono = "0.4"

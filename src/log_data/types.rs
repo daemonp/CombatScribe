@@ -36,6 +36,7 @@ pub struct LogData {
 
 // ── Log Entries ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::struct_excessive_bools)] // Damage variant has many boolean combat outcomes
 #[derive(Debug, Clone)]
 pub enum LogEntry {
     Damage {
@@ -51,6 +52,15 @@ pub enum LogEntry {
         is_glancing: bool,
         is_crushing: bool,
         school: Option<String>,
+        /// True if the attack was fully resisted (0 damage dealt, resist detected).
+        #[allow(dead_code)] // Data model — aggregated into AvoidanceStats during parsing
+        is_fully_resisted: bool,
+        /// True if the attack was fully absorbed (0 damage dealt, absorb detected).
+        #[allow(dead_code)] // Data model — aggregated into AvoidanceStats during parsing
+        is_fully_absorbed: bool,
+        /// True if the attack was fully blocked (0 damage dealt, block detected).
+        #[allow(dead_code)] // Data model — aggregated into AvoidanceStats during parsing
+        is_fully_blocked: bool,
     },
     Healing {
         timestamp: f64,
@@ -322,6 +332,12 @@ pub struct AvoidanceStats {
     pub blocks: u64,
     pub missed_by: u64,
     pub misses: u64,
+    /// Attacks that dealt 0 damage due to full resist.
+    pub full_resists: u64,
+    /// Attacks that dealt 0 damage due to full absorb (e.g. Power Word: Shield).
+    pub full_absorbs: u64,
+    /// Attacks that dealt 0 damage due to full block.
+    pub full_blocks: u64,
 }
 
 impl AvoidanceStats {
@@ -331,6 +347,11 @@ impl AvoidanceStats {
     /// represents offensive misses, not defensive avoidance.
     pub fn total(&self) -> u64 {
         self.dodges + self.parries + self.blocks + self.missed_by
+    }
+
+    /// Total attacks fully mitigated (full resists + full absorbs + full blocks).
+    pub fn total_full_mitigation(&self) -> u64 {
+        self.full_resists + self.full_absorbs + self.full_blocks
     }
 }
 
@@ -367,6 +388,12 @@ pub struct TradeEvent {
 pub struct DeathEvent {
     pub timestamp: f64,
     pub player: String,
+    /// The killer's name (if known). None for environmental deaths or unknown.
+    pub killer: Option<String>,
+    /// The ability that dealt the killing blow (if known).
+    pub killing_blow: Option<String>,
+    /// Damage amount of the killing blow (for overkill analysis).
+    pub damage_amount: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
