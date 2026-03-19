@@ -36,8 +36,9 @@ A universal `.dmg` is available on the [releases page](https://github.com/daemon
 | Tab | What you get |
 |---|---|
 | **Damage/Healing** | Side-by-side meters for the full raid. Damage done, damage done + pets, damage taken, effective healing, raw healing, overhealing. Click any player to drill down. |
-| **Utility** | Dispels, interrupts, deaths, resurrections, absorbs, avoidance (dodge/parry/block), buff uptime, and consumable usage. |
-| **Timeline** | Encounter timeline charting raid DPS, DTPS, HPS, deaths, big hits, and alive count. Aura waterfall with consumable/world buff presets. Zoomable. Event log with death replay. |
+| **Utility** | Dispels, interrupts, deaths, resurrections, absorbs, avoidance (dodge/parry/block), and buff uptime. |
+| **Consumes** | Consumable tracking with four views: Raid Overview, Player Breakdown, Encounter Matrix, and Timeline waterfall. Categorized by Flasks, Elixirs, Potions, Food, Weapon Buffs, Jujus, and more. Timeline shows buff uptime bars and instant-use tick marks with encounter boundary lines. |
+| **Timeline** | Encounter timeline charting raid DPS, DTPS, HPS, deaths, big hits, and alive count. Aura waterfall with world buff presets. Zoomable. Event log with death replay. |
 | **Loot** | Boss-grouped loot with WoW item quality colors. Search by item, player, or boss. Trade tracking included. |
 | **Events** | Raw combat log browser, color-coded by event type, filterable by player. |
 
@@ -99,7 +100,14 @@ A per-fight timeline showing raid DPS, damage taken, healing, deaths (red vertic
 
 ### Consumes Tracking
 
-<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/570282be-93c1-4729-8eb7-311ea8dda70e" />
+Four views for consumable analysis, all driven by the categorized consumable database (`consumables.toml`). The encounter filter applies across all views — select a single boss, all kills, or the full raid.
+
+- **Raid Overview** — per-player expandable list grouped by consumable category (Flasks, Elixirs, Potions, Food, Weapon Buffs, Jujus, etc.) with use counts
+- **Player Breakdown** — ranked bar chart of total consumable uses per player
+- **Encounter Matrix** — players vs categories per encounter heatmap
+- **Timeline** — waterfall chart showing when every consumable was used across the session. Sidebar picker to toggle categories. Hybrid rendering: buff uptime bars for persistent consumables (elixirs, flasks), diamond tick marks for instant-use items (potions, bandages, engineering). Faint vertical encounter boundary lines show where boss fights start and end. Pre-pull consumables are captured with a 5-minute buffer before each encounter. Hover for item details.
+
+<img width="2560" height="1600" alt="Consumes tab showing the Timeline view with consumable usage across an AQ40 raid, category sidebar, and encounter boundary lines" src="https://github.com/user-attachments/assets/570282be-93c1-4729-8eb7-311ea8dda70e" />
 
 ---
 
