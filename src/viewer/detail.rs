@@ -118,6 +118,8 @@ impl ViewerState {
             return text("No data").size(14).into();
         };
 
+        let is_healing_type = dtype == DetailType::Healing;
+
         let (abilities, total) = match dtype {
             DetailType::Damage => (&ps.abilities, ps.damage),
             DetailType::Healing => {
@@ -202,7 +204,7 @@ impl ViewerState {
                 avg_crit_str,
             )
         };
-        let summary = text(summary_str).size(12).color([0.5, 0.5, 0.5]);
+        let summary = text(summary_str).size(12).color(theme::TEXT_SECONDARY);
 
         // Opener
         let event_type = match dtype {
@@ -216,11 +218,11 @@ impl ViewerState {
         let mut opener_section = Column::new();
         if !opener.is_empty() {
             opener_section =
-                opener_section.push(text("Opener (first 10s)").size(13).color([0.6, 0.6, 0.6]));
+                opener_section.push(text("Opener (first 10s)").size(13).color(theme::TEXT_MUTED));
             let mut opener_row = Row::new().spacing(4);
             for (i, o) in opener.iter().enumerate() {
                 if i > 0 {
-                    opener_row = opener_row.push(text("->").size(11).color([0.4, 0.4, 0.4]));
+                    opener_row = opener_row.push(text("->").size(11).color(theme::TEXT_MUTED));
                 }
                 let crit_marker = if o.is_crit { "!" } else { "" };
                 let delay_str = if o.delay > 0.0 {
@@ -239,7 +241,7 @@ impl ViewerState {
                                 delay_str
                             ))
                             .size(10)
-                            .color([0.5, 0.5, 0.5]),
+                            .color(theme::TEXT_SECONDARY),
                         ]
                         .spacing(2),
                     )
@@ -258,6 +260,72 @@ impl ViewerState {
             }
             opener_section = opener_section.push(opener_row);
         }
+
+        // ── Ability Breakdown Bars ───────────────────────────────────
+        //
+        // Visual meter bars showing each ability's contribution to total,
+        // placed above the detailed stats table.
+        let class_str = self.log_data.player_class(player);
+        let class_color = theme::class_color(class_str);
+        let max_ability = sorted.first().map_or(0, |(_, a)| a.total);
+        let bar_scale = adaptive_scale(max_ability, max_ability);
+
+        let mut ability_bars = Column::new().spacing(2);
+        #[allow(clippy::cast_precision_loss)] // ability totals never approach 2^52
+        for (rank, (spell, ab)) in sorted.iter().enumerate() {
+            let display_val = if is_healing_type {
+                match self.healing_type {
+                    HealingType::Healing | HealingType::Effective => ab.effective,
+                    HealingType::Raw => ab.total,
+                    HealingType::Overhealing => ab.overheal,
+                }
+            } else {
+                ab.total
+            };
+            let aps = per_second(display_val, duration);
+            let pct = percent_of(display_val, total);
+            let bar_pct = scaled_percent(display_val, bar_scale);
+
+            let value_text = format!(
+                "{} - {}/s",
+                theme::format_number(display_val),
+                theme::format_number_f64(aps)
+            );
+            let pct_text = format!("{pct:.1}%");
+
+            // Inner bar content: rank + spell left, value right
+            let inner: Row<'_, ViewerMessage> = row![
+                text(format!("{}. {spell}", rank + 1))
+                    .size(11)
+                    .color(Color::WHITE),
+                Space::new().width(Fill),
+                text(value_text)
+                    .size(11)
+                    .color(Color::from_rgb8(220, 225, 230)),
+            ]
+            .spacing(6)
+            .align_y(Center)
+            .width(Fill);
+
+            let bar = make_bar(inner, bar_pct, class_color);
+
+            // Percentage label (outside bar, right side)
+            let pct_label = text(pct_text)
+                .size(11)
+                .color(theme::TEXT_MUTED)
+                .width(45)
+                .align_x(iced::alignment::Horizontal::Right);
+
+            ability_bars =
+                ability_bars.push(row![bar, pct_label].spacing(4).align_y(Center).width(Fill));
+        }
+
+        let bars_section = column![
+            text("Ability Breakdown").size(13).color(theme::TEXT_MUTED),
+            ability_bars,
+        ]
+        .spacing(4)
+        .width(Fill);
 
         // Ability table — healing gets an extra "OH%" column
         let is_healing = dtype == DetailType::Healing;
@@ -403,17 +471,23 @@ impl ViewerState {
                 .into()
         };
 
-        let ability_section = column![
-            text("Ability Breakdown").size(13).color([0.6, 0.6, 0.6]),
+        let table_section = column![
+            text("Detailed Stats").size(13).color(theme::TEXT_MUTED),
             ability_table,
         ]
         .spacing(4)
         .width(Fill);
 
-        column![summary, opener_section, ability_section,]
-            .spacing(10)
-            .width(Fill)
-            .into()
+        column![
+            summary,
+            opener_section,
+            bars_section,
+            rule::horizontal(1),
+            table_section,
+        ]
+        .spacing(10)
+        .width(Fill)
+        .into()
     }
 
     // ── Damage Taken Breakdown ──────────────────────────────────────────
@@ -650,7 +724,7 @@ impl ViewerState {
 
         let summary = text(format!("Total Resurrections: {}", resurrects.len()))
             .size(12)
-            .color([0.5, 0.5, 0.5]);
+            .color(theme::TEXT_SECONDARY);
 
         if resurrects.is_empty() {
             return column![summary,].spacing(8).width(Fill).into();
@@ -668,7 +742,7 @@ impl ViewerState {
             table::column(header("Time"), |r: ResurrectEvent| {
                 text(format_timestamp(r.timestamp))
                     .size(12)
-                    .color([0.5, 0.5, 0.5])
+                    .color(theme::TEXT_SECONDARY)
             })
             .width(Length::FillPortion(1)),
         ];
@@ -688,7 +762,7 @@ impl ViewerState {
 
         let summary = text(format!("Total Attacks Avoided: {}", av.total()))
             .size(12)
-            .color([0.5, 0.5, 0.5]);
+            .color(theme::TEXT_SECONDARY);
 
         let avoidance_rows = vec![
             ("Dodges", av.dodges),
@@ -718,7 +792,7 @@ impl ViewerState {
         if full_mit > 0 {
             let mit_header = text(format!("Full Mitigation: {full_mit}"))
                 .size(12)
-                .color([0.5, 0.5, 0.5]);
+                .color(theme::TEXT_SECONDARY);
 
             let mit_rows = vec![
                 ("Full Resists", av.full_resists),
@@ -763,7 +837,7 @@ impl ViewerState {
 
         let summary = text(format!("Total Unique Buffs: {}", sorted.len()))
             .size(12)
-            .color([0.5, 0.5, 0.5]);
+            .color(theme::TEXT_SECONDARY);
 
         let header = |label| text(label).size(12);
 
@@ -983,15 +1057,15 @@ impl ViewerState {
 
         let summary = text(format!("Total Deaths: {}", deaths.len()))
             .size(12)
-            .color([0.5, 0.5, 0.5]);
+            .color(theme::TEXT_SECONDARY);
 
-        let header = |label| text(label).size(12).color([0.6, 0.6, 0.6]);
+        let header = |label| text(label).size(12).color(theme::TEXT_MUTED);
 
         let columns = [
             table::column(header("Time"), |death: DeathEvent| {
                 text(format_timestamp(death.timestamp))
                     .size(12)
-                    .color([0.5, 0.5, 0.5])
+                    .color(theme::TEXT_SECONDARY)
             })
             .width(Length::FillPortion(2)),
             table::column(header("Killed By"), |death: DeathEvent| {
@@ -1043,7 +1117,7 @@ pub(super) fn view_spell_target_detail<'a>(
 
     let summary = text(format!("Total {label}: {}", events.len()))
         .size(12)
-        .color([0.5, 0.5, 0.5]);
+        .color(theme::TEXT_SECONDARY);
 
     let mut spell_col = Column::new().spacing(4);
     spell_col = spell_col.push(text("By Spell").size(13).color(accent_color));

@@ -276,7 +276,7 @@ pub(super) fn parse_damage_events(
         return;
     }
 
-    // Format 3: Target suffers N damage from Source 's Spell
+    // Format 3: Target suffers N damage from Source 's Spell (periodic/DoT)
     if let Some(caps) = RE_DMG_SUFFER.captures(trimmed) {
         let Some(target) = caps.get(1).map(|m| m.as_str().trim()) else {
             return;
@@ -288,9 +288,11 @@ pub(super) fn parse_damage_events(
         let Some(source) = caps.get(3).map(|m| m.as_str()) else {
             return;
         };
-        let Some(spell) = caps.get(4).map(|m| m.as_str().trim()) else {
+        let Some(raw_spell) = caps.get(4).map(|m| m.as_str().trim()) else {
             return;
         };
+        // "suffers" lines are periodic (DoT) ticks — distinguish from direct hits
+        let spell_dot = format!("{raw_spell} (dot)");
         let pet_owner = extract_pet_owner(source, data);
         let (is_fully_resisted, is_fully_absorbed, is_fully_blocked) =
             trailer.full_mitigation_flags(amount);
@@ -302,7 +304,7 @@ pub(super) fn parse_damage_events(
                 timestamp,
                 source,
                 target,
-                spell,
+                spell: &spell_dot,
                 amount,
                 absorbed: trailer.absorbed,
                 resisted: trailer.resisted,
@@ -864,5 +866,69 @@ mod tests {
         let data = parse_log(&lines);
         // Boss is not a combatant, so no avoidance should be recorded for it
         assert!(data.avoidance.get("Boss").is_none());
+    }
+
+    // ── DoT Suffix Tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_dot_suffix_on_suffer_line() {
+        // "suffers" lines should produce spell names with " (dot)" suffix
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Druid&DRUID&NightElf&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Boss suffers 136 Physical damage from Druid 's Rake.".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let dmg = data.entries.iter().find(|e| matches!(e, LogEntry::Damage { .. }));
+        assert!(dmg.is_some(), "Should have a damage entry");
+        if let Some(LogEntry::Damage { spell, amount, .. }) = dmg {
+            assert_eq!(spell, "Rake (dot)", "Suffer line should produce (dot) suffix");
+            assert_eq!(*amount, 136);
+        }
+    }
+
+    #[test]
+    fn test_direct_hit_no_dot_suffix() {
+        // Direct "hits" lines should NOT have the (dot) suffix
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Druid&DRUID&NightElf&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  Druid 's Rake hits Boss for 45.".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let dmg = data.entries.iter().find(|e| matches!(e, LogEntry::Damage { .. }));
+        assert!(dmg.is_some(), "Should have a damage entry");
+        if let Some(LogEntry::Damage { spell, .. }) = dmg {
+            assert_eq!(spell, "Rake", "Direct hit should NOT have (dot) suffix");
+        }
+    }
+
+    #[test]
+    fn test_dot_and_direct_separate_abilities() {
+        // Both direct hit and DoT tick from same spell should produce separate
+        // ability entries in player_stats
+        let lines = vec![
+            "1/27 10:00:00.000  COMBATANT_INFO: 27.01.26 10:00:00&Druid&DRUID&NightElf&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 10:00:10.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 10:00:11.000  Druid 's Rake hits Boss for 300.".to_string(),
+            "1/27 10:00:14.000  Boss suffers 100 Physical damage from Druid 's Rake.".to_string(),
+            "1/27 10:00:17.000  Boss suffers 100 Physical damage from Druid 's Rake.".to_string(),
+            "1/27 10:00:20.000  Boss suffers 100 Physical damage from Druid 's Rake.".to_string(),
+            "1/27 10:00:30.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let druid = data.player_stats.get("Druid").expect("Druid should have stats");
+        assert_eq!(druid.damage, 600, "Total damage should be 300 + 3*100");
+
+        let rake_direct = druid.abilities.get("Rake");
+        assert!(rake_direct.is_some(), "Should have 'Rake' ability for direct hit");
+        assert_eq!(rake_direct.unwrap().total, 300);
+        assert_eq!(rake_direct.unwrap().hits, 1);
+
+        let rake_dot = druid.abilities.get("Rake (dot)");
+        assert!(rake_dot.is_some(), "Should have 'Rake (dot)' ability for DoT ticks");
+        assert_eq!(rake_dot.unwrap().total, 300);
+        assert_eq!(rake_dot.unwrap().hits, 3);
     }
 }

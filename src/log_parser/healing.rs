@@ -91,7 +91,7 @@ pub(super) fn parse_healing_events(
         return;
     }
 
-    // Format 2: Target gains N health from Source 's Spell
+    // Format 2: Target gains N health from Source 's Spell (periodic/HoT)
     if let Some(caps) = RE_HEAL_GAIN.captures(trimmed) {
         let Some(target) = caps.get(1).map(|m| m.as_str().to_string()) else {
             return;
@@ -103,9 +103,11 @@ pub(super) fn parse_healing_events(
         let Some(source) = caps.get(3).map(|m| m.as_str().to_string()) else {
             return;
         };
-        let Some(spell) = caps.get(4).map(|m| m.as_str().trim().to_string()) else {
+        let Some(raw_spell) = caps.get(4).map(|m| m.as_str().trim().to_string()) else {
             return;
         };
+        // "gains health from" lines are periodic (HoT) ticks — distinguish from direct heals
+        let spell = format!("{raw_spell} (hot)");
 
         let (effective_heal, overheal) = compute_effective_heal(health_deficit, &target, amount);
         if data.all_combatants.contains_key(target.as_str()) {
@@ -274,5 +276,92 @@ mod tests {
             148 * 4 - 500,
             "Overheal = raw - effective"
         );
+    }
+
+    // ── HoT Suffix Tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_hot_suffix_on_gain_line() {
+        // "gains health from" lines should produce spell names with " (hot)" suffix
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Druid&DRUID&NightElf&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:02.000  Warrior gains 148 health from Druid 's Rejuvenation.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let heal = data
+            .entries
+            .iter()
+            .find(|e| matches!(e, LogEntry::Healing { .. }));
+        assert!(heal.is_some(), "Should have a healing entry");
+        if let Some(LogEntry::Healing { spell, amount, .. }) = heal {
+            assert_eq!(
+                spell, "Rejuvenation (hot)",
+                "Gain line should produce (hot) suffix"
+            );
+            assert_eq!(*amount, 148);
+        }
+    }
+
+    #[test]
+    fn test_direct_heal_no_hot_suffix() {
+        // Direct "heals" lines should NOT have the (hot) suffix
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Priest&PRIEST&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Priest 's Flash Heal heals Warrior for 2800.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let heal = data
+            .entries
+            .iter()
+            .find(|e| matches!(e, LogEntry::Healing { .. }));
+        assert!(heal.is_some(), "Should have a healing entry");
+        if let Some(LogEntry::Healing { spell, .. }) = heal {
+            assert_eq!(
+                spell, "Flash Heal",
+                "Direct heal should NOT have (hot) suffix"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hot_and_direct_separate_abilities() {
+        // Regrowth has both a direct heal and HoT component — they should be
+        // separate entries in healing_abilities
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Druid&DRUID&NightElf&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:00.500  Boss hits Warrior for 5000.".to_string(),
+            "1/27 12:24:01.000  Druid 's Regrowth heals Warrior for 800.".to_string(),
+            "1/27 12:24:03.000  Warrior gains 100 health from Druid 's Regrowth.".to_string(),
+            "1/27 12:24:05.000  Warrior gains 100 health from Druid 's Regrowth.".to_string(),
+            "1/27 12:24:07.000  Warrior gains 100 health from Druid 's Regrowth.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let druid = data
+            .player_stats
+            .get("Druid")
+            .expect("Druid should have stats");
+        assert_eq!(druid.healing, 1100, "Total raw healing = 800 + 3*100");
+
+        let direct = druid.healing_abilities.get("Regrowth");
+        assert!(direct.is_some(), "Should have 'Regrowth' for direct heal");
+        assert_eq!(direct.unwrap().total, 800);
+        assert_eq!(direct.unwrap().hits, 1);
+
+        let hot = druid.healing_abilities.get("Regrowth (hot)");
+        assert!(hot.is_some(), "Should have 'Regrowth (hot)' for HoT ticks");
+        assert_eq!(hot.unwrap().total, 300);
+        assert_eq!(hot.unwrap().hits, 3);
     }
 }

@@ -534,7 +534,10 @@ mod tests {
         let death = &data.deaths[0];
         assert_eq!(death.player, "Tank");
         assert_eq!(death.killer, Some("Hakkar".to_string()));
-        assert_eq!(death.killing_blow, Some("Corrupted Blood".to_string()));
+        assert_eq!(
+            death.killing_blow,
+            Some("Corrupted Blood (dot)".to_string())
+        );
         assert_eq!(death.damage_amount, Some(1200));
     }
 

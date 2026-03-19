@@ -15,10 +15,11 @@ mod viewer;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use iced::keyboard;
 use iced::widget::{
     Column, Space, button, center, checkbox, column, container, row, rule, stack, text,
 };
-use iced::{Center, Color, Element, Fill, Length, Task, Theme};
+use iced::{Center, Color, Element, Fill, Length, Subscription, Task, Theme};
 
 use crate::export::{BatchExportResult, DoneInfo, ExportOptions};
 use crate::file_io::{load_file, pick_file};
@@ -220,6 +221,9 @@ enum Message {
     // Loading spinner
     SpinnerTick,
 
+    // Keyboard
+    EscapePressed,
+
     // Viewer messages
     Viewer(viewer::ViewerMessage),
 }
@@ -316,6 +320,20 @@ impl App {
                 // Restore tracked auras from config
                 vs.tracked_auras.clone_from(&self.config.tracked_auras);
                 self.state = AppState::Viewing(Box::new(vs));
+                Task::none()
+            }
+
+            // ── Keyboard shortcuts ───────────────────────────────────────
+            Message::EscapePressed => {
+                // Close the topmost overlay: export modal takes priority over detail view
+                if self.show_export_modal {
+                    self.show_export_modal = false;
+                    self.export_result = None;
+                    self.batch_export_result = None;
+                    self.export_all = false;
+                } else if let AppState::Viewing(ref mut vs) = self.state {
+                    vs.detail = None;
+                }
                 Task::none()
             }
 
@@ -529,12 +547,23 @@ impl App {
 
     // ── Subscription ────────────────────────────────────────────────────────
 
-    fn subscription(&self) -> iced::Subscription<Message> {
-        if matches!(self.state, AppState::Loading) {
+    fn subscription(&self) -> Subscription<Message> {
+        let spinner = if matches!(self.state, AppState::Loading) {
             iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::SpinnerTick)
         } else {
-            iced::Subscription::none()
-        }
+            Subscription::none()
+        };
+
+        // Escape key closes the topmost overlay (export modal > detail view)
+        let keys = keyboard::listen().filter_map(|event| match event {
+            keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            } => Some(Message::EscapePressed),
+            _ => None,
+        });
+
+        Subscription::batch([spinner, keys])
     }
 
     // ── View ────────────────────────────────────────────────────────────────
