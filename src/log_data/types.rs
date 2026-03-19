@@ -299,6 +299,9 @@ pub struct AbilityStats {
     pub total: u64,
     pub hits: u64,
     pub crits: u64,
+    /// Sum of damage/healing amounts from critical strikes only.
+    /// Enables computing avg crit vs avg normal hit.
+    pub crit_total: u64,
     pub effective: u64,
     pub overheal: u64,
     #[allow(dead_code)] // Data model — stored for future pet damage breakdown display
@@ -316,6 +319,7 @@ impl PlayerStats {
         ab.hits += 1;
         if is_crit {
             ab.crits += 1;
+            ab.crit_total += amount;
         }
     }
 
@@ -348,6 +352,7 @@ impl PlayerStats {
         dt_ab.blocked += blocked;
         if is_crit {
             dt_ab.crits += 1;
+            dt_ab.crit_total += amount;
         }
         if is_crushing {
             dt_ab.crushing_hits += 1;
@@ -376,6 +381,7 @@ impl PlayerStats {
         ab.hits += 1;
         if is_crit {
             ab.crits += 1;
+            ab.crit_total += amount;
         }
     }
 }
@@ -390,6 +396,8 @@ pub struct DamageTakenAbilityStats {
     pub total: u64,
     pub hits: u64,
     pub crits: u64,
+    /// Sum of damage amounts from critical strikes only.
+    pub crit_total: u64,
     pub absorbed: u64,
     pub resisted: u64,
     pub blocked: u64,

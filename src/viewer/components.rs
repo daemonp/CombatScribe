@@ -540,6 +540,281 @@ pub(super) fn tooltip_container_style(_theme: &iced::Theme) -> container::Style 
     }
 }
 
+// ── Meter Tooltip Builders ───────────────────────────────────────────────────
+
+/// Aggregate stats across all abilities for tooltip display.
+struct AggregateStats {
+    hits: u64,
+    crits: u64,
+    crit_amount: u64,
+    noncrit_amount: u64,
+}
+
+impl AggregateStats {
+    fn from_abilities(
+        abilities: &std::collections::HashMap<String, crate::log_data::AbilityStats>,
+    ) -> Self {
+        let mut hits = 0_u64;
+        let mut crits = 0_u64;
+        let mut crit_amount = 0_u64;
+        let mut amount = 0_u64;
+        for ab in abilities.values() {
+            hits += ab.hits;
+            crits += ab.crits;
+            crit_amount += ab.crit_total;
+            amount += ab.total;
+        }
+        Self {
+            hits,
+            crits,
+            crit_amount,
+            noncrit_amount: amount.saturating_sub(crit_amount),
+        }
+    }
+
+    fn crit_pct(&self) -> f64 {
+        if self.hits > 0 {
+            self.crits as f64 / self.hits as f64 * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    fn avg_hit(&self) -> Option<u64> {
+        let normal_hits = self.hits.saturating_sub(self.crits);
+        self.noncrit_amount.checked_div(normal_hits)
+    }
+
+    fn avg_crit(&self) -> Option<u64> {
+        self.crit_amount.checked_div(self.crits)
+    }
+}
+
+/// Build damage meter tooltip content.
+///
+/// Shows total, DPS, hit/crit counts, crit rate, and avg hit/crit values.
+pub(super) fn build_damage_tooltip<'a>(
+    name: &str,
+    class: &str,
+    ps: &crate::log_data::PlayerStats,
+    value: u64,
+    duration: f64,
+) -> Element<'a, ViewerMessage> {
+    let class_color = theme::class_color(class);
+    let agg = AggregateStats::from_abilities(&ps.abilities);
+    let pps = per_second(value, duration);
+
+    let mut col = Column::new().spacing(3);
+
+    // Player name header
+    col = col.push(text(name.to_string()).size(12).color(class_color));
+    col = col.push(rule::horizontal(1));
+
+    // Total + DPS
+    col = col.push(
+        row![
+            text(format!("{} total", theme::format_number(value)))
+                .size(11)
+                .color(Color::WHITE),
+            text(format!("- {}/s", theme::format_number_f64(pps)))
+                .size(11)
+                .color(theme::TEXT_SECONDARY),
+        ]
+        .spacing(4),
+    );
+
+    // Hits / Crits / Crit%
+    col = col.push(
+        text(format!(
+            "{} hits | {} crits ({:.1}%)",
+            agg.hits,
+            agg.crits,
+            agg.crit_pct()
+        ))
+        .size(11)
+        .color(theme::TEXT_SECONDARY),
+    );
+
+    // Avg Hit / Avg Crit
+    let avg_hit_str = agg
+        .avg_hit()
+        .map_or("-".to_string(), theme::format_number);
+    let avg_crit_str = agg
+        .avg_crit()
+        .map_or("-".to_string(), theme::format_number);
+    col = col.push(
+        text(format!("Avg Hit: {avg_hit_str} | Avg Crit: {avg_crit_str}"))
+            .size(11)
+            .color(theme::TEXT_SECONDARY),
+    );
+
+    container(col)
+        .padding([6, 10])
+        .max_width(280)
+        .style(tooltip_container_style)
+        .into()
+}
+
+/// Build damage-taken meter tooltip content.
+pub(super) fn build_damage_taken_tooltip<'a>(
+    name: &str,
+    class: &str,
+    ps: &crate::log_data::PlayerStats,
+    duration: f64,
+) -> Element<'a, ViewerMessage> {
+    let class_color = theme::class_color(class);
+    let total = ps.damage_taken;
+    let dtps = per_second(total, duration);
+
+    // Aggregate hits/crits across all damage-taken sources
+    let mut total_hits = 0_u64;
+    let mut total_crits = 0_u64;
+    for source_abilities in ps.damage_taken_breakdown.values() {
+        for ab in source_abilities.values() {
+            total_hits += ab.hits;
+            total_crits += ab.crits;
+        }
+    }
+    let crit_pct = if total_hits > 0 {
+        total_crits as f64 / total_hits as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let mut col = Column::new().spacing(3);
+
+    col = col.push(text(name.to_string()).size(12).color(class_color));
+    col = col.push(rule::horizontal(1));
+
+    col = col.push(
+        row![
+            text(format!("{} total taken", theme::format_number(total)))
+                .size(11)
+                .color(Color::WHITE),
+            text(format!("- {}/s", theme::format_number_f64(dtps)))
+                .size(11)
+                .color(theme::TEXT_SECONDARY),
+        ]
+        .spacing(4),
+    );
+
+    col = col.push(
+        text(format!(
+            "{total_hits} hits | {total_crits} crits ({crit_pct:.1}%)"
+        ))
+        .size(11)
+        .color(theme::TEXT_SECONDARY),
+    );
+
+    container(col)
+        .padding([6, 10])
+        .max_width(280)
+        .style(tooltip_container_style)
+        .into()
+}
+
+/// Build healing meter tooltip content.
+///
+/// Shows effective healing, HPS, overheal details, hit/crit counts, and averages.
+pub(super) fn build_healing_tooltip<'a>(
+    name: &str,
+    class: &str,
+    ps: &crate::log_data::PlayerStats,
+    duration: f64,
+) -> Element<'a, ViewerMessage> {
+    let class_color = theme::class_color(class);
+    let agg = AggregateStats::from_abilities(&ps.healing_abilities);
+    let eff = ps.effective_healing;
+    let oh = ps.overhealing;
+    let eff_ps = per_second(eff, duration);
+
+    let oh_pct = if eff + oh > 0 {
+        oh as f64 / (eff + oh) as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let mut col = Column::new().spacing(3);
+
+    col = col.push(text(name.to_string()).size(12).color(class_color));
+    col = col.push(rule::horizontal(1));
+
+    // Effective + HPS
+    col = col.push(
+        row![
+            text(format!("{} effective", theme::format_number(eff)))
+                .size(11)
+                .color(Color::WHITE),
+            text(format!("- {}/s", theme::format_number_f64(eff_ps)))
+                .size(11)
+                .color(theme::TEXT_SECONDARY),
+        ]
+        .spacing(4),
+    );
+
+    // Overheal
+    col = col.push(
+        text(format!(
+            "{} overheal ({oh_pct:.1}%)",
+            theme::format_number(oh)
+        ))
+        .size(11)
+        .color(theme::TEXT_SECONDARY),
+    );
+
+    // Hits / Crits / Crit%
+    col = col.push(
+        text(format!(
+            "{} hits | {} crits ({:.1}%)",
+            agg.hits,
+            agg.crits,
+            agg.crit_pct()
+        ))
+        .size(11)
+        .color(theme::TEXT_SECONDARY),
+    );
+
+    // Avg Hit / Avg Crit (based on effective healing)
+    // Recompute using effective values for healing
+    let mut eff_crit_total = 0_u64;
+    let mut eff_noncrit_total = 0_u64;
+    let mut total_crits = 0_u64;
+    let mut total_normals = 0_u64;
+    for ab in ps.healing_abilities.values() {
+        let normal_hits = ab.hits.saturating_sub(ab.crits);
+        let noncrit_amount = ab.effective.saturating_sub(
+            if ab.hits > 0 && ab.crits > 0 {
+                // Approximate effective crit proportionally
+                (ab.effective as f64 * ab.crit_total as f64 / ab.total.max(1) as f64) as u64
+            } else {
+                0
+            },
+        );
+        let crit_amount = ab.effective.saturating_sub(noncrit_amount);
+        eff_crit_total += crit_amount;
+        eff_noncrit_total += noncrit_amount;
+        total_crits += ab.crits;
+        total_normals += normal_hits;
+    }
+    let avg_hit_str = eff_noncrit_total
+        .checked_div(total_normals)
+        .map_or("-".to_string(), theme::format_number);
+    let avg_crit_str = eff_crit_total
+        .checked_div(total_crits)
+        .map_or("-".to_string(), theme::format_number);
+    col = col.push(
+        text(format!("Avg Hit: {avg_hit_str} | Avg Crit: {avg_crit_str}"))
+            .size(11)
+            .color(theme::TEXT_SECONDARY),
+    );
+
+    container(col)
+        .padding([6, 10])
+        .max_width(280)
+        .style(tooltip_container_style)
+        .into()
+}
+
 /// Styled container background for card/panel sections.
 pub(super) fn panel_style(_theme: &iced::Theme) -> container::Style {
     container::Style {

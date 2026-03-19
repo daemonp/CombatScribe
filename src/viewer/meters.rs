@@ -5,7 +5,7 @@
 use super::components::*;
 #[allow(clippy::wildcard_imports)] // viewer UI — many shared types/widgets used throughout
 use super::*;
-use iced::widget::column;
+use iced::widget::{column, tooltip};
 
 // ── Meters Tab ──────────────────────────────────────────────────────────────
 
@@ -96,7 +96,7 @@ impl ViewerState {
             );
             let pct_text = format!("{percent:.1}%");
 
-            dmg_col = dmg_col.push(build_meter_row(
+            let meter_row = build_meter_row(
                 rank + 1,
                 name,
                 class,
@@ -105,7 +105,25 @@ impl ViewerState {
                 bar_pct,
                 theme::class_color(class),
                 Some((name.clone(), dmg_detail_type)),
-            ));
+            );
+
+            // Wrap in tooltip with player stats summary
+            let row_with_tooltip: Element<ViewerMessage> =
+                if let Some(ps) = stats.get(name.as_str()) {
+                    let tip = if self.damage_type == DamageType::DamageTaken {
+                        build_damage_taken_tooltip(name, class, ps, duration)
+                    } else {
+                        build_damage_tooltip(name, class, ps, *value, duration)
+                    };
+                    tooltip(meter_row, tip, tooltip::Position::FollowCursor)
+                        .gap(4)
+                        .snap_within_viewport(true)
+                        .into()
+                } else {
+                    meter_row
+                };
+
+            dmg_col = dmg_col.push(row_with_tooltip);
         }
 
         let damage_panel: Element<ViewerMessage> = container(
@@ -219,9 +237,8 @@ impl ViewerState {
 
             let eff_ps = per_second(player.effective, duration);
             let value_text = format!(
-                "{} eff ({} oh {player_oh_pct:.1}%) - {}/s",
+                "{} eff ({player_oh_pct:.1}% oh) - {}/s",
                 theme::format_number(player.effective),
-                theme::format_number(player.overheal),
                 theme::format_number_f64(eff_ps),
             );
 
@@ -256,13 +273,29 @@ impl ViewerState {
                 .width(Fill)
                 .into();
 
-            heal_col = heal_col.push(
-                button(full_row)
-                    .on_press(ViewerMessage::ShowDetail(player_name, DetailType::Healing))
-                    .padding(0)
-                    .width(Fill)
-                    .style(transparent_button_style),
-            );
+            let clickable: Element<ViewerMessage> = button(full_row)
+                .on_press(ViewerMessage::ShowDetail(
+                    player_name.clone(),
+                    DetailType::Healing,
+                ))
+                .padding(0)
+                .width(Fill)
+                .style(transparent_button_style)
+                .into();
+
+            // Wrap in tooltip with healing stats summary
+            let row_with_tooltip: Element<ViewerMessage> =
+                if let Some(ps) = stats.get(player_name.as_str()) {
+                    let tip = build_healing_tooltip(&player_name, &class_str, ps, duration);
+                    tooltip(clickable, tip, tooltip::Position::FollowCursor)
+                        .gap(4)
+                        .snap_within_viewport(true)
+                        .into()
+                } else {
+                    clickable
+                };
+
+            heal_col = heal_col.push(row_with_tooltip);
         }
 
         if players.is_empty() {
@@ -348,7 +381,7 @@ impl ViewerState {
             );
             let pct_text = format!("{percent:.1}%");
 
-            heal_col = heal_col.push(build_meter_row(
+            let meter_row = build_meter_row(
                 rank + 1,
                 name,
                 class,
@@ -357,7 +390,21 @@ impl ViewerState {
                 bar_pct,
                 theme::class_color(class),
                 Some((name.clone(), DetailType::Healing)),
-            ));
+            );
+
+            // Wrap in tooltip with healing stats summary
+            let row_with_tooltip: Element<ViewerMessage> =
+                if let Some(ps) = stats.get(name.as_str()) {
+                    let tip = build_healing_tooltip(name, class, ps, duration);
+                    tooltip(meter_row, tip, tooltip::Position::FollowCursor)
+                        .gap(4)
+                        .snap_within_viewport(true)
+                        .into()
+                } else {
+                    meter_row
+                };
+
+            heal_col = heal_col.push(row_with_tooltip);
         }
 
         if healing_players.is_empty() {

@@ -17,7 +17,10 @@ struct AbilityRow {
     hits: u64,
     crits: u64,
     crit_pct: f64,
-    avg: u64,
+    /// Average non-crit hit value (None when no normal hits exist).
+    avg_hit: Option<u64>,
+    /// Average crit value (None when no crits exist).
+    avg_crit: Option<u64>,
     percent: f64,
     /// Overheal percentage — present only for healing breakdowns.
     oh_pct: Option<f64>,
@@ -29,12 +32,14 @@ struct DamageTakenRow {
     spell: String,
     total: u64,
     hits: u64,
-    avg: u64,
+    avg_hit: Option<u64>,
+    avg_crit: Option<u64>,
     crits: u64,
     absorbed: u64,
     resisted: u64,
     blocked: u64,
     crushing_hits: u64,
+    glancing_hits: u64,
     percent: f64,
 }
 
@@ -135,6 +140,7 @@ impl ViewerState {
 
         let total_hits: u64 = sorted.iter().map(|(_, a)| a.hits).sum();
         let total_crits: u64 = sorted.iter().map(|(_, a)| a.crits).sum();
+        let total_crit_amount: u64 = sorted.iter().map(|(_, a)| a.crit_total).sum();
         let crit_rate = if total_hits > 0 {
             (total_crits as f64 / total_hits as f64) * 100.0
         } else {
@@ -145,6 +151,16 @@ impl ViewerState {
         } else {
             0.0
         };
+
+        // Compute aggregate avg hit / avg crit for summary line
+        let normal_hits = total_hits.saturating_sub(total_crits);
+        let noncrit_amount = total.saturating_sub(total_crit_amount);
+        let avg_hit_str = noncrit_amount
+            .checked_div(normal_hits)
+            .map_or("-".to_string(), theme::format_number);
+        let avg_crit_str = total_crit_amount
+            .checked_div(total_crits)
+            .map_or("-".to_string(), theme::format_number);
 
         let heal_value_label = match self.healing_type {
             HealingType::Healing | HealingType::Effective => "Effective",
@@ -161,7 +177,7 @@ impl ViewerState {
                 0.0
             };
             format!(
-                "{}: {} | Per Second: {}/s | Duration: {} | Overheal: {:.1}% | Hits: {} | Crits: {} | Crit Rate: {:.1}%",
+                "{}: {} | Per Second: {}/s | Duration: {} | Overheal: {:.1}% | Hits: {} | Crits: {} | Crit Rate: {:.1}% | Avg Hit: {} | Avg Crit: {}",
                 heal_value_label,
                 theme::format_number(total),
                 theme::format_number_f64(pps),
@@ -170,16 +186,20 @@ impl ViewerState {
                 total_hits,
                 total_crits,
                 crit_rate,
+                avg_hit_str,
+                avg_crit_str,
             )
         } else {
             format!(
-                "Total: {} | Per Second: {}/s | Duration: {} | Hits: {} | Crits: {} | Crit Rate: {:.1}%",
+                "Total: {} | Per Second: {}/s | Duration: {} | Hits: {} | Crits: {} | Crit Rate: {:.1}% | Avg Hit: {} | Avg Crit: {}",
                 theme::format_number(total),
                 theme::format_number_f64(pps),
                 theme::format_duration(duration),
                 total_hits,
                 total_crits,
                 crit_rate,
+                avg_hit_str,
+                avg_crit_str,
             )
         };
         let summary = text(summary_str).size(12).color([0.5, 0.5, 0.5]);
@@ -261,12 +281,15 @@ impl ViewerState {
                 } else {
                     0.0
                 };
-                let avg = display_total.checked_div(ab.hits).unwrap_or(0);
                 let crit_pct = if ab.hits > 0 {
                     ab.crits as f64 / ab.hits as f64 * 100.0
                 } else {
                     0.0
                 };
+                let normal_hits = ab.hits.saturating_sub(ab.crits);
+                let noncrit_total = display_total.saturating_sub(ab.crit_total);
+                let avg_hit = noncrit_total.checked_div(normal_hits);
+                let avg_crit = ab.crit_total.checked_div(ab.crits);
                 let oh_pct = if is_healing && ab.total > 0 {
                     Some(ab.overheal as f64 / ab.total as f64 * 100.0)
                 } else {
@@ -278,7 +301,8 @@ impl ViewerState {
                     hits: ab.hits,
                     crits: ab.crits,
                     crit_pct,
-                    avg,
+                    avg_hit,
+                    avg_crit,
                     percent,
                     oh_pct,
                 }
@@ -291,6 +315,9 @@ impl ViewerState {
         } else {
             "Total".to_string()
         };
+
+        let fmt_avg =
+            |val: Option<u64>| -> String { val.map_or("-".to_string(), theme::format_number) };
 
         let ability_table: Element<'_, ViewerMessage> = if is_healing {
             let columns = [
@@ -318,8 +345,12 @@ impl ViewerState {
                     text(format!("{:.1}%", r.crit_pct)).size(12)
                 })
                 .width(Length::FillPortion(1)),
-                table::column(header("Avg"), |r: AbilityRow| {
-                    text(theme::format_number(r.avg)).size(12)
+                table::column(header("Avg Hit"), move |r: AbilityRow| {
+                    text(fmt_avg(r.avg_hit)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Avg Crit"), move |r: AbilityRow| {
+                    text(fmt_avg(r.avg_crit)).size(12)
                 })
                 .width(Length::FillPortion(1)),
                 table::column(header("%"), |r: AbilityRow| {
@@ -352,8 +383,12 @@ impl ViewerState {
                     text(format!("{:.1}%", r.crit_pct)).size(12)
                 })
                 .width(Length::FillPortion(1)),
-                table::column(header("Avg"), |r: AbilityRow| {
-                    text(theme::format_number(r.avg)).size(12)
+                table::column(header("Avg Hit"), move |r: AbilityRow| {
+                    text(fmt_avg(r.avg_hit)).size(12)
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Avg Crit"), move |r: AbilityRow| {
+                    text(fmt_avg(r.avg_crit)).size(12)
                 })
                 .width(Length::FillPortion(1)),
                 table::column(header("%"), |r: AbilityRow| {
@@ -469,7 +504,10 @@ impl ViewerState {
             let rows: Vec<DamageTakenRow> = sorted_abilities
                 .iter()
                 .map(|(spell_name, ab)| {
-                    let avg = ab.total.checked_div(ab.hits).unwrap_or(0);
+                    let normal_hits = ab.hits.saturating_sub(ab.crits);
+                    let noncrit_amount = ab.total.saturating_sub(ab.crit_total);
+                    let avg_hit = noncrit_amount.checked_div(normal_hits);
+                    let avg_crit = ab.crit_total.checked_div(ab.crits);
                     let pct = if total > 0 {
                         ab.total as f64 / total as f64 * 100.0
                     } else {
@@ -479,12 +517,14 @@ impl ViewerState {
                         spell: (*spell_name).clone(),
                         total: ab.total,
                         hits: ab.hits,
-                        avg,
+                        avg_hit,
+                        avg_crit,
                         crits: ab.crits,
                         absorbed: ab.absorbed,
                         resisted: ab.resisted,
                         blocked: ab.blocked,
                         crushing_hits: ab.crushing_hits,
+                        glancing_hits: ab.glancing_hits,
                         percent: pct,
                     }
                 })
@@ -497,6 +537,9 @@ impl ViewerState {
                     "-".to_string()
                 }
             };
+
+            let fmt_avg =
+                |val: Option<u64>| -> String { val.map_or("-".to_string(), theme::format_number) };
 
             let columns = [
                 table::column(header("Ability"), |r: DamageTakenRow| {
@@ -511,14 +554,18 @@ impl ViewerState {
                     text(r.hits.to_string()).size(12)
                 })
                 .width(Length::FillPortion(1)),
-                table::column(header("Avg"), |r: DamageTakenRow| {
-                    text(theme::format_number(r.avg)).size(12)
+                table::column(header("Avg Hit"), move |r: DamageTakenRow| {
+                    text(fmt_avg(r.avg_hit)).size(12)
                 })
                 .width(Length::FillPortion(2)),
                 table::column(header("Crit"), |r: DamageTakenRow| {
                     text(r.crits.to_string()).size(12)
                 })
                 .width(Length::FillPortion(1)),
+                table::column(header("Avg Crit"), move |r: DamageTakenRow| {
+                    text(fmt_avg(r.avg_crit)).size(12)
+                })
+                .width(Length::FillPortion(2)),
                 table::column(header("Absorb"), move |r: DamageTakenRow| {
                     text(fmt_or_dash(r.absorbed))
                         .size(12)
@@ -544,6 +591,15 @@ impl ViewerState {
                         "-".to_string()
                     };
                     text(s).size(12).color(Color::from_rgb8(200, 100, 100))
+                })
+                .width(Length::FillPortion(1)),
+                table::column(header("Glance"), |r: DamageTakenRow| {
+                    let s = if r.glancing_hits > 0 {
+                        r.glancing_hits.to_string()
+                    } else {
+                        "-".to_string()
+                    };
+                    text(s).size(12).color(theme::TEXT_SECONDARY)
                 })
                 .width(Length::FillPortion(1)),
                 table::column(header("%"), |r: DamageTakenRow| {
