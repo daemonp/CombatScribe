@@ -23,9 +23,9 @@ impl ViewerState {
         let (stats, duration) = self.log_data.filtered_stats(&self.encounter_filter);
 
         // ── Damage panel data ───────────────────────────────────────
-        let damage_types_list = vec![
+        let damage_types_list: &[DamageType] = &[
             DamageType::Damage,
-            DamageType::DamageWithPets,
+            DamageType::DamagePersonal,
             DamageType::DamageTaken,
         ];
 
@@ -37,7 +37,7 @@ impl ViewerState {
                 }
                 let value = match self.damage_type {
                     DamageType::Damage => ps.damage,
-                    DamageType::DamageWithPets => ps.damage + ps.pet_damage,
+                    DamageType::DamagePersonal => ps.damage.saturating_sub(ps.pet_damage),
                     DamageType::DamageTaken => ps.damage_taken,
                 };
                 if value == 0 {
@@ -137,7 +137,7 @@ impl ViewerState {
         .into();
 
         // ── Healing panel data ──────────────────────────────────────
-        let healing_types_list = vec![
+        let healing_types_list: &[HealingType] = &[
             HealingType::Healing,
             HealingType::Effective,
             HealingType::Raw,
@@ -145,9 +145,9 @@ impl ViewerState {
         ];
 
         let healing_panel: Element<ViewerMessage> = if self.healing_type == HealingType::Healing {
-            self.build_combined_healing_panel(&stats, duration, &healing_types_list)
+            self.build_combined_healing_panel(&stats, duration, healing_types_list)
         } else {
-            self.build_simple_healing_panel(&stats, duration, &healing_types_list)
+            self.build_simple_healing_panel(&stats, duration, healing_types_list)
         };
 
         scrollable(row![damage_panel, healing_panel].spacing(12).width(Fill))
@@ -434,7 +434,7 @@ impl ViewerState {
     }
 
     fn view_dispel_panel(&self) -> Element<'_, ViewerMessage> {
-        let dispel_types = vec![DispelSubType::Dispels, DispelSubType::Interrupts];
+        let dispel_types: &[DispelSubType] = &[DispelSubType::Dispels, DispelSubType::Interrupts];
         let type_picker = pick_list(dispel_types, Some(self.dispel_type), |dt| {
             ViewerMessage::SetDispelType(dt)
         })
@@ -498,7 +498,7 @@ impl ViewerState {
     }
 
     fn view_death_panel(&self) -> Element<'_, ViewerMessage> {
-        let death_types = vec![
+        let death_types: &[DeathSubType] = &[
             DeathSubType::Deaths,
             DeathSubType::Resurrects,
             DeathSubType::Absorbs,

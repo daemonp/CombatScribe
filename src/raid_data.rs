@@ -12,7 +12,6 @@ include!(concat!(env!("OUT_DIR"), "/raid_data_generated.rs"));
 ///
 /// Input is matched case-insensitively (lowercased internally).
 /// Returns `None` for NPCs not associated with any raid instance.
-#[allow(dead_code)] // Available for NPC-based instance detection
 pub(crate) fn npc_raid(name: &str) -> Option<&'static str> {
     let lower = to_lower_checked(name)?;
     binary_search_map(NPC_TO_RAID, &lower)
@@ -73,12 +72,7 @@ pub(crate) fn encounter_count(zone: &str) -> Option<usize> {
 /// an alias matches, or the lowercased original otherwise.
 pub(crate) fn normalize_zone(zone: &str) -> String {
     let lower = zone.to_lowercase();
-    for &(alias, canonical) in ZONE_ALIASES {
-        if lower == alias {
-            return canonical.to_string();
-        }
-    }
-    lower
+    binary_search_map(ZONE_ALIASES, &lower).map_or(lower, str::to_string)
 }
 
 /// Check if a zone is a known non-raid overworld zone.
@@ -117,9 +111,10 @@ pub(crate) fn all_boss_names() -> &'static [&'static str] {
 /// If `zone` is `None` or doesn't match any raid, returns `None` so the
 /// caller can fall back to the full boss list.
 pub(crate) fn bosses_for_zone(zone: Option<&str>) -> Option<Vec<&'static str>> {
-    let zone_lower = zone?.to_lowercase();
+    let zone_raw = zone?;
     // Also resolve aliases so "ahn'qiraj temple" matches "temple of ahn'qiraj", etc.
-    let canonical = normalize_zone(&zone_lower);
+    let canonical = normalize_zone(zone_raw);
+    let zone_lower = zone_raw.to_lowercase();
     let bosses: Vec<&'static str> = BOSS_TO_RAID
         .iter()
         .filter(|(_, raid)| raid.to_lowercase() == canonical || raid.to_lowercase() == zone_lower)

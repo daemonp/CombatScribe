@@ -10,6 +10,21 @@ use super::types::{
     Combatant, ConsumableCategory, Encounter, EncounterFilter, LogData, LogEntry,
 };
 
+/// Pre-pull buffer in seconds (5 minutes) for consume timeline.
+const PRE_PULL_BUFFER: f64 = 300.0;
+
+/// Compute the start of the consume timeline window.
+///
+/// Returns `(earliest_encounter_start - PRE_PULL_BUFFER).max(session_start)`,
+/// or `session_start` if there are no encounters.
+fn consume_timeline_start(session_start: f64, encounters: &[&Encounter]) -> f64 {
+    let earliest = encounters
+        .iter()
+        .map(|e| e.start)
+        .fold(f64::INFINITY, f64::min);
+    (earliest - PRE_PULL_BUFFER).max(session_start)
+}
+
 // ── Timeline Builder ────────────────────────────────────────────────────────
 
 impl LogData {
@@ -550,10 +565,6 @@ impl LogData {
         HashMap<String, ConsumableCategory>,
         Vec<ConsumableCategory>,
     ) {
-        /// Pre-pull buffer: include consumables used up to 5 minutes before
-        /// an encounter starts to capture pre-potting and food buffs.
-        const PRE_PULL_BUFFER: f64 = 300.0;
-
         let Some(t_session_start) = session_start else {
             return (Vec::new(), 0.0, HashMap::new(), Vec::new());
         };
@@ -565,15 +576,11 @@ impl LogData {
         let (t_start, t_end) = if encounters.is_empty() {
             (t_session_start, t_session_end)
         } else {
-            let earliest = encounters
-                .iter()
-                .map(|e| e.start)
-                .fold(f64::INFINITY, f64::min);
             let latest = encounters
                 .iter()
                 .map(|e| e.end)
                 .fold(f64::NEG_INFINITY, f64::max);
-            ((earliest - PRE_PULL_BUFFER).max(t_session_start), latest)
+            (consume_timeline_start(t_session_start, encounters), latest)
         };
 
         let consume_duration = (t_end - t_start).max(0.0);
@@ -635,8 +642,6 @@ impl LogData {
         selected_encounters: &[&Encounter],
         filter: &EncounterFilter,
     ) -> Vec<(f64, f64, String, bool)> {
-        const PRE_PULL_BUFFER: f64 = 300.0;
-
         let Some(t_session_start) = session_start else {
             return Vec::new();
         };
@@ -645,11 +650,7 @@ impl LogData {
         let t_start = if selected_encounters.is_empty() {
             t_session_start
         } else {
-            let earliest = selected_encounters
-                .iter()
-                .map(|e| e.start)
-                .fold(f64::INFINITY, f64::min);
-            (earliest - PRE_PULL_BUFFER).max(t_session_start)
+            consume_timeline_start(t_session_start, selected_encounters)
         };
 
         // For "All Encounters", show all boss encounters.
@@ -685,9 +686,6 @@ impl LogData {
         session_start: Option<f64>,
         encounters: &[&Encounter],
     ) -> Vec<(f64, f64, f64)> {
-        /// Pre-pull buffer: must match the constant in `build_consume_marks()`.
-        const PRE_PULL_BUFFER: f64 = 300.0;
-
         let Some(t_session_start) = session_start else {
             return Vec::new();
         };
@@ -697,11 +695,7 @@ impl LogData {
         }
 
         // Compute t_start using the same formula as build_consume_marks()
-        let earliest = encounters
-            .iter()
-            .map(|e| e.start)
-            .fold(f64::INFINITY, f64::min);
-        let t_start = (earliest - PRE_PULL_BUFFER).max(t_session_start);
+        let t_start = consume_timeline_start(t_session_start, encounters);
 
         let mut segments = Vec::with_capacity(encounters.len());
         let mut aura_offset = 0.0;

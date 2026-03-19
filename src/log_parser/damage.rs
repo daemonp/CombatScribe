@@ -5,9 +5,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::log_data::{AbilityStats, LogData, LogEntry};
+use crate::log_data::{LogData, LogEntry};
 
-use super::helpers::{ensure_stats, extract_pet_owner, record_absorb};
+use super::helpers::{ensure_stats, record_absorb};
 use super::regex::{RE_ABSORB, RE_BLOCKED, RE_DMG_AUTO, RE_DMG_SPELL, RE_DMG_SUFFER, RE_RESISTED};
 
 // ── Damage Parsing ──────────────────────────────────────────────────────────
@@ -106,7 +106,9 @@ pub(super) struct DamageEvent<'a> {
     pub(super) is_glancing: bool,
     pub(super) is_crushing: bool,
     pub(super) school: Option<&'a str>,
-    pub(super) pet_owner: Option<&'a str>,
+    /// True when the spell came from a pet (formatter tagged it with `(pet)`).
+    /// The `source` is already the owner — the formatter rewrites the source.
+    pub(super) is_pet_spell: bool,
     pub(super) is_fully_resisted: bool,
     pub(super) is_fully_absorbed: bool,
     pub(super) is_fully_blocked: bool,
@@ -126,7 +128,7 @@ pub(super) fn record_damage(
         event.source,
         event.spell,
         event.amount,
-        event.pet_owner,
+        event.is_pet_spell,
         event.is_crit,
     );
     record_absorb(data, event.target, event.absorbed);
@@ -173,6 +175,7 @@ pub(super) fn record_damage(
         is_glancing: event.is_glancing,
         is_crushing: event.is_crushing,
         school: event.school.map(str::to_string),
+        is_pet_spell: event.is_pet_spell,
         is_fully_resisted: event.is_fully_resisted,
         is_fully_absorbed: event.is_fully_absorbed,
         is_fully_blocked: event.is_fully_blocked,
@@ -189,6 +192,7 @@ pub(super) fn parse_damage_events(
     last_damage: &mut HashMap<String, super::LastDamageInfo>,
 ) {
     let is_crit = trimmed.contains(" crits ") || trimmed.contains(" critically ");
+    let is_pet_spell = trimmed.contains("(pet)");
     let trailer = parse_trailer(trimmed);
     let school = parse_school(trimmed);
 
@@ -207,7 +211,6 @@ pub(super) fn parse_damage_events(
             .get(4)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
-        let pet_owner = extract_pet_owner(source, data);
         let (is_fully_resisted, is_fully_absorbed, is_fully_blocked) =
             trailer.full_mitigation_flags(amount);
         record_damage(
@@ -227,7 +230,7 @@ pub(super) fn parse_damage_events(
                 is_glancing: trailer.is_glancing,
                 is_crushing: trailer.is_crushing,
                 school,
-                pet_owner: pet_owner.as_deref(),
+                is_pet_spell,
                 is_fully_resisted,
                 is_fully_absorbed,
                 is_fully_blocked,
@@ -267,7 +270,7 @@ pub(super) fn parse_damage_events(
                 is_glancing: trailer.is_glancing,
                 is_crushing: trailer.is_crushing,
                 school,
-                pet_owner: None,
+                is_pet_spell,
                 is_fully_resisted,
                 is_fully_absorbed,
                 is_fully_blocked,
@@ -293,7 +296,6 @@ pub(super) fn parse_damage_events(
         };
         // "suffers" lines are periodic (DoT) ticks — distinguish from direct hits
         let spell_dot = format!("{raw_spell} (dot)");
-        let pet_owner = extract_pet_owner(source, data);
         let (is_fully_resisted, is_fully_absorbed, is_fully_blocked) =
             trailer.full_mitigation_flags(amount);
         record_damage(
@@ -313,7 +315,7 @@ pub(super) fn parse_damage_events(
                 is_glancing: trailer.is_glancing,
                 is_crushing: trailer.is_crushing,
                 school,
-                pet_owner: pet_owner.as_deref(),
+                is_pet_spell,
                 is_fully_resisted,
                 is_fully_absorbed,
                 is_fully_blocked,
@@ -322,36 +324,52 @@ pub(super) fn parse_damage_events(
     }
 }
 
-/// Add damage to a source player's stats, with optional pet owner attribution.
+/// Add damage to a source player's stats.
+///
+/// When `is_pet_spell` is true the formatter has already rewritten the source
+/// to the owner — the damage counts toward the owner's total `damage` AND is
+/// tracked separately in `pet_damage` so the UI can show a "Personal only"
+/// mode that subtracts pet damage.  The ability is recorded with `is_pet: true`
+/// so the detail view can visually separate pet abilities.
+///
+/// For summoned-entity spells like Explosive Trap, the burst hits carry the
+/// `(pet)` tag but the periodic ticks do not (the game uses a different format).
+/// Once an ability is marked `is_pet` for a given source, subsequent entries
+/// of the **same base spell** (ignoring `(dot)` suffix) inherit the flag.
 fn add_damage(
     data: &mut LogData,
     source: &str,
     spell: &str,
     amount: u64,
-    pet_owner: Option<&str>,
+    is_pet_spell: bool,
     is_crit: bool,
 ) {
-    // Stats for the direct source
-    ensure_stats(data, source).accumulate_damage(spell, amount, is_crit);
+    let stats = ensure_stats(data, source);
+    stats.accumulate_damage(spell, amount, is_crit);
 
-    // Attribute to pet owner
-    if let Some(owner) = pet_owner
-        && owner != source
-    {
-        let owner_stats = ensure_stats(data, owner);
-        owner_stats.pet_damage += amount;
-        let pet_spell = format!("Pet: {spell}");
-        let ab = owner_stats
-            .abilities
-            .entry(pet_spell)
-            .or_insert_with(|| AbilityStats {
-                is_pet: true,
-                ..AbilityStats::default()
-            });
-        ab.total += amount;
-        ab.hits += 1;
-        if is_crit {
-            ab.crits += 1;
+    // Determine effective pet status: either the formatter tagged it, or a
+    // prior entry for the same base spell was already flagged as pet.  This
+    // handles summoned-entity DoT ticks (e.g. "Explosive Trap Effect (dot)")
+    // whose burst-hit variant was tagged via the formatter.
+    let effective_pet = is_pet_spell || {
+        let base = spell.strip_suffix(" (dot)").unwrap_or(spell);
+        base != spell && stats.abilities.get(base).is_some_and(|a| a.is_pet)
+    };
+
+    if effective_pet {
+        stats.pet_damage += amount;
+        stats.abilities.entry(spell.to_string()).or_default().is_pet = true;
+        // When a base spell is first tagged (pet), retroactively mark any
+        // existing (dot) variant so earlier ticks aren't orphaned as personal.
+        if is_pet_spell {
+            let dot_key = format!("{spell} (dot)");
+            if let Some(dot_ab) = stats.abilities.get_mut(&dot_key)
+                && !dot_ab.is_pet
+            {
+                dot_ab.is_pet = true;
+                // Move the already-accumulated dot damage into pet_damage
+                stats.pet_damage += dot_ab.total;
+            }
         }
     }
 }
@@ -879,10 +897,16 @@ mod tests {
         ];
         let data = parse_log(&lines);
 
-        let dmg = data.entries.iter().find(|e| matches!(e, LogEntry::Damage { .. }));
+        let dmg = data
+            .entries
+            .iter()
+            .find(|e| matches!(e, LogEntry::Damage { .. }));
         assert!(dmg.is_some(), "Should have a damage entry");
         if let Some(LogEntry::Damage { spell, amount, .. }) = dmg {
-            assert_eq!(spell, "Rake (dot)", "Suffer line should produce (dot) suffix");
+            assert_eq!(
+                spell, "Rake (dot)",
+                "Suffer line should produce (dot) suffix"
+            );
             assert_eq!(*amount, 136);
         }
     }
@@ -896,7 +920,10 @@ mod tests {
         ];
         let data = parse_log(&lines);
 
-        let dmg = data.entries.iter().find(|e| matches!(e, LogEntry::Damage { .. }));
+        let dmg = data
+            .entries
+            .iter()
+            .find(|e| matches!(e, LogEntry::Damage { .. }));
         assert!(dmg.is_some(), "Should have a damage entry");
         if let Some(LogEntry::Damage { spell, .. }) = dmg {
             assert_eq!(spell, "Rake", "Direct hit should NOT have (dot) suffix");
@@ -918,16 +945,25 @@ mod tests {
         ];
         let data = parse_log(&lines);
 
-        let druid = data.player_stats.get("Druid").expect("Druid should have stats");
+        let druid = data
+            .player_stats
+            .get("Druid")
+            .expect("Druid should have stats");
         assert_eq!(druid.damage, 600, "Total damage should be 300 + 3*100");
 
         let rake_direct = druid.abilities.get("Rake");
-        assert!(rake_direct.is_some(), "Should have 'Rake' ability for direct hit");
+        assert!(
+            rake_direct.is_some(),
+            "Should have 'Rake' ability for direct hit"
+        );
         assert_eq!(rake_direct.unwrap().total, 300);
         assert_eq!(rake_direct.unwrap().hits, 1);
 
         let rake_dot = druid.abilities.get("Rake (dot)");
-        assert!(rake_dot.is_some(), "Should have 'Rake (dot)' ability for DoT ticks");
+        assert!(
+            rake_dot.is_some(),
+            "Should have 'Rake (dot)' ability for DoT ticks"
+        );
         assert_eq!(rake_dot.unwrap().total, 300);
         assert_eq!(rake_dot.unwrap().hits, 3);
     }

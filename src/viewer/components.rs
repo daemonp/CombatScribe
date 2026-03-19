@@ -72,7 +72,6 @@ pub(super) fn percent_of(value: u64, total: u64) -> f64 {
 /// Build a sorted, aggregated meter bar column from `(name, class, value)` tuples.
 ///
 /// Shared by deaths, resurrects, absorbs, consumables, and dispel/interrupt panels.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_simple_meters<'a>(
     players: &[(&str, &str, u64)],
     bar_color: Color,
@@ -913,9 +912,6 @@ pub(super) fn legend_toggle(
 
 // ── Event Log Functions ─────────────────────────────────────────────────────
 
-/// Big hit threshold for Key Events mode.
-const KEY_EVENT_BIG_HIT: u64 = 2000;
-
 /// Build the encounter event log for the timeline tab.
 ///
 /// Supports three modes:
@@ -1327,7 +1323,7 @@ fn is_key_event(entry: &LogEntry, combatants: &HashMap<String, Combatant>) -> bo
         | LogEntry::Interrupt { .. } => true,
         LogEntry::Damage { target, amount, .. } => {
             // Big hits on raid members
-            *amount >= KEY_EVENT_BIG_HIT && combatants.contains_key(target.as_str())
+            *amount >= BIG_HIT_THRESHOLD && combatants.contains_key(target.as_str())
         }
         LogEntry::Healing { .. } | LogEntry::AuraGain { .. } | LogEntry::AuraFade { .. } => false,
     }

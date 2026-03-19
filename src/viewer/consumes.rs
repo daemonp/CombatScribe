@@ -26,7 +26,7 @@ struct MatrixRow {
 
 impl ViewerState {
     pub(super) fn view_consumes_tab(&self) -> Element<'_, ViewerMessage> {
-        let modes = vec![
+        let modes: &[ConsumesViewMode] = &[
             ConsumesViewMode::RaidOverview,
             ConsumesViewMode::PlayerBreakdown,
             ConsumesViewMode::EncounterMatrix,

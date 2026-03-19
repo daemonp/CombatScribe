@@ -155,7 +155,7 @@ pub fn parse_log(lines: &[String]) -> LogData {
 
         // Boss detection from combat lines (during active combat only)
         // Skip if we already identified a known boss for this combat window
-        if state.in_combat && !has_known_boss(state.current_boss.as_ref()) {
+        if state.in_combat && !has_known_boss(state.current_boss.as_deref()) {
             detect_boss_from_combat(trimmed, &data, &mut state);
         }
 

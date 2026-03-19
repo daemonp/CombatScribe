@@ -29,7 +29,7 @@ impl std::fmt::Display for DeathLogMode {
 impl ViewerState {
     #[allow(clippy::too_many_lines)] // iced UI layout — death log table with encounter lookup
     pub(super) fn view_death_log_tab(&self) -> Element<'_, ViewerMessage> {
-        let mode_list = vec![DeathLogMode::PlayerDeaths, DeathLogMode::AllDeaths];
+        let mode_list: &[DeathLogMode] = &[DeathLogMode::PlayerDeaths, DeathLogMode::AllDeaths];
         let mode_picker = pick_list(mode_list, Some(self.death_log_mode), |m| {
             ViewerMessage::SetDeathTabFilter(m)
         })

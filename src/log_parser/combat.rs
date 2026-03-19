@@ -10,8 +10,8 @@ use super::post_process::{parse_gear_slot, parse_players_in_combat};
 // ── Combat State & Boss Detection ───────────────────────────────────────────
 
 /// Check if an `Option<String>` contains a known boss name.
-pub(super) fn has_known_boss(boss: Option<&String>) -> bool {
-    boss.is_some_and(|b| parser::is_known_boss(b))
+pub(super) fn has_known_boss(boss: Option<&str>) -> bool {
+    boss.is_some_and(parser::is_known_boss)
 }
 
 /// Parse `COMBATANT_INFO`, `ZONE_INFO`, and `PLAYERS_IN_COMBAT` lines.
@@ -81,7 +81,7 @@ pub(super) fn parse_combat_state(
         {
             let duration = timestamp - start;
             if duration > 5.0 {
-                let is_boss = has_known_boss(state.current_boss.as_ref());
+                let is_boss = has_known_boss(state.current_boss.as_deref());
                 #[allow(clippy::cast_possible_truncation)] // encounter won't have 4B players
                 let player_deaths = state.encounter_deaths.len() as u32;
                 #[allow(clippy::cast_possible_truncation)] // encounter won't have 4B players
@@ -182,7 +182,7 @@ pub(super) fn parse_unit_died(
         } else if state.in_combat && !state.current_boss_killed {
             // Non-boss mob died during combat — track as potential encounter name.
             // Never overwrite a known boss, and never overwrite after a kill.
-            let dominated = !has_known_boss(state.current_boss.as_ref())
+            let dominated = !has_known_boss(state.current_boss.as_deref())
                 && state
                     .current_boss
                     .as_ref()
@@ -237,7 +237,7 @@ pub(super) fn detect_boss_from_combat(trimmed: &str, data: &LogData, state: &mut
         return;
     }
     // Already found a known boss for this combat window — nothing to do
-    if has_known_boss(state.current_boss.as_ref()) {
+    if has_known_boss(state.current_boss.as_deref()) {
         return;
     }
 
@@ -275,7 +275,7 @@ pub(super) fn detect_boss_from_combat(trimmed: &str, data: &LogData, state: &mut
     }
 
     // Also check for boss names mentioned directly in the line (e.g. in resist/immune messages)
-    if !has_known_boss(state.current_boss.as_ref()) {
+    if !has_known_boss(state.current_boss.as_deref()) {
         // Quick scan: only worth checking if line contains common combat verbs
         if trimmed.contains("hits ")
             || trimmed.contains("crits ")

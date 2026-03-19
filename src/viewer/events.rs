@@ -116,7 +116,6 @@ impl ViewerState {
                 source,
                 target,
                 spell,
-                amount,
                 effective_heal,
                 overheal,
                 ..
@@ -124,9 +123,6 @@ impl ViewerState {
                 let mut s = format!("{source}'s {spell} heals {target} for {effective_heal}");
                 if *overheal > 0 {
                     let _ = write!(s, " ({overheal} overheal)");
-                }
-                if *effective_heal != *amount {
-                    // Only show raw total if different from effective (i.e. there was overheal)
                 }
                 (s, Color::from_rgb8(100, 255, 100))
             }

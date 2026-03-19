@@ -50,7 +50,7 @@ pub struct AppConfig {
 /// to defaults).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ViewPrefs {
-    /// Damage panel type: Damage, `DamageWithPets`, or `DamageTaken`.
+    /// Damage panel type: Damage, `DamagePersonal`, or `DamageTaken`.
     pub damage_type: String,
     /// Healing panel type: Healing, Effective, Raw, or Overhealing.
     pub healing_type: String,
