@@ -169,29 +169,14 @@ pub const TIMELINE_BIG_HIT: Color = Color {
     a: 1.0,
 };
 
-/// Dispel marker color (teal, matching dispel bar).
-pub const TIMELINE_DISPEL: Color = Color {
-    r: 0.251,
-    g: 0.878,
-    b: 0.816,
-    a: 1.0,
-};
+/// Timeline dispel marker color (same as meter bar).
+pub const TIMELINE_DISPEL: Color = BAR_DISPEL;
 
-/// Resurrect marker color.
-pub const TIMELINE_RESURRECT: Color = Color {
-    r: 0.267,
-    g: 1.0,
-    b: 0.267,
-    a: 1.0,
-};
+/// Timeline resurrect marker color (same as meter bar).
+pub const TIMELINE_RESURRECT: Color = BAR_RESURRECT;
 
-/// Interrupt marker color (matching interrupt bar).
-pub const TIMELINE_INTERRUPT: Color = Color {
-    r: 1.0,
-    g: 0.6,
-    b: 0.2,
-    a: 1.0,
-};
+/// Timeline interrupt marker color (same as meter bar).
+pub const TIMELINE_INTERRUPT: Color = BAR_INTERRUPT;
 
 /// Alive count line color (muted blue).
 pub const TIMELINE_ALIVE: Color = Color {
@@ -344,13 +329,13 @@ pub fn format_number(num: u64) -> String {
 }
 
 /// Format a floating-point per-second value with commas (rounds to nearest integer).
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // display values are always non-negative and < 2^52
 pub fn format_number_f64(num: f64) -> String {
     format_number(num.round() as u64)
 }
 
 /// Format a duration in seconds as `M:SS` or `Xs`.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // duration values are always non-negative and small
 pub fn format_duration(seconds: f64) -> String {
     let total = seconds as u64;
     let mins = total / 60;

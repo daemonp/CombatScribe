@@ -52,6 +52,9 @@ pub enum LogEntry {
         is_glancing: bool,
         is_crushing: bool,
         school: Option<String>,
+        /// True when the damage came from the player's pet (formatter tagged it
+        /// with `(pet)`).  Used by `filtered_stats()` to attribute `pet_damage`.
+        is_pet_spell: bool,
         /// True if the attack was fully resisted (0 damage dealt, resist detected).
         #[allow(dead_code)] // Data model — aggregated into AvoidanceStats during parsing
         is_fully_resisted: bool,
@@ -278,12 +281,18 @@ pub struct Encounter {
 
 #[derive(Debug, Clone, Default)]
 pub struct PlayerStats {
+    /// Total damage dealt (personal + pet).  The formatter rewrites pet lines
+    /// so the owner is the source; damage from both the player and their pets
+    /// flows into this field.
     pub damage: u64,
     pub healing: u64,
     pub effective_healing: u64,
     pub overhealing: u64,
     pub damage_taken: u64,
+    /// Subset of `damage` that came from the player's pet.  The UI uses this
+    /// to offer a "Personal only" mode: `damage - pet_damage`.
     pub pet_damage: u64,
+    /// Per-ability stats.  Pet abilities have `is_pet: true`.
     pub abilities: HashMap<String, AbilityStats>,
     pub healing_abilities: HashMap<String, AbilityStats>,
     /// Damage taken broken down by source -> ability -> stats.
@@ -304,7 +313,8 @@ pub struct AbilityStats {
     pub crit_total: u64,
     pub effective: u64,
     pub overheal: u64,
-    #[allow(dead_code)] // Data model — stored for future pet damage breakdown display
+    /// True for abilities that came from the player's pet, not the player
+    /// directly.  Used by the detail view to visually group pet abilities.
     pub is_pet: bool,
 }
 

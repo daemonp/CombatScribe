@@ -1,5 +1,7 @@
 //! Boss/zone lookups and date formatting.
 
+use chrono::Datelike;
+
 use crate::raid_data;
 
 // ── Delegates to raid_data ──────────────────────────────────────────────────
@@ -53,13 +55,7 @@ fn decode_session_date(ts: f64, year: Option<i32>) -> (i32, u32, u32) {
     let month = total_days / 31;
     let day = total_days % 31;
 
-    let y = year.unwrap_or_else(|| {
-        chrono::Local::now()
-            .format("%Y")
-            .to_string()
-            .parse()
-            .unwrap_or(2026)
-    });
+    let y = year.unwrap_or_else(|| chrono::Local::now().naive_local().year());
 
     (y, month, day)
 }

@@ -7,6 +7,16 @@ use super::components::*;
 use super::*;
 use iced::widget::{column, table};
 
+/// Format a spell name for display: appends the pet name in Skada style
+/// (e.g. `"Bite"` → `"Bite (Wolf)"`) when the ability came from a pet.
+fn pet_display_spell(spell: &str, is_pet: bool, pet_name: Option<&str>) -> String {
+    if is_pet {
+        pet_name.map_or_else(|| spell.to_string(), |pn| format!("{spell} ({pn})"))
+    } else {
+        spell.to_string()
+    }
+}
+
 // ── Row Types for Table Widget ──────────────────────────────────────────────
 
 /// Pre-computed row data for the ability breakdown table.
@@ -133,12 +143,17 @@ impl ViewerState {
             _ => return text("Invalid detail type").size(14).into(),
         };
 
-        // Collect into owned data to avoid lifetime issues
+        // Collect into owned data to avoid lifetime issues.
+        // Sort personal abilities first (by total desc), then pet abilities.
         let mut sorted: Vec<(String, AbilityStats)> = abilities
             .iter()
             .map(|(spell, ab)| (spell.clone(), ab.clone()))
             .collect();
-        sorted.sort_by_key(|s| Reverse(s.1.total));
+        sorted.sort_by(|a, b| {
+            a.1.is_pet
+                .cmp(&b.1.is_pet)
+                .then_with(|| b.1.total.cmp(&a.1.total))
+        });
 
         let total_hits: u64 = sorted.iter().map(|(_, a)| a.hits).sum();
         let total_crits: u64 = sorted.iter().map(|(_, a)| a.crits).sum();
@@ -267,12 +282,32 @@ impl ViewerState {
         // placed above the detailed stats table.
         let class_str = self.log_data.player_class(player);
         let class_color = theme::class_color(class_str);
-        let max_ability = sorted.first().map_or(0, |(_, a)| a.total);
+        let max_ability = sorted.iter().map(|(_, a)| a.total).max().unwrap_or(0);
         let bar_scale = adaptive_scale(max_ability, max_ability);
 
+        // Pet name for Skada-style display (e.g. "Bite" → "Bite (Wolf)")
+        let pet_name = self
+            .log_data
+            .combatants
+            .get(player)
+            .and_then(|c| c.pet_name.as_deref());
+        // Muted bar color for pet abilities
+        let pet_bar_color = Color::from_rgb(
+            class_color.r * 0.5,
+            class_color.g * 0.5,
+            class_color.b * 0.5,
+        );
+
         let mut ability_bars = Column::new().spacing(2);
+        let mut seen_pet_separator = false;
         #[allow(clippy::cast_precision_loss)] // ability totals never approach 2^52
         for (rank, (spell, ab)) in sorted.iter().enumerate() {
+            // Insert a separator before the first pet ability
+            if ab.is_pet && !seen_pet_separator && !is_healing_type {
+                seen_pet_separator = true;
+                ability_bars = ability_bars.push(text("Pet").size(11).color(theme::TEXT_MUTED));
+            }
+
             let display_val = if is_healing_type {
                 match self.healing_type {
                     HealingType::Healing | HealingType::Effective => ab.effective,
@@ -293,9 +328,16 @@ impl ViewerState {
             );
             let pct_text = format!("{pct:.1}%");
 
+            let display_spell = pet_display_spell(spell, ab.is_pet, pet_name);
+
             // Inner bar content: rank + spell left, value right
+            let bar_color = if ab.is_pet {
+                pet_bar_color
+            } else {
+                class_color
+            };
             let inner: Row<'_, ViewerMessage> = row![
-                text(format!("{}. {spell}", rank + 1))
+                text(format!("{}. {display_spell}", rank + 1))
                     .size(11)
                     .color(Color::WHITE),
                 Space::new().width(Fill),
@@ -307,7 +349,7 @@ impl ViewerState {
             .align_y(Center)
             .width(Fill);
 
-            let bar = make_bar(inner, bar_pct, class_color);
+            let bar = make_bar(inner, bar_pct, bar_color);
 
             // Percentage label (outside bar, right side)
             let pct_label = text(pct_text)
@@ -363,8 +405,9 @@ impl ViewerState {
                 } else {
                     None
                 };
+                let display_spell = pet_display_spell(spell, ab.is_pet, pet_name);
                 AbilityRow {
-                    spell: spell.clone(),
+                    spell: display_spell,
                     display_total,
                     hits: ab.hits,
                     crits: ab.crits,

@@ -102,12 +102,31 @@ impl LogData {
                     is_crit,
                     is_crushing,
                     is_glancing,
+                    is_pet_spell,
                     ..
                 } => {
-                    stats
-                        .entry(source.clone())
-                        .or_default()
-                        .accumulate_damage(spell, *amount, *is_crit);
+                    let ps = stats.entry(source.clone()).or_default();
+                    ps.accumulate_damage(spell, *amount, *is_crit);
+
+                    // Mirror the add_damage() logic: inherit pet status from
+                    // the base spell for (dot) variants of summoned-entity spells.
+                    let effective_pet = *is_pet_spell || {
+                        let base = spell.strip_suffix(" (dot)").unwrap_or(spell);
+                        base != spell.as_str() && ps.abilities.get(base).is_some_and(|a| a.is_pet)
+                    };
+                    if effective_pet {
+                        ps.pet_damage += amount;
+                        ps.abilities.entry(spell.clone()).or_default().is_pet = true;
+                        if *is_pet_spell {
+                            let dot_key = format!("{spell} (dot)");
+                            if let Some(dot_ab) = ps.abilities.get_mut(&dot_key)
+                                && !dot_ab.is_pet
+                            {
+                                dot_ab.is_pet = true;
+                                ps.pet_damage += dot_ab.total;
+                            }
+                        }
+                    }
 
                     stats
                         .entry(target.clone())
@@ -335,6 +354,7 @@ mod tests {
             is_glancing: false,
             is_crushing: false,
             school: None,
+            is_pet_spell: false,
             is_fully_resisted: false,
             is_fully_absorbed: false,
             is_fully_blocked: false,
@@ -392,10 +412,9 @@ mod tests {
     #[test]
     fn test_selected_encounters_single_out_of_bounds() {
         let data = make_log_data(vec![boss_kill("Ragnaros", 100.0, 200.0)]);
-        assert!(
-            data.selected_encounters(&EncounterFilter::Single(99))
-                .is_empty()
-        );
+        assert!(data
+            .selected_encounters(&EncounterFilter::Single(99))
+            .is_empty());
     }
 
     // ── is_in_selection ─────────────────────────────────────────────────

@@ -2,8 +2,6 @@
 
 use crate::log_data::{LogData, PlayerStats};
 
-use super::regex::RE_PET_OWNER;
-
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Check whether `name` appears in `line` as a whole word, not as a substring
@@ -32,16 +30,7 @@ pub(super) fn is_player_guid(guid: &str) -> bool {
 
 /// Title-case a name (e.g. `"hakkar"` → `"Hakkar"`, `"high priest thekal"` → `"High Priest Thekal"`).
 pub(super) fn title_case(s: &str) -> String {
-    s.split_whitespace()
-        .map(|word| {
-            let mut chars = word.chars();
-            chars.next().map_or_else(String::new, |c| {
-                let upper: String = c.to_uppercase().collect();
-                format!("{upper}{}", chars.as_str())
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    crate::raid_data::format_zone_name(s)
 }
 
 /// Record absorbed damage on a player target.
@@ -49,16 +38,6 @@ pub(super) fn record_absorb(data: &mut LogData, target: &str, absorbed_amount: u
     if absorbed_amount > 0 && data.all_combatants.contains_key(target) {
         *data.absorbs.entry(target.to_string()).or_insert(0) += absorbed_amount;
     }
-}
-
-/// Extract pet owner from a source string like `PetName (OwnerName)`.
-pub(super) fn extract_pet_owner(source: &str, data: &LogData) -> Option<String> {
-    let caps = RE_PET_OWNER.captures(source)?;
-    let owner_name = caps.get(2)?.as_str();
-    if data.all_combatants.contains_key(owner_name) {
-        return Some(owner_name.to_string());
-    }
-    None
 }
 
 /// Ensure a `PlayerStats` entry exists for a name.

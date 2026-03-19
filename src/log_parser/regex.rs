@@ -1,7 +1,8 @@
 //! Compiled regex patterns and spell-name constants for combat log parsing.
 
-use regex::Regex;
 use std::sync::LazyLock;
+
+use regex::Regex;
 
 // ── Spell Lists ─────────────────────────────────────────────────────────────
 
@@ -49,7 +50,7 @@ pub(super) static RE_CAST: LazyLock<Regex> = LazyLock::new(|| {
 
 pub(super) static RE_DMG_SPELL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+) (?:hits|crits) ([A-Za-z\s']+) for (\d+)",
+        r"([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's (?:\(pet\) )?([A-Za-z\s']+) (?:hits|crits) ([A-Za-z\s']+) for (\d+)",
     )
     .unwrap()
 });
@@ -60,7 +61,7 @@ pub(super) static RE_DMG_AUTO: LazyLock<Regex> = LazyLock::new(|| {
 
 pub(super) static RE_DMG_SUFFER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"([A-Za-z\s']+) suffers (\d+) (?:\w+ )?damage from ([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's ([A-Za-z\s']+)",
+        r"([A-Za-z\s']+) suffers (\d+) (?:\w+ )?damage from ([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's (?:\(pet\) )?([A-Za-z\s']+)",
     )
     .unwrap()
 });

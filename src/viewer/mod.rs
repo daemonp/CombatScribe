@@ -189,8 +189,10 @@ impl ViewerTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DamageType {
+    /// Total damage (personal + pet) — the default, matching Skada/WCL.
     Damage,
-    DamageWithPets,
+    /// Personal damage only (total minus pet damage).
+    DamagePersonal,
     DamageTaken,
 }
 
@@ -198,7 +200,7 @@ impl std::fmt::Display for DamageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Damage => write!(f, "Damage done"),
-            Self::DamageWithPets => write!(f, "Damage done (incl. pets)"),
+            Self::DamagePersonal => write!(f, "Personal only"),
             Self::DamageTaken => write!(f, "Damage taken"),
         }
     }
@@ -209,7 +211,7 @@ impl DamageType {
     pub fn to_config_key(self) -> &'static str {
         match self {
             Self::Damage => "Damage",
-            Self::DamageWithPets => "DamageWithPets",
+            Self::DamagePersonal => "DamagePersonal",
             Self::DamageTaken => "DamageTaken",
         }
     }
@@ -217,7 +219,8 @@ impl DamageType {
     /// Parse from a config string, falling back to default on unrecognized input.
     pub fn from_config_key(s: &str) -> Self {
         match s {
-            "DamageWithPets" => Self::DamageWithPets,
+            // Backwards compat: old "DamageWithPets" maps to "Damage" (total)
+            "DamageWithPets" | "DamagePersonal" => Self::DamagePersonal,
             "DamageTaken" => Self::DamageTaken,
             _ => Self::Damage,
         }

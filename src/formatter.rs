@@ -4,9 +4,10 @@
 //! Handles You/Your → player name conversion, pet attribution, apostrophe
 //! normalization, mob name handling, self-damage detection, and loot fixes.
 
+use std::collections::{HashMap, HashSet};
+
 use rayon::prelude::*;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
 
 use crate::parser::{detect_player_names, extract_ts, get_player_name_for_timestamp};
 
@@ -229,30 +230,31 @@ fn build_pet_replacements() -> Vec<ReplacementRule> {
     let np = name_pattern();
 
     vec![
-        // Pet hits/crits/misses -> Auto Attack (pet)
+        // Pet hits/crits/misses -> Auto Attack with (pet) tag
         rule_ci(
             &format!(r"  ({np}) \(({lp})\) (hits|crits|misses)"),
-            "  $2's Auto Attack (pet) $3".to_string(),
+            "  $2 's (pet) Auto Attack $3".to_string(),
         ),
         // Pet dismissed — Python has unescaped `.` but real logs always end with `.`
         rule_ci(
             &format!(r"  Your ({np}) \(({lp})\) is dismissed\."),
             "  $2's $1 ($2) is dismissed.".to_string(),
         ),
-        // Pet Arcane Missiles (trinket)
+        // Pet Arcane Missiles (trinket) with (pet) tag
         rule_ci(
             &format!(r"  ({np}) \(({lp})\)('s| 's) Arcane Missiles"),
-            "  $2 's Arcane Missiles (pet)".to_string(),
+            "  $2 's (pet) Arcane Missiles".to_string(),
         ),
-        // Generic pet ability
+        // Generic pet ability — tag with (pet) so the parser can attribute
+        // pet damage separately from personal damage.
         rule_ci(
             &format!(r"  ({np}) \(({lp})\)('s| 's)"),
-            "  $2 's".to_string(),
+            "  $2 's (pet)".to_string(),
         ),
-        // Pet ability from
+        // Pet ability from — same (pet) tag for "suffers from" DoT lines
         rule_ci(
             &format!(r"from ({np}) \(({lp})\)('s| 's)"),
-            "from $2$3".to_string(),
+            "from $2$3 (pet)".to_string(),
         ),
     ]
 }
