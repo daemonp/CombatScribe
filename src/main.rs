@@ -222,7 +222,7 @@ enum Message {
     SpinnerTick,
 
     // Keyboard
-    EscapePressed,
+    KeyPressed(keyboard::Key, keyboard::Modifiers),
 
     // Viewer messages
     Viewer(viewer::ViewerMessage),
@@ -324,15 +324,89 @@ impl App {
             }
 
             // ── Keyboard shortcuts ───────────────────────────────────────
-            Message::EscapePressed => {
-                // Close the topmost overlay: export modal takes priority over detail view
-                if self.show_export_modal {
-                    self.show_export_modal = false;
-                    self.export_result = None;
-                    self.batch_export_result = None;
-                    self.export_all = false;
-                } else if let AppState::Viewing(ref mut vs) = self.state {
-                    vs.detail = None;
+            Message::KeyPressed(key, modifiers) => {
+                use keyboard::key::Named;
+                use keyboard::Key;
+
+                match key {
+                    // Escape: close topmost overlay
+                    Key::Named(Named::Escape) => {
+                        if self.show_export_modal {
+                            self.show_export_modal = false;
+                            self.export_result = None;
+                            self.batch_export_result = None;
+                            self.export_all = false;
+                        } else if let AppState::Viewing(ref mut vs) = self.state {
+                            vs.detail = None;
+                        }
+                    }
+
+                    // Up/Down arrows: cycle players in detail view
+                    Key::Named(Named::ArrowUp) => {
+                        if let AppState::Viewing(ref mut vs) = self.state
+                            && vs.detail.is_some()
+                        {
+                            return vs
+                                .update(viewer::ViewerMessage::DetailPrev)
+                                .map(Message::Viewer);
+                        }
+                    }
+                    Key::Named(Named::ArrowDown) => {
+                        if let AppState::Viewing(ref mut vs) = self.state
+                            && vs.detail.is_some()
+                        {
+                            return vs
+                                .update(viewer::ViewerMessage::DetailNext)
+                                .map(Message::Viewer);
+                        }
+                    }
+
+                    // Ctrl/Cmd+O: open file
+                    Key::Character(ref c) if c.as_str() == "o" && modifiers.command() => {
+                        let dir = self.config.last_directory.clone();
+                        return Task::perform(pick_file(dir), Message::FileSelected);
+                    }
+
+                    // Ctrl/Cmd+E: export (when viewing)
+                    Key::Character(ref c)
+                        if c.as_str() == "e"
+                            && modifiers.command()
+                            && matches!(self.state, AppState::Viewing(_)) =>
+                    {
+                        self.show_export_modal = true;
+                    }
+
+                    // Ctrl/Cmd+Q: quit
+                    Key::Character(ref c) if c.as_str() == "q" && modifiers.command() => {
+                        return iced::exit();
+                    }
+
+                    // Number keys 1-7: switch tabs (only when no text input is focused)
+                    Key::Character(ref c) if !modifiers.command() => {
+                        if let AppState::Viewing(ref mut vs) = self.state {
+                            // Skip if detail overlay is open (arrows navigate there)
+                            if vs.detail.is_some() {
+                                return Task::none();
+                            }
+                            let tab = match c.as_str() {
+                                "1" => Some(viewer::ViewerTab::Meters),
+                                "2" => Some(viewer::ViewerTab::Utility),
+                                "3" => Some(viewer::ViewerTab::DeathLog),
+                                "4" => Some(viewer::ViewerTab::Timeline),
+                                "5" => Some(viewer::ViewerTab::Loot),
+                                "6" => Some(viewer::ViewerTab::Consumes),
+                                "7" => Some(viewer::ViewerTab::Events),
+                                _ => None,
+                            };
+                            if let Some(t) = tab {
+                                return vs
+                                    .update(viewer::ViewerMessage::SwitchTab(t))
+                                    .map(Message::Viewer);
+                            }
+                        }
+                    }
+
+                    _ => {}
                 }
                 Task::none()
             }
@@ -554,12 +628,11 @@ impl App {
             Subscription::none()
         };
 
-        // Escape key closes the topmost overlay (export modal > detail view)
+        // Keyboard shortcuts: Escape, arrows, Ctrl/Cmd+O, number keys for tabs
         let keys = keyboard::listen().filter_map(|event| match event {
             keyboard::Event::KeyPressed {
-                key: keyboard::Key::Named(keyboard::key::Named::Escape),
-                ..
-            } => Some(Message::EscapePressed),
+                key, modifiers, ..
+            } => Some(Message::KeyPressed(key, modifiers)),
             _ => None,
         });
 

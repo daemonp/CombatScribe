@@ -360,6 +360,10 @@ pub enum ViewerMessage {
     ToggleConsumePlayer(String),
     ShowDetail(String, DetailType),
     CloseDetail,
+    /// Navigate to the next player in the detail overlay (Down arrow).
+    DetailNext,
+    /// Navigate to the previous player in the detail overlay (Up arrow).
+    DetailPrev,
     SetLootSearch(String),
     ToggleBossCollapse(String),
     ExpandAllLoot,
@@ -492,6 +496,40 @@ impl ViewerState {
         }
     }
 
+    /// Get the sorted player name list for a given detail type.
+    ///
+    /// Used by `DetailNext`/`DetailPrev` to navigate between players in rank
+    /// order matching the current meter view.
+    fn sorted_player_names(&self, dtype: DetailType) -> Vec<String> {
+        let (stats, _) = self.log_data.filtered_stats(&self.encounter_filter);
+        let mut players: Vec<(String, u64)> = stats
+            .iter()
+            .filter_map(|(name, ps)| {
+                // Only include players who are known combatants
+                if !self.log_data.combatants.contains_key(name) {
+                    return None;
+                }
+                let value = match dtype {
+                    DetailType::DamageTaken => ps.damage_taken,
+                    DetailType::Healing => match self.healing_type {
+                        HealingType::Healing | HealingType::Effective => ps.effective_healing,
+                        HealingType::Raw => ps.healing,
+                        HealingType::Overhealing => ps.overhealing,
+                    },
+                    // Damage and all utility types sort by damage
+                    _ => ps.damage,
+                };
+                if value > 0 {
+                    Some((name.clone(), value))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        players.sort_by_key(|p| Reverse(p.1));
+        players.into_iter().map(|(name, _)| name).collect()
+    }
+
     /// Clear all chart canvas geometry caches.
     ///
     /// Called when the underlying data or visible range changes (encounter
@@ -559,6 +597,30 @@ impl ViewerState {
                 });
             }
             ViewerMessage::CloseDetail => self.detail = None,
+            ViewerMessage::DetailNext | ViewerMessage::DetailPrev => {
+                if let Some(ref detail) = self.detail {
+                    let players = self.sorted_player_names(detail.detail_type);
+                    if let Some(idx) = players.iter().position(|n| n == &detail.player_name) {
+                        let new_idx = if matches!(message, ViewerMessage::DetailNext) {
+                            if idx + 1 < players.len() {
+                                idx + 1
+                            } else {
+                                0
+                            }
+                        } else if idx > 0 {
+                            idx - 1
+                        } else {
+                            players.len() - 1
+                        };
+                        if let Some(name) = players.get(new_idx) {
+                            self.detail = Some(DetailView {
+                                player_name: name.clone(),
+                                detail_type: detail.detail_type,
+                            });
+                        }
+                    }
+                }
+            }
             ViewerMessage::SetLootSearch(s) => self.loot_search = s,
             ViewerMessage::ToggleBossCollapse(boss) => {
                 if self.collapsed_bosses.contains(&boss) {
