@@ -256,8 +256,12 @@ struct ConsumableCategory {
     #[serde(default)]
     prefix: Option<String>,
     items: Vec<String>,
+    /// Combat log buff names that differ from the item name.
+    #[serde(default)]
+    buff_names: Vec<String>,
 }
 
+#[allow(clippy::too_many_lines)] // Code-generation — linear sequence of write! calls
 fn generate_consumable_data() {
     println!("cargo:rerun-if-changed=data/consumables.toml");
 
@@ -356,14 +360,47 @@ fn generate_consumable_data() {
         writeln!(out, "    {},", quote(&cat.display)).unwrap();
     }
     writeln!(out, "];").unwrap();
+    writeln!(out).unwrap();
+
+    // ── Buff name → category index (for aura names that differ from item names)
+    let mut buff_to_cat: Vec<(String, u8)> = Vec::new();
+    for (cat_idx, cat) in db.category.iter().enumerate() {
+        let idx = u8::try_from(cat_idx).expect("too many categories (max 255)");
+        for buff_name in &cat.buff_names {
+            buff_to_cat.push((buff_name.clone(), idx));
+        }
+    }
+    buff_to_cat.sort_by(|a, b| a.0.cmp(&b.0));
+
+    writeln!(
+        out,
+        "/// Buff names that differ from item names → category index, sorted for binary search."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "/// Used to associate aura intervals with consumable categories on the timeline."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "pub(crate) static BUFF_TO_CATEGORY: &[(&str, u8)] = &["
+    )
+    .unwrap();
+    for (buff, idx) in &buff_to_cat {
+        writeln!(out, "    ({}, {idx}),", quote(buff)).unwrap();
+    }
+    writeln!(out, "];").unwrap();
 
     let total_items: usize = item_to_cat.len();
+    let total_buffs: usize = buff_to_cat.len();
     eprintln!(
-        "consumable_data: {} items across {} categories, {} ignored, {} prefixes",
+        "consumable_data: {} items across {} categories, {} ignored, {} prefixes, {} buff overrides",
         total_items,
         db.category.len(),
         ignored.len(),
-        prefixes.len()
+        prefixes.len(),
+        total_buffs
     );
 }
 

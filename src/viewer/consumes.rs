@@ -1,5 +1,6 @@
-//! Consumes tab: raid overview, per-player breakdown, and encounter matrix.
+//! Consumes tab: raid overview, per-player breakdown, encounter matrix, and timeline.
 
+use super::charts::{ConsumeChart, build_consume_layout, consume_chart_height};
 #[allow(clippy::wildcard_imports)]
 // viewer UI — many shared component functions used throughout
 use super::components::*;
@@ -27,6 +28,7 @@ impl ViewerState {
             ConsumesViewMode::RaidOverview,
             ConsumesViewMode::PlayerBreakdown,
             ConsumesViewMode::EncounterMatrix,
+            ConsumesViewMode::Timeline,
         ];
         let mode_picker = pick_list(modes, Some(self.consumes_mode), |m| {
             ViewerMessage::SetConsumesMode(m)
@@ -45,10 +47,16 @@ impl ViewerState {
         .spacing(8)
         .align_y(Center);
 
+        // Timeline mode has a different layout (sidebar + chart), not scrollable
+        if self.consumes_mode == ConsumesViewMode::Timeline {
+            return self.view_consume_timeline(header);
+        }
+
         let content = match self.consumes_mode {
             ConsumesViewMode::RaidOverview => self.view_raid_overview(&consumables),
             ConsumesViewMode::PlayerBreakdown => self.view_player_breakdown(&consumables),
             ConsumesViewMode::EncounterMatrix => self.view_encounter_matrix(&consumables),
+            ConsumesViewMode::Timeline => unreachable!(),
         };
 
         scrollable(
@@ -63,6 +71,369 @@ impl ViewerState {
         )
         .height(Fill)
         .into()
+    }
+
+    // ── Timeline View ────────────────────────────────────────────────────
+
+    /// Consumable timeline waterfall chart with a sidebar category picker.
+    ///
+    /// Sidebar (fixed 260px) contains: view mode toggle (Bars/Ticks), category
+    /// checkboxes with Select All / Clear All.  The chart fills the remaining
+    /// width with hybrid bar/tick rendering.
+    #[allow(clippy::too_many_lines)] // iced UI layout — sidebar picker + full-width chart + tooltip
+    fn view_consume_timeline<'a>(
+        &'a self,
+        header: Row<'a, ViewerMessage>,
+    ) -> Element<'a, ViewerMessage> {
+        let td = &self.timeline_data;
+        let consume_accent = theme::TIMELINE_CONSUME;
+
+        // ── Sidebar: view mode toggle ───────────────────────────────
+        let bars_active = self.consume_view_mode == log_data::ConsumeViewMode::Bars;
+        let ticks_active = self.consume_view_mode == log_data::ConsumeViewMode::Ticks;
+
+        let mode_toggle = row![
+            button(text("Bars").size(9).color(if bars_active {
+                Color::WHITE
+            } else {
+                theme::TEXT_MUTED
+            }))
+            .on_press(ViewerMessage::SetConsumeViewMode(
+                log_data::ConsumeViewMode::Bars
+            ))
+            .padding([2, 8])
+            .style(move |_theme: &iced::Theme, status| {
+                consume_mode_button_style(status, bars_active, consume_accent)
+            }),
+            button(text("Ticks").size(9).color(if ticks_active {
+                Color::WHITE
+            } else {
+                theme::TEXT_MUTED
+            }))
+            .on_press(ViewerMessage::SetConsumeViewMode(
+                log_data::ConsumeViewMode::Ticks
+            ))
+            .padding([2, 8])
+            .style(move |_theme: &iced::Theme, status| {
+                consume_mode_button_style(status, ticks_active, consume_accent)
+            }),
+        ]
+        .spacing(4);
+
+        // ── Sidebar: category checkboxes ────────────────────────────
+        let mut category_list = Column::new().spacing(1);
+        for &cat in &td.available_consume_categories {
+            let is_tracked = self.tracked_consume_categories.contains(&cat);
+            let display = crate::consumable_data::category_display_name(cat);
+            let cat_color = theme::consumable_category_color(cat);
+            let check_label = if is_tracked {
+                format!("[x] {display}")
+            } else {
+                format!("[ ] {display}")
+            };
+            let text_color = if is_tracked {
+                cat_color
+            } else {
+                theme::TEXT_SECONDARY
+            };
+            category_list = category_list.push(
+                button(text(check_label).size(11).color(text_color))
+                    .on_press(ViewerMessage::ToggleConsumeCategory(cat))
+                    .padding([3, 6])
+                    .width(Fill)
+                    .style(move |_theme: &iced::Theme, status| {
+                        let bg = match status {
+                            button::Status::Hovered => Some(iced::Background::Color(
+                                Color::from_rgba8(255, 255, 255, 0.08),
+                            )),
+                            _ => {
+                                if is_tracked {
+                                    Some(iced::Background::Color(Color {
+                                        a: 0.08,
+                                        ..cat_color
+                                    }))
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        button::Style {
+                            background: bg,
+                            text_color,
+                            border: iced::Border {
+                                radius: 2.0.into(),
+                                ..Default::default()
+                            },
+                            shadow: iced::Shadow::default(),
+                            snap: true,
+                        }
+                    }),
+            );
+        }
+
+        // ── Sidebar: Select All / Clear All buttons ─────────────────
+        let all_selected = !td.available_consume_categories.is_empty()
+            && td
+                .available_consume_categories
+                .iter()
+                .all(|cat| self.tracked_consume_categories.contains(cat));
+        let any_selected = !self.tracked_consume_categories.is_empty();
+
+        let mut action_row = Row::new().spacing(4);
+        if !all_selected && !td.available_consume_categories.is_empty() {
+            action_row = action_row.push(
+                button(text("Select All").size(9).color(theme::TEXT_SECONDARY))
+                    .on_press(ViewerMessage::SelectAllConsumes)
+                    .padding([2, 6])
+                    .style(|_theme: &iced::Theme, status| {
+                        let bg = match status {
+                            button::Status::Hovered => Some(iced::Background::Color(
+                                Color::from_rgba8(255, 255, 255, 0.08),
+                            )),
+                            _ => None,
+                        };
+                        button::Style {
+                            background: bg,
+                            text_color: theme::TEXT_SECONDARY,
+                            border: iced::Border {
+                                radius: 3.0.into(),
+                                ..Default::default()
+                            },
+                            shadow: iced::Shadow::default(),
+                            snap: true,
+                        }
+                    }),
+            );
+        }
+        if any_selected {
+            action_row = action_row.push(
+                button(text("Clear All").size(9).color(theme::TEXT_MUTED))
+                    .on_press(ViewerMessage::ClearConsumes)
+                    .padding([2, 6])
+                    .style(|_theme: &iced::Theme, status| {
+                        let bg = match status {
+                            button::Status::Hovered => Some(iced::Background::Color(
+                                Color::from_rgba8(255, 80, 80, 0.15),
+                            )),
+                            _ => None,
+                        };
+                        button::Style {
+                            background: bg,
+                            text_color: theme::TEXT_MUTED,
+                            border: iced::Border {
+                                radius: 3.0.into(),
+                                ..Default::default()
+                            },
+                            shadow: iced::Shadow::default(),
+                            snap: true,
+                        }
+                    }),
+            );
+        }
+
+        let sidebar = container(
+            column![
+                row![
+                    text("View Mode").size(10).color(theme::TEXT_MUTED),
+                    Space::new().width(Fill),
+                    mode_toggle,
+                ]
+                .align_y(Center),
+                rule::horizontal(1),
+                text("Categories").size(10).color(theme::TEXT_MUTED),
+                scrollable(category_list).height(Fill),
+                action_row,
+            ]
+            .spacing(6)
+            .width(Fill)
+            .height(Fill),
+        )
+        .padding(8)
+        .width(Length::Fixed(260.0))
+        .height(Fill)
+        .style(|_theme: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba8(20, 22, 28, 0.6))),
+            border: iced::Border {
+                color: theme::SURFACE_BORDER,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        });
+
+        // ── Chart area ──────────────────────────────────────────────
+        let consume_layout =
+            build_consume_layout(td, &self.tracked_consume_categories, self.consume_view_mode);
+
+        let chart_area: Element<ViewerMessage> = if consume_layout.is_empty() {
+            container(
+                text("Select categories from the sidebar to view consumable usage on the timeline")
+                    .size(13)
+                    .color(theme::TEXT_MUTED),
+            )
+            .padding(40)
+            .center_x(Fill)
+            .center_y(Fill)
+            .width(Fill)
+            .height(Fill)
+            .into()
+        } else {
+            let chart_height = consume_chart_height(&consume_layout);
+            // Allow the chart to take decent vertical space — use a minimum
+            // height of 300px or the natural chart height, whichever is larger.
+            let canvas_height = chart_height.max(300.0);
+
+            let consume_canvas = canvas::Canvas::new(ConsumeChart {
+                data: td,
+                layout: consume_layout,
+                mode: self.consume_view_mode,
+                hover_second: self.consume_hover_second,
+                zoom: None, // No zoom in the Consumes tab
+            })
+            .width(Fill)
+            .height(canvas_height);
+
+            // Build tooltip as a fixed-height strip so it doesn't cause layout
+            // jumping when content appears/disappears on hover.
+            let consume_tooltip = self.build_consume_tooltip(td);
+
+            // Use a stack to overlay the tooltip at the bottom of the chart
+            // area so it doesn't push the canvas around.
+            let chart_scroll: Element<ViewerMessage> = scrollable(
+                container(consume_canvas).width(Fill).padding(iced::Padding {
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 22.0,
+                    left: 0.0,
+                }),
+            )
+            .width(Fill)
+            .height(Fill)
+            .into();
+
+            // Tooltip pinned to the bottom of the chart area
+            let tooltip_layer: Element<ViewerMessage> = container(consume_tooltip)
+                .width(Fill)
+                .height(Fill)
+                .align_y(iced::alignment::Vertical::Bottom)
+                .into();
+
+            iced::widget::stack![chart_scroll, tooltip_layer]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        };
+
+        // ── Assemble: header + horizontal split (sidebar | chart) ───
+        let body = row![sidebar, chart_area]
+            .spacing(12)
+            .width(Fill)
+            .height(Fill);
+
+        container(
+            column![header, rule::horizontal(1), body]
+                .spacing(8)
+                .width(Fill)
+                .height(Fill),
+        )
+        .padding(12)
+        .width(Fill)
+        .height(Fill)
+        .style(panel_style)
+        .into()
+    }
+
+    /// Build the hover tooltip for the consumable chart.
+    ///
+    /// Shows both active buff intervals (for bar categories) and nearby
+    /// consumable use events (for tick categories / instant-use items).
+    fn build_consume_tooltip<'a>(
+        &self,
+        td: &TimelineData,
+    ) -> Element<'a, ViewerMessage> {
+        let Some(second) = self.consume_hover_second else {
+            return column![].into();
+        };
+
+        let mut parts: Vec<String> = Vec::new();
+
+        // Active aura intervals (bar data)
+        for (aura_name, &cat) in &td.consume_aura_categories {
+            if !self.tracked_consume_categories.contains(&cat) {
+                continue;
+            }
+            if let Some(intervals) = td.aura_intervals.get(aura_name.as_str()) {
+                let mut active: Vec<&str> = intervals
+                    .iter()
+                    .filter(|iv| iv.start <= second && second <= iv.end)
+                    .map(|iv| iv.player.as_str())
+                    .collect();
+                active.sort_unstable();
+                active.dedup();
+                if !active.is_empty() {
+                    parts.push(format!("{aura_name}: {}", active.join(", ")));
+                }
+            }
+        }
+
+        // Nearby consumable use events (tick data).
+        // Use a hover window scaled to ~0.5% of the visible duration so ticks
+        // are easy to hit regardless of how wide the timeline is.  Clamped to
+        // a [5s, 30s] range for usability.
+        let hover_radius = (td.consume_duration * 0.005).clamp(5.0, 30.0);
+        let mut tick_items: HashMap<String, Vec<&str>> = HashMap::new();
+        for mark in &td.consume_marks {
+            if !self.tracked_consume_categories.contains(&mark.category) {
+                continue;
+            }
+            // Skip items that have aura intervals (already shown as bars above)
+            if td.aura_intervals.contains_key(mark.consumable.as_str())
+                && self.consume_view_mode == log_data::ConsumeViewMode::Bars
+            {
+                continue;
+            }
+            if (mark.offset - second).abs() <= hover_radius {
+                tick_items
+                    .entry(mark.consumable.clone())
+                    .or_default()
+                    .push(&mark.player);
+            }
+        }
+        // Sort and deduplicate tick items for display
+        let mut tick_sorted: Vec<(&str, Vec<&str>)> = tick_items
+            .iter()
+            .map(|(name, players)| {
+                let mut p = players.clone();
+                p.sort_unstable();
+                p.dedup();
+                (name.as_str(), p)
+            })
+            .collect();
+        tick_sorted.sort_by_key(|(name, _)| *name);
+        for (name, players) in &tick_sorted {
+            parts.push(format!("{name}: {}", players.join(", ")));
+        }
+
+        if parts.is_empty() {
+            return column![].into();
+        }
+
+        let consume_accent = theme::TIMELINE_CONSUME;
+        container(text(parts.join("  |  ")).size(11).color(Color::WHITE))
+            .padding([3, 8])
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba8(30, 30, 40, 0.9))),
+                border: iced::Border {
+                    color: Color {
+                        a: 0.3,
+                        ..consume_accent
+                    },
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
     }
 
     // ── Raid Overview View ──────────────────────────────────────────────
@@ -413,6 +784,43 @@ fn category_short_label(cat: ConsumableCategory) -> &'static str {
         ConsumableCategory::Bandage => "Band.",
         ConsumableCategory::Utility => "Util.",
         ConsumableCategory::Other => "Other",
+    }
+}
+
+/// Button style for the Bars/Ticks mode toggle in the consumable timeline sidebar.
+fn consume_mode_button_style(
+    status: button::Status,
+    active: bool,
+    accent: Color,
+) -> button::Style {
+    let bg = if active {
+        Some(iced::Background::Color(Color { a: 0.3, ..accent }))
+    } else {
+        match status {
+            button::Status::Hovered => Some(iced::Background::Color(Color::from_rgba8(
+                255, 255, 255, 0.06,
+            ))),
+            _ => None,
+        }
+    };
+    button::Style {
+        background: bg,
+        text_color: if active {
+            Color::WHITE
+        } else {
+            theme::TEXT_MUTED
+        },
+        border: iced::Border {
+            radius: 3.0.into(),
+            color: if active {
+                Color { a: 0.4, ..accent }
+            } else {
+                Color::TRANSPARENT
+            },
+            width: if active { 1.0 } else { 0.0 },
+        },
+        shadow: iced::Shadow::default(),
+        snap: true,
     }
 }
 

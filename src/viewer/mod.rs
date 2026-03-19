@@ -34,9 +34,9 @@ use std::sync::LazyLock;
 
 use crate::log_data;
 use crate::log_data::{
-    AbilityStats, AvoidanceStats, BuffStats, ConsumableCategory, DeathEvent, DeathLogWindow,
-    EncounterFilter, EventLogMode, EventLogTypeFilter, EventLogTypeKind, LogData, LogEntry,
-    LootEvent, PlayerEventType, ResurrectEvent, TimelineData, TimelineSeriesKind,
+    AbilityStats, AvoidanceStats, BuffStats, ConsumableCategory, ConsumeViewMode, DeathEvent,
+    DeathLogWindow, EncounterFilter, EventLogMode, EventLogTypeFilter, EventLogTypeKind, LogData,
+    LogEntry, LootEvent, PlayerEventType, ResurrectEvent, TimelineData, TimelineSeriesKind,
     TimelineVisibility,
 };
 use crate::theme;
@@ -125,6 +125,16 @@ pub struct ViewerState {
     pub aura_search: String,
     /// Hovered second offset on the aura chart (for tooltip).
     pub aura_hover_second: Option<f64>,
+
+    // Consumable timeline in the Consumes tab
+    /// Which consumable categories the user has checked for display.
+    pub tracked_consume_categories: HashSet<ConsumableCategory>,
+    /// Display mode for the consumable waterfall (Bars vs Ticks).
+    pub consume_view_mode: ConsumeViewMode,
+    /// Hovered second offset on the consumable chart (for tooltip).
+    pub consume_hover_second: Option<f64>,
+    /// Canvas geometry cache for the consumable chart.
+    pub consume_cache: canvas::Cache,
 
     // Timeline zoom (click-drag to select a time range)
     /// Drag start second (set on mouse-down, cleared on release).
@@ -300,6 +310,8 @@ pub enum ConsumesViewMode {
     PlayerBreakdown,
     /// Players x categories per encounter.
     EncounterMatrix,
+    /// Consumable timeline waterfall chart with sidebar category picker.
+    Timeline,
 }
 
 impl std::fmt::Display for ConsumesViewMode {
@@ -308,6 +320,7 @@ impl std::fmt::Display for ConsumesViewMode {
             Self::RaidOverview => write!(f, "Raid Overview"),
             Self::PlayerBreakdown => write!(f, "Player Breakdown"),
             Self::EncounterMatrix => write!(f, "Encounter Matrix"),
+            Self::Timeline => write!(f, "Timeline"),
         }
     }
 }
@@ -375,6 +388,16 @@ pub enum ViewerMessage {
     ApplyAuraPreset(usize),
     /// Clear all tracked auras.
     ClearAuras,
+    /// Toggle a consumable category on/off for display on the `ConsumeChart`.
+    ToggleConsumeCategory(ConsumableCategory),
+    /// Select all available consumable categories for display.
+    SelectAllConsumes,
+    /// Switch between Bars and Ticks mode in the consumable chart.
+    SetConsumeViewMode(ConsumeViewMode),
+    /// Hover on the consumable chart — stores the hovered second offset.
+    ConsumeHover(Option<f64>),
+    /// Clear all tracked consumable categories.
+    ClearConsumes,
     /// Begin a click-drag zoom selection at the given second.
     ZoomDragStart(f64),
     /// Update the drag endpoint as the cursor moves.
@@ -459,6 +482,10 @@ impl ViewerState {
             aura_picker_open: false,
             aura_search: String::new(),
             aura_hover_second: None,
+            tracked_consume_categories: HashSet::new(),
+            consume_view_mode: ConsumeViewMode::default(),
+            consume_hover_second: None,
+            consume_cache: canvas::Cache::default(),
             zoom_drag_start: None,
             zoom_drag_end: None,
             zoom_range: None,
@@ -474,6 +501,7 @@ impl ViewerState {
         self.alive_cache.clear();
         self.aura_cache.clear();
         self.dispel_cache.clear();
+        self.consume_cache.clear();
     }
 
     // ── Update ──────────────────────────────────────────────────────────
@@ -639,6 +667,29 @@ impl ViewerState {
             ViewerMessage::ClearAuras => {
                 self.tracked_auras.clear();
                 self.aura_cache.clear();
+            }
+            ViewerMessage::ToggleConsumeCategory(cat) => {
+                if self.tracked_consume_categories.contains(&cat) {
+                    self.tracked_consume_categories.remove(&cat);
+                } else {
+                    self.tracked_consume_categories.insert(cat);
+                }
+                self.consume_cache.clear();
+            }
+            ViewerMessage::SelectAllConsumes => {
+                for &cat in &self.timeline_data.available_consume_categories {
+                    self.tracked_consume_categories.insert(cat);
+                }
+                self.consume_cache.clear();
+            }
+            ViewerMessage::SetConsumeViewMode(mode) => {
+                self.consume_view_mode = mode;
+                self.consume_cache.clear();
+            }
+            ViewerMessage::ConsumeHover(second) => self.consume_hover_second = second,
+            ViewerMessage::ClearConsumes => {
+                self.tracked_consume_categories.clear();
+                self.consume_cache.clear();
             }
             ViewerMessage::ZoomDragStart(second) => {
                 self.zoom_drag_start = Some(second);

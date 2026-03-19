@@ -10,6 +10,13 @@
 # Items are matched by exact name from SuperWoW "uses" lines (after
 # stripping "on Target" suffixes). Names use SuperWoW's apostrophe-stripped
 # form (e.g. "Medivhs Merlot" not "Medivh's Merlot").
+#
+# `buff_names` (optional): combat log buff names that differ from the item
+# name.  Many consumables produce buffs with the same name as the item
+# (e.g. "Elixir of the Mongoose" → "Elixir of the Mongoose"), but some
+# produce distinctly-named buffs (e.g. "Mighty Rage Potion" → "Mighty Rage").
+# These entries let the timeline correctly associate aura intervals with
+# their consumable category for bar rendering.
 
 # Items in "uses" lines that are NOT consumables (toys, trinkets, mounts, etc.)
 [ignored]
@@ -90,6 +97,27 @@ items = [
 [[category]]
 name = "Potion"
 display = "Potions"
+# Buff names that differ from item names
+buff_names = [
+    # Protection potions: "Greater Fire Protection Potion" → "Fire Protection"
+    "Fire Protection",
+    "Frost Protection",
+    "Nature Protection",
+    "Shadow Protection",
+    "Arcane Protection",
+    "Holy Protection",
+    # Rage potions: "Mighty Rage Potion" → "Mighty Rage"
+    "Mighty Rage",
+    "Great Rage",
+    # Free Action Potion → "Free Action"
+    "Free Action",
+    # Greater Stoneshield Potion → "Stoneshield"
+    "Stoneshield",
+    # Limited Invulnerability Potion → "Invulnerability"
+    "Invulnerability",
+    # Oil of Immolation → "Immolation"
+    "Immolation",
+]
 items = [
     # Healing potions (all tiers)
     "Major Healing Potion",
@@ -231,6 +259,10 @@ items = [
 [[category]]
 name = "BlastedLands"
 display = "Blasted Lands"
+# Ground Scorpok Assay → "R.O.I.D.S.", others match item names
+buff_names = [
+    "R.O.I.D.S.",
+]
 items = [
     "Ground Scorpok Assay",
     "Rage of Ages",

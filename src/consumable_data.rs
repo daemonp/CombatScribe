@@ -33,6 +33,19 @@ pub(crate) fn classify(name: &str) -> Option<ConsumableCategory> {
     Some(ConsumableCategory::Other)
 }
 
+/// Classify a combat log buff name into a consumable category.
+///
+/// This handles buff names that differ from their item names (e.g.
+/// "Fire Protection" from "Greater Fire Protection Potion", or "R.O.I.D.S."
+/// from "Ground Scorpok Assay").  Returns `None` if the buff name has no
+/// known consumable mapping.
+pub(crate) fn classify_buff(buff_name: &str) -> Option<ConsumableCategory> {
+    if let Ok(idx) = BUFF_TO_CATEGORY.binary_search_by_key(&buff_name, |(k, _)| k) {
+        return Some(ConsumableCategory::from_index(BUFF_TO_CATEGORY[idx].1));
+    }
+    None
+}
+
 /// Get the display name for a category (e.g. `Flask` → "Flasks").
 pub(crate) fn category_display_name(cat: ConsumableCategory) -> &'static str {
     let idx = cat as usize;
@@ -109,6 +122,33 @@ mod tests {
             classify("Scroll of Stamina III"),
             Some(ConsumableCategory::Scroll)
         );
+    }
+
+    #[test]
+    fn test_classify_buff_overrides() {
+        // Protection potions: item name differs from buff name
+        assert_eq!(
+            classify_buff("Fire Protection"),
+            Some(ConsumableCategory::Potion)
+        );
+        assert_eq!(
+            classify_buff("Nature Protection"),
+            Some(ConsumableCategory::Potion)
+        );
+        // Rage potions
+        assert_eq!(
+            classify_buff("Mighty Rage"),
+            Some(ConsumableCategory::Potion)
+        );
+        // Blasted Lands: Ground Scorpok Assay → R.O.I.D.S.
+        assert_eq!(
+            classify_buff("R.O.I.D.S."),
+            Some(ConsumableCategory::BlastedLands)
+        );
+        // Unknown buff name
+        assert_eq!(classify_buff("Some Unknown Buff"), None);
+        // Item names that match their buff names should NOT be in buff overrides
+        assert_eq!(classify_buff("Elixir of the Mongoose"), None);
     }
 
     #[test]

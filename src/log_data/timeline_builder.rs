@@ -3,9 +3,12 @@
 use std::collections::{HashMap, HashSet};
 
 use super::timeline::{
-    AuraInterval, DispelMark, TimelineBucket, TimelineData, TimelineEvent, TimelineEventKind,
+    AuraInterval, ConsumeMark, DispelMark, TimelineBucket, TimelineData, TimelineEvent,
+    TimelineEventKind,
 };
-use super::types::{Combatant, Encounter, EncounterFilter, LogData, LogEntry};
+use super::types::{
+    Combatant, ConsumableCategory, Encounter, EncounterFilter, LogData, LogEntry,
+};
 
 // ── Timeline Builder ────────────────────────────────────────────────────────
 
@@ -201,6 +204,29 @@ impl LogData {
         let (aura_intervals, available_auras) =
             self.build_aura_intervals(&encounters, total_duration);
 
+        // ── Collect consumable use marks ────────────────────────────
+        // For "All Encounters", show the full session.  For specific encounter
+        // filters, extend each encounter window by 5 minutes before the pull
+        // to capture pre-pull potions, food, and elixirs.
+        let (consume_marks, consume_duration, consume_aura_categories, available_consume_categories) =
+            Self::build_consume_marks(
+                &self.consumables,
+                self.start_time,
+                self.end_time,
+                &encounters,
+                &available_auras,
+            );
+
+        // ── Encounter boundaries for the consumable chart ───────────
+        // Show all boss encounters as faint vertical lines so the user can
+        // see where fights are relative to consumable usage.
+        let consume_encounter_bounds = Self::build_consume_encounter_bounds(
+            &self.encounters,
+            self.start_time,
+            &encounters,
+            filter,
+        );
+
         // ── Compute dispel casters sorted by count descending ───────
         let mut caster_counts: HashMap<&str, usize> = HashMap::new();
         for mark in &dispel_marks {
@@ -227,6 +253,11 @@ impl LogData {
             available_auras,
             dispel_marks,
             dispel_casters,
+            consume_marks,
+            consume_duration,
+            consume_aura_categories,
+            available_consume_categories,
+            consume_encounter_bounds,
         }
     }
 
@@ -313,6 +344,152 @@ impl LogData {
         sorted_names.sort_by_key(|n| n.to_lowercase());
 
         (intervals, sorted_names)
+    }
+
+    /// Build consumable use marks and category metadata.
+    ///
+    /// For `EncounterFilter::All`, spans the full session so all consumable
+    /// uses are visible.  For specific encounter filters, extends each
+    /// encounter window by 5 minutes before the pull to capture pre-pull
+    /// potions, food, and elixirs.
+    ///
+    /// Returns:
+    /// - `consume_marks`: point-in-time consumable events with time-relative offsets
+    /// - `consume_duration`: total time span in seconds (X-axis duration)
+    /// - `consume_aura_categories`: aura name → category mapping (exact match + TOML overrides)
+    /// - `available_consume_categories`: sorted unique categories present
+    fn build_consume_marks(
+        consumables: &[super::types::ConsumableUse],
+        session_start: Option<f64>,
+        session_end: Option<f64>,
+        encounters: &[&Encounter],
+        aura_names: &[String],
+    ) -> (
+        Vec<ConsumeMark>,
+        f64,
+        HashMap<String, ConsumableCategory>,
+        Vec<ConsumableCategory>,
+    ) {
+        /// Pre-pull buffer: include consumables used up to 5 minutes before
+        /// an encounter starts to capture pre-potting and food buffs.
+        const PRE_PULL_BUFFER: f64 = 300.0;
+
+        let Some(t_session_start) = session_start else {
+            return (Vec::new(), 0.0, HashMap::new(), Vec::new());
+        };
+        let t_session_end = session_end.unwrap_or(t_session_start);
+
+        // Determine the effective time window based on the encounter filter.
+        // For all filters, use encounter boundaries (with pre-pull buffer) to
+        // trim dead whitespace from the timeline ends.
+        let (t_start, t_end) = if encounters.is_empty() {
+            (t_session_start, t_session_end)
+        } else {
+            let earliest = encounters
+                .iter()
+                .map(|e| e.start)
+                .fold(f64::INFINITY, f64::min);
+            let latest = encounters
+                .iter()
+                .map(|e| e.end)
+                .fold(f64::NEG_INFINITY, f64::max);
+            ((earliest - PRE_PULL_BUFFER).max(t_session_start), latest)
+        };
+
+        let consume_duration = (t_end - t_start).max(0.0);
+
+        let mut marks = Vec::new();
+        let mut aura_categories: HashMap<String, ConsumableCategory> = HashMap::new();
+        let mut category_set: HashSet<ConsumableCategory> = HashSet::new();
+
+        for cu in consumables {
+            if cu.timestamp < t_start || cu.timestamp > t_end {
+                continue;
+            }
+            let relative = cu.timestamp - t_start;
+
+            marks.push(ConsumeMark {
+                player: cu.player.clone(),
+                consumable: cu.consumable.clone(),
+                category: cu.category,
+                offset: relative,
+            });
+
+            category_set.insert(cu.category);
+
+            // Record the item name as a potential aura match. Many consumable
+            // buff names match the item name exactly (e.g. "Elixir of the
+            // Mongoose"). This mapping enables hybrid bar/tick rendering.
+            aura_categories
+                .entry(cu.consumable.clone())
+                .or_insert(cu.category);
+        }
+
+        marks.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+
+        // Scan aura interval names for buff-name overrides from consumables.toml.
+        // This handles cases where the combat log buff name differs from the item
+        // name (e.g. "Fire Protection" from "Greater Fire Protection Potion").
+        for aura_name in aura_names {
+            if aura_categories.contains_key(aura_name) {
+                continue;
+            }
+            if let Some(category) = crate::consumable_data::classify_buff(aura_name) {
+                aura_categories.insert(aura_name.clone(), category);
+            }
+        }
+
+        let mut categories: Vec<ConsumableCategory> = category_set.into_iter().collect();
+        categories.sort();
+
+        (marks, consume_duration, aura_categories, categories)
+    }
+
+    /// Compute encounter boundary offsets for the consumable chart background.
+    ///
+    /// Returns `(start_offset, end_offset, boss_name, is_kill)` for each boss
+    /// encounter, using the same time base as consume marks.
+    fn build_consume_encounter_bounds(
+        all_encounters: &[Encounter],
+        session_start: Option<f64>,
+        selected_encounters: &[&Encounter],
+        filter: &EncounterFilter,
+    ) -> Vec<(f64, f64, String, bool)> {
+        const PRE_PULL_BUFFER: f64 = 300.0;
+
+        let Some(t_session_start) = session_start else {
+            return Vec::new();
+        };
+
+        // Determine the consume timeline's t_start (must match build_consume_marks)
+        let t_start = if selected_encounters.is_empty() {
+            t_session_start
+        } else {
+            let earliest = selected_encounters
+                .iter()
+                .map(|e| e.start)
+                .fold(f64::INFINITY, f64::min);
+            (earliest - PRE_PULL_BUFFER).max(t_session_start)
+        };
+
+        // For "All Encounters", show all boss encounters.
+        // For specific filters, show the selected encounters.
+        let encounters_to_show: Vec<&Encounter> =
+            if matches!(filter, EncounterFilter::All) {
+                all_encounters.iter().filter(|e| e.is_boss).collect()
+            } else {
+                selected_encounters.to_vec()
+            };
+
+        encounters_to_show
+            .iter()
+            .map(|enc| {
+                let name = enc.name.as_deref().unwrap_or("Trash");
+                let start = enc.start - t_start;
+                let end = enc.end - t_start;
+                (start, end, name.to_string(), enc.is_kill)
+            })
+            .collect()
     }
 }
 

@@ -1,4 +1,5 @@
-//! Canvas drawing programs: `TimelineChart`, `AliveChart`, `DispelChart`, and `AuraChart`.
+//! Canvas drawing programs: `TimelineChart`, `AliveChart`, `DispelChart`, `AuraChart`,
+//! and `ConsumeChart`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -7,7 +8,8 @@ use iced::widget::canvas;
 use iced::{Color, Event, Point, Rectangle, Renderer, Theme, mouse};
 
 use crate::log_data::{
-    Combatant, TimelineBucket, TimelineData, TimelineEventKind, TimelineVisibility,
+    Combatant, ConsumableCategory, ConsumeViewMode, TimelineBucket, TimelineData,
+    TimelineEventKind, TimelineVisibility,
 };
 use crate::theme;
 
@@ -939,5 +941,458 @@ impl canvas::Program<ViewerMessage> for AuraChart<'_> {
             _ => {}
         }
         None
+    }
+}
+
+// ── Consumable Waterfall Chart ─────────────────────────────────────────────
+
+/// Height of each category header row in the consumable waterfall.
+const CONSUME_HEADER_HEIGHT: f32 = 16.0;
+/// Height of each player lane within a consumable category group.
+pub(super) const CONSUME_LANE_HEIGHT: f32 = 18.0;
+
+/// A group of player lanes for one consumable category.
+pub(super) struct ConsumeLaneGroup {
+    pub category: ConsumableCategory,
+    pub display_name: String,
+    pub color: Color,
+    /// Unique players (sorted) who have data for this category.
+    pub players: Vec<String>,
+    /// Whether this category has aura interval data (determines bar vs tick rendering in hybrid mode).
+    pub has_intervals: bool,
+}
+
+/// Build the layout for the consumable waterfall chart.
+///
+/// In **Bars** mode (hybrid): categories whose items have aura intervals are
+/// rendered as bars; categories with only instant-use items are rendered as
+/// ticks.  In **Ticks** mode: all categories are rendered as tick marks.
+pub(super) fn build_consume_layout(
+    td: &TimelineData,
+    tracked: &HashSet<ConsumableCategory>,
+    mode: ConsumeViewMode,
+) -> Vec<ConsumeLaneGroup> {
+    let mut groups: Vec<ConsumeLaneGroup> = Vec::new();
+
+    let mut sorted_categories: Vec<ConsumableCategory> = tracked
+        .iter()
+        .filter(|cat| td.available_consume_categories.contains(cat))
+        .copied()
+        .collect();
+    sorted_categories.sort();
+
+    for (idx, &category) in sorted_categories.iter().enumerate() {
+        let color = theme::CONSUME_COLORS[idx % theme::CONSUME_COLORS.len()];
+        let display_name = crate::consumable_data::category_display_name(category).to_string();
+
+        // Determine if this category has aura intervals (for hybrid bar rendering).
+        // An aura is "in this category" if its name appears in consume_aura_categories.
+        let category_aura_names: Vec<&String> = td
+            .consume_aura_categories
+            .iter()
+            .filter(|(_, cat)| **cat == category)
+            .map(|(name, _)| name)
+            .collect();
+
+        let has_intervals = mode == ConsumeViewMode::Bars
+            && category_aura_names
+                .iter()
+                .any(|name| td.aura_intervals.contains_key(name.as_str()));
+
+        // Collect unique players for this category
+        let mut players: HashSet<String> = HashSet::new();
+
+        if has_intervals {
+            // In bars mode with intervals: players from aura intervals
+            for aura_name in &category_aura_names {
+                if let Some(intervals) = td.aura_intervals.get(aura_name.as_str()) {
+                    for iv in intervals {
+                        players.insert(iv.player.clone());
+                    }
+                }
+            }
+        }
+
+        // Always include players from consume marks for this category
+        for mark in &td.consume_marks {
+            if mark.category == category {
+                players.insert(mark.player.clone());
+            }
+        }
+
+        if players.is_empty() {
+            continue;
+        }
+
+        let mut sorted_players: Vec<String> = players.into_iter().collect();
+        sorted_players.sort_unstable();
+
+        groups.push(ConsumeLaneGroup {
+            category,
+            display_name,
+            color,
+            players: sorted_players,
+            has_intervals,
+        });
+    }
+
+    groups
+}
+
+/// Compute the total canvas height for the consumable waterfall layout.
+pub(super) fn consume_chart_height(layout: &[ConsumeLaneGroup]) -> f32 {
+    layout
+        .iter()
+        .map(|g| CONSUME_HEADER_HEIGHT + g.players.len() as f32 * CONSUME_LANE_HEIGHT)
+        .sum::<f32>()
+        .max(CONSUME_LANE_HEIGHT)
+}
+
+/// Canvas program for the consumable waterfall chart.
+///
+/// Supports hybrid rendering: categories with persistent buffs are rendered as
+/// horizontal interval bars (like `AuraChart`), while categories with only
+/// instant-use items are rendered as diamond tick marks (like `DispelChart`).
+pub(super) struct ConsumeChart<'a> {
+    pub data: &'a TimelineData,
+    pub layout: Vec<ConsumeLaneGroup>,
+    pub mode: ConsumeViewMode,
+    pub hover_second: Option<f64>,
+    pub zoom: Option<(f64, f64)>,
+}
+
+impl canvas::Program<ViewerMessage> for ConsumeChart<'_> {
+    type State = ();
+
+    #[allow(clippy::many_single_char_names)] // x/y/w/h are standard 2D drawing variables
+    #[allow(clippy::too_many_lines)] // Canvas draw — waterfall with hybrid bar/tick rendering
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let td = self.data;
+        let w = bounds.width;
+        let h = bounds.height;
+
+        // Consume marks use session-relative time, not encounter-relative
+        let duration = td.consume_duration;
+        if duration <= 0.0 || w < 2.0 || h < 2.0 {
+            return vec![];
+        }
+
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+
+        // Background
+        frame.fill_rectangle(
+            Point::ORIGIN,
+            bounds.size(),
+            Color::from_rgba8(0, 0, 0, 0.2),
+        );
+
+        let chart_w = (w - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
+        let (view_lo, view_hi) = self.zoom.map_or((0.0, duration), |(lo, hi)| (lo, hi));
+        let view_span = (view_hi - view_lo).max(0.001) as f32;
+
+        // ── Encounter boundary lines (background) ───────────────────
+        // Draw faint vertical lines at boss encounter start/end so the user
+        // can see where fights are relative to consumable usage.
+        for &(enc_start, enc_end, ref name, is_kill) in &td.consume_encounter_bounds {
+            let x_start =
+                CHART_LEFT_MARGIN + ((enc_start as f32 - view_lo as f32) / view_span) * chart_w;
+            let x_end =
+                CHART_LEFT_MARGIN + ((enc_end as f32 - view_lo as f32) / view_span) * chart_w;
+
+            // Shaded encounter region (very faint background)
+            if x_end > CHART_LEFT_MARGIN && x_start < CHART_LEFT_MARGIN + chart_w {
+                let x_lo = x_start.max(CHART_LEFT_MARGIN);
+                let x_hi = x_end.min(CHART_LEFT_MARGIN + chart_w);
+                frame.fill_rectangle(
+                    Point::new(x_lo, 0.0),
+                    iced::Size::new(x_hi - x_lo, h),
+                    Color::from_rgba8(255, 255, 255, 0.03),
+                );
+            }
+
+            // Start line (green-ish for pull)
+            if x_start >= CHART_LEFT_MARGIN && x_start <= CHART_LEFT_MARGIN + chart_w {
+                let line = canvas::Path::line(Point::new(x_start, 0.0), Point::new(x_start, h));
+                frame.stroke(
+                    &line,
+                    canvas::Stroke::default()
+                        .with_color(Color::from_rgba8(100, 200, 100, 0.25))
+                        .with_width(1.0),
+                );
+            }
+
+            // End line (red for wipe, green for kill)
+            if x_end >= CHART_LEFT_MARGIN && x_end <= CHART_LEFT_MARGIN + chart_w {
+                let end_color = if is_kill {
+                    Color::from_rgba8(100, 200, 100, 0.25)
+                } else {
+                    Color::from_rgba8(200, 100, 100, 0.25)
+                };
+                let line = canvas::Path::line(Point::new(x_end, 0.0), Point::new(x_end, h));
+                frame.stroke(
+                    &line,
+                    canvas::Stroke::default()
+                        .with_color(end_color)
+                        .with_width(1.0),
+                );
+            }
+
+            // Boss name label at the top of the start line
+            if x_start >= CHART_LEFT_MARGIN && x_start <= CHART_LEFT_MARGIN + chart_w {
+                let label_color = if is_kill {
+                    Color::from_rgba8(100, 200, 100, 0.4)
+                } else {
+                    Color::from_rgba8(200, 100, 100, 0.4)
+                };
+                frame.fill_text(canvas::Text {
+                    content: name.clone(),
+                    position: Point::new(x_start + 2.0, 1.0),
+                    color: label_color,
+                    size: 8.0.into(),
+                    ..canvas::Text::default()
+                });
+            }
+        }
+
+        let mut y_cursor: f32 = 0.0;
+
+        for group in &self.layout {
+            let color = group.color;
+
+            // Category name header
+            frame.fill_text(canvas::Text {
+                content: group.display_name.clone(),
+                position: Point::new(2.0, y_cursor + 1.0),
+                color: Color { a: 0.7, ..color },
+                size: 11.0.into(),
+                ..canvas::Text::default()
+            });
+
+            // Thin separator line under the header
+            let sep = canvas::Path::line(
+                Point::new(0.0, y_cursor + CONSUME_HEADER_HEIGHT - 1.0),
+                Point::new(w, y_cursor + CONSUME_HEADER_HEIGHT - 1.0),
+            );
+            frame.stroke(
+                &sep,
+                canvas::Stroke::default()
+                    .with_color(Color { a: 0.15, ..color })
+                    .with_width(1.0),
+            );
+
+            y_cursor += CONSUME_HEADER_HEIGHT;
+
+            // Decide rendering mode for this category
+            let use_bars = group.has_intervals && self.mode == ConsumeViewMode::Bars;
+
+            for (player_idx, player) in group.players.iter().enumerate() {
+                let lane_y = y_cursor + player_idx as f32 * CONSUME_LANE_HEIGHT;
+
+                // Alternating row background for readability
+                if player_idx % 2 == 0 {
+                    frame.fill_rectangle(
+                        Point::new(0.0, lane_y),
+                        iced::Size::new(w, CONSUME_LANE_HEIGHT),
+                        Color::from_rgba8(255, 255, 255, 0.02),
+                    );
+                }
+
+                // Player name label on the left
+                frame.fill_text(canvas::Text {
+                    content: player.clone(),
+                    position: Point::new(4.0, lane_y + 2.0),
+                    color: theme::TEXT_MUTED,
+                    size: 9.0.into(),
+                    ..canvas::Text::default()
+                });
+
+                if use_bars {
+                    // ── Bars mode: draw aura interval bars ──────────────
+                    self.draw_consume_bars(
+                        &mut frame,
+                        td,
+                        group,
+                        player,
+                        lane_y,
+                        chart_w,
+                        view_lo as f32,
+                        view_span,
+                        color,
+                    );
+                } else {
+                    // ── Ticks mode: draw diamond markers ────────────────
+                    let lane_center_y = lane_y + CONSUME_LANE_HEIGHT / 2.0;
+                    let mut count = 0_usize;
+                    for mark in &td.consume_marks {
+                        if mark.category == group.category && mark.player == *player {
+                            count += 1;
+                            let x = CHART_LEFT_MARGIN
+                                + ((mark.offset as f32 - view_lo as f32) / view_span) * chart_w;
+                            draw_diamond(&mut frame, x, lane_center_y, 4.0, color);
+                        }
+                    }
+                    // Count label on the right edge
+                    if count > 0 {
+                        frame.fill_text(canvas::Text {
+                            content: count.to_string(),
+                            position: Point::new(
+                                w - CHART_RIGHT_MARGIN + 6.0,
+                                lane_y + 2.0,
+                            ),
+                            color: Color { a: 0.6, ..color },
+                            size: 9.0.into(),
+                            ..canvas::Text::default()
+                        });
+                    }
+                }
+            }
+
+            y_cursor += group.players.len() as f32 * CONSUME_LANE_HEIGHT;
+        }
+
+        // Hover line (shared time cursor)
+        if let Some(second) = self.hover_second {
+            let x =
+                CHART_LEFT_MARGIN + ((second as f32 - view_lo as f32) / view_span) * chart_w;
+            if x >= CHART_LEFT_MARGIN && x <= CHART_LEFT_MARGIN + chart_w {
+                let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
+                frame.stroke(
+                    &line,
+                    canvas::Stroke::default()
+                        .with_color(Color::from_rgba8(255, 255, 255, 0.6))
+                        .with_width(1.0),
+                );
+            }
+        }
+
+        vec![frame.into_geometry()]
+    }
+
+    fn update(
+        &self,
+        _state: &mut (),
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<Action<ViewerMessage>> {
+        let duration = self.data.consume_duration;
+        let chart_w = (bounds.width - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
+        let (view_lo, view_hi) = self
+            .zoom
+            .map_or((0.0, duration), |(lo, hi)| (lo, hi));
+        let view_span = (view_hi - view_lo).max(0.001);
+        match event {
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    if duration > 0.0 {
+                        let second = view_lo
+                            + f64::from((pos.x - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0)
+                                * view_span;
+                        return Some(
+                            Action::publish(ViewerMessage::ConsumeHover(Some(second)))
+                                .and_capture(),
+                        );
+                    }
+                } else {
+                    return Some(Action::publish(ViewerMessage::ConsumeHover(None)));
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(pos) = cursor.position_in(bounds)
+                    && duration > 0.0
+                {
+                    let second = (view_lo
+                        + f64::from((pos.x - CHART_LEFT_MARGIN) / chart_w).clamp(0.0, 1.0)
+                            * view_span) as usize;
+                    return Some(
+                        Action::publish(ViewerMessage::TimelineClick(second)).and_capture(),
+                    );
+                }
+            }
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                return Some(Action::publish(ViewerMessage::ConsumeHover(None)));
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+impl ConsumeChart<'_> {
+    /// Draw aura interval bars for a player in a category.
+    ///
+    /// Iterates all aura names belonging to this category and draws horizontal
+    /// bars for intervals matching the given player.
+    #[allow(clippy::too_many_arguments)] // Drawing helper — all params needed for coordinate mapping
+    #[allow(clippy::unused_self)] // Method on ConsumeChart for logical grouping with draw()
+    fn draw_consume_bars(
+        &self,
+        frame: &mut canvas::Frame,
+        td: &TimelineData,
+        group: &ConsumeLaneGroup,
+        player: &str,
+        lane_y: f32,
+        chart_w: f32,
+        view_lo: f32,
+        view_span: f32,
+        color: Color,
+    ) {
+        // Find all aura names in this category
+        for (aura_name, &cat) in &td.consume_aura_categories {
+            if cat != group.category {
+                continue;
+            }
+            if let Some(intervals) = td.aura_intervals.get(aura_name.as_str()) {
+                for interval in intervals.iter().filter(|iv| iv.player == player) {
+                    let x_start = CHART_LEFT_MARGIN
+                        + ((interval.start as f32 - view_lo) / view_span) * chart_w;
+                    let x_end = CHART_LEFT_MARGIN
+                        + ((interval.end as f32 - view_lo) / view_span) * chart_w;
+                    let bar_w = (x_end - x_start).max(2.0);
+
+                    // Filled bar
+                    frame.fill_rectangle(
+                        Point::new(x_start, lane_y + 2.0),
+                        iced::Size::new(bar_w, CONSUME_LANE_HEIGHT - 4.0),
+                        Color { a: 0.55, ..color },
+                    );
+
+                    // Border
+                    let bar_rect = canvas::Path::rectangle(
+                        Point::new(x_start, lane_y + 2.0),
+                        iced::Size::new(bar_w, CONSUME_LANE_HEIGHT - 4.0),
+                    );
+                    frame.stroke(
+                        &bar_rect,
+                        canvas::Stroke::default()
+                            .with_color(Color { a: 0.8, ..color })
+                            .with_width(1.0),
+                    );
+                }
+            }
+        }
+
+        // In hybrid mode, also draw tick marks for instant-use items in this
+        // category that did NOT produce aura intervals for this player
+        let lane_center_y = lane_y + CONSUME_LANE_HEIGHT / 2.0;
+        for mark in &td.consume_marks {
+            if mark.category != group.category || mark.player != player {
+                continue;
+            }
+            // Skip if this consumable has aura intervals (already rendered as bars)
+            if td.aura_intervals.contains_key(mark.consumable.as_str()) {
+                continue;
+            }
+            let x = CHART_LEFT_MARGIN
+                + ((mark.offset as f32 - view_lo) / view_span) * chart_w;
+            draw_diamond(frame, x, lane_center_y, 3.5, color);
+        }
     }
 }

@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use super::types::ConsumableCategory;
+
 // ── Timeline Data ───────────────────────────────────────────────────────────
 
 /// One second of aggregated raid activity for the timeline chart.
@@ -72,6 +74,33 @@ pub struct DispelMark {
     pub offset: f64,
 }
 
+/// A single consumable use event positioned on the encounter timeline.
+///
+/// Used by `ConsumeChart` to render per-player, per-category tick marks or
+/// to cross-reference with aura intervals for hybrid bar/tick rendering.
+#[derive(Debug, Clone)]
+pub struct ConsumeMark {
+    /// Player who used the consumable.
+    pub player: String,
+    /// Consumable item name (e.g. "Elixir of the Mongoose").
+    pub consumable: String,
+    /// Category from `consumables.toml`.
+    pub category: ConsumableCategory,
+    /// Encounter-relative offset in seconds.
+    pub offset: f64,
+}
+
+/// Display mode for the consumable timeline waterfall chart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConsumeViewMode {
+    /// Show buff uptime bars (intervals) where available; categories with only
+    /// instant-use items auto-render as ticks.
+    #[default]
+    Bars,
+    /// Show point-in-time diamond markers for every consumable use event.
+    Ticks,
+}
+
 /// Precomputed timeline data for the currently selected encounter(s).
 #[derive(Debug, Clone, Default)]
 pub struct TimelineData {
@@ -99,6 +128,26 @@ pub struct TimelineData {
     pub dispel_marks: Vec<DispelMark>,
     /// Unique dispel casters sorted by count descending (most active first).
     pub dispel_casters: Vec<String>,
+    /// Consumable use events positioned on the session timeline.
+    ///
+    /// Unlike other timeline data (bucketed DPS/HPS, dispel marks), consume
+    /// marks span the **full session** time range — not just encounter windows.
+    /// This ensures pre-pull potions, food buffs, and between-fight consumables
+    /// are captured.
+    pub consume_marks: Vec<ConsumeMark>,
+    /// Total time span for consumable marks (session end − session start).
+    /// Used as the X-axis duration for the consumable chart.
+    pub consume_duration: f64,
+    /// Mapping from aura name → consumable category for auras that correspond
+    /// to a known consumable item (exact name match or `buff_name` override from
+    /// `consumables.toml`).
+    pub consume_aura_categories: HashMap<String, ConsumableCategory>,
+    /// Categories that have at least one consumable use in this session.
+    pub available_consume_categories: Vec<ConsumableCategory>,
+    /// Encounter boundaries for the consumable chart, expressed as offsets
+    /// relative to the consume timeline's start (session start or pre-pull
+    /// window start). Each entry is `(start_offset, end_offset, name, is_kill)`.
+    pub consume_encounter_bounds: Vec<(f64, f64, String, bool)>,
 }
 
 /// Which timeline data series a toggle controls.
@@ -185,87 +234,18 @@ pub struct AuraPreset {
 ///
 /// Buff names match the exact strings emitted by the vanilla 1.12 combat log
 /// (and the Turtle addon format).  Verified against real log data.
-pub const AURA_PRESETS: &[AuraPreset] = &[
-    AuraPreset {
-        label: "Consumes: Tank",
-        auras: &[
-            "Spirit of Zanza",
-            "Elixir of the Mongoose",
-            "Ground Scorpok Assay",
-            "Elixir of Giants",
-            "Juju Power",
-            "Juju Might",
-            "Winterfall Firewater",
-            "Elixir of Fortitude",
-            "Elixir of Superior Defense",
-            "Gift of Arthas",
-            "Rumsey Rum Black Label",
-            "Medivh's Merlot",
-        ],
-    },
-    AuraPreset {
-        label: "Consumes: Melee",
-        auras: &[
-            "Spirit of Zanza",
-            "Elixir of the Mongoose",
-            "Ground Scorpok Assay",
-            "R.O.I.D.S.",
-            "Elixir of Giants",
-            "Juju Power",
-            "Juju Might",
-            "Winterfall Firewater",
-            "Juju Flurry",
-            "Potion of Quickness",
-            "Mighty Rage",
-        ],
-    },
-    AuraPreset {
-        label: "Consumes: Caster",
-        auras: &[
-            "Spirit of Zanza",
-            "Elixir of Fortitude",
-            "Mageblood Potion",
-            "Greater Arcane Elixir",
-            "Elixir of Greater Firepower",
-            "Elixir of Frost Power",
-            "Elixir of Shadow Power",
-            "Dreamshard Elixir",
-            "Dreamtonic",
-            "Cerebral Cortex Compound",
-            "Medivh's Merlot Blue Label",
-        ],
-    },
-    AuraPreset {
-        label: "Consumes: Healer",
-        auras: &[
-            "Spirit of Zanza",
-            "Dreamshard Elixir",
-            "Cerebral Cortex Compound",
-            "Mageblood Potion",
-            "Medivh's Merlot Blue Label",
-        ],
-    },
-    AuraPreset {
-        label: "Protection Potions",
-        auras: &[
-            "Fire Protection",
-            "Nature Protection",
-            "Shadow Protection",
-            "Frost Protection",
-            "Arcane Protection",
-            "Free Action",
-        ],
-    },
-    AuraPreset {
-        label: "World Buffs",
-        auras: &[
-            "Rallying Cry of the Dragonslayer",
-            "Spirit of Zandalar",
-            "Songflower Serenade",
-            "Warchief's Blessing",
-            "Mol'dar's Moxie",
-            "Fengus' Ferocity",
-            "Slip'kik's Savvy",
-        ],
-    },
-];
+///
+/// Consumable-specific presets (Tank/Melee/Caster/Healer and Protection Potions)
+/// have been moved to the dedicated Consumes tab timeline view.
+pub const AURA_PRESETS: &[AuraPreset] = &[AuraPreset {
+    label: "World Buffs",
+    auras: &[
+        "Rallying Cry of the Dragonslayer",
+        "Spirit of Zandalar",
+        "Songflower Serenade",
+        "Warchief's Blessing",
+        "Mol'dar's Moxie",
+        "Fengus' Ferocity",
+        "Slip'kik's Savvy",
+    ],
+}];

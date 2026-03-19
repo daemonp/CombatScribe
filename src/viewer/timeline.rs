@@ -1,8 +1,8 @@
 //! Timeline tab rendering: DPS/DTPS/HPS charts, aura lanes, and event log filters.
 
 use super::charts::{
-    AliveChart, AuraChart, DISPEL_LANE_HEIGHT, DispelChart, TimelineChart, aura_chart_height,
-    build_aura_layout,
+    aura_chart_height, build_aura_layout, AliveChart, AuraChart, DispelChart, TimelineChart,
+    DISPEL_LANE_HEIGHT,
 };
 #[allow(clippy::wildcard_imports)]
 // viewer UI — many shared component functions used throughout
