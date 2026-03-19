@@ -46,6 +46,22 @@ pub(crate) fn classify_buff(buff_name: &str) -> Option<ConsumableCategory> {
     None
 }
 
+/// Check if a buff/item name belongs to a death-persistent category.
+///
+/// Returns true for Flasks and Zanzas (which persist through player death).
+/// Checks both item names and buff name overrides.
+pub(crate) fn is_death_persistent(name: &str) -> bool {
+    // Check item name → category
+    if let Ok(idx) = ITEM_TO_CATEGORY.binary_search_by_key(&name, |(k, _)| k) {
+        return DEATH_PERSISTENT_CATEGORIES.contains(&ITEM_TO_CATEGORY[idx].1);
+    }
+    // Check buff name override → category
+    if let Ok(idx) = BUFF_TO_CATEGORY.binary_search_by_key(&name, |(k, _)| k) {
+        return DEATH_PERSISTENT_CATEGORIES.contains(&BUFF_TO_CATEGORY[idx].1);
+    }
+    false
+}
+
 /// Get the display name for a category (e.g. `Flask` → "Flasks").
 pub(crate) fn category_display_name(cat: ConsumableCategory) -> &'static str {
     let idx = cat as usize;

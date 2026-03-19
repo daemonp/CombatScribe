@@ -34,7 +34,7 @@ use std::sync::LazyLock;
 
 use crate::log_data;
 use crate::log_data::{
-    AbilityStats, AvoidanceStats, BuffStats, ConsumableCategory, ConsumeViewMode, DeathEvent,
+    AbilityStats, AvoidanceStats, ConsumableCategory, ConsumeViewMode, DeathEvent,
     DeathLogWindow, EncounterFilter, EventLogMode, EventLogTypeFilter, EventLogTypeKind, LogData,
     LogEntry, LootEvent, PlayerEventType, ResurrectEvent, TimelineData, TimelineSeriesKind,
     TimelineVisibility,

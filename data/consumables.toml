@@ -46,6 +46,7 @@ items = [
 [[category]]
 name = "Flask"
 display = "Flasks"
+death_persistent = true
 items = [
     "Flask of Supreme Power",
     "Flask of the Titans",
@@ -275,6 +276,7 @@ items = [
 [[category]]
 name = "Zanza"
 display = "Zanza"
+death_persistent = true
 items = [
     "Spirit of Zanza",
     "Swiftness of Zanza",

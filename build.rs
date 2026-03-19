@@ -259,6 +259,9 @@ struct ConsumableCategory {
     /// Combat log buff names that differ from the item name.
     #[serde(default)]
     buff_names: Vec<String>,
+    /// If true, buffs in this category persist through player death (Flasks, Zanzas).
+    #[serde(default)]
+    death_persistent: bool,
 }
 
 #[allow(clippy::too_many_lines)] // Code-generation — linear sequence of write! calls
@@ -391,6 +394,32 @@ fn generate_consumable_data() {
         writeln!(out, "    ({}, {idx}),", quote(buff)).unwrap();
     }
     writeln!(out, "];").unwrap();
+    writeln!(out).unwrap();
+
+    // ── Death-persistent category indices ───────────────────────────
+    let death_persistent_cats: Vec<u8> = db
+        .category
+        .iter()
+        .enumerate()
+        .filter(|(_, cat)| cat.death_persistent)
+        .map(|(idx, _)| u8::try_from(idx).expect("too many categories"))
+        .collect();
+
+    writeln!(
+        out,
+        "/// Category indices for buffs that persist through player death."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "pub(crate) static DEATH_PERSISTENT_CATEGORIES: &[u8] = &[{}];",
+        death_persistent_cats
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
 
     let total_items: usize = item_to_cat.len();
     let total_buffs: usize = buff_to_cat.len();

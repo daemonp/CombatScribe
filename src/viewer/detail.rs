@@ -824,36 +824,78 @@ impl ViewerState {
         content.into()
     }
 
+    #[allow(clippy::cast_possible_truncation)] // duration seconds safely fit in u64
     fn view_buff_detail(&self, player: &str) -> Element<'_, ViewerMessage> {
-        let Some(buffs) = self.log_data.buffs.get(player) else {
-            return text("No buff data").size(14).into();
-        };
+        // Compute encounter-filtered uptimes and gains/fades
+        let (uptimes, duration) = self.log_data.compute_buff_uptimes(&self.encounter_filter);
 
-        let mut sorted: Vec<(String, BuffStats)> = buffs
+        let player_uptimes = uptimes.get(player);
+        let empty = HashMap::new();
+        let player_data = player_uptimes.unwrap_or(&empty);
+
+        if player_data.is_empty() {
+            // Fall back to session-wide buffs if no encounter-filtered data
+            let has_buffs = self
+                .log_data
+                .buffs
+                .get(player)
+                .is_some_and(|b| !b.is_empty());
+            if !has_buffs {
+                return text("No buff data").size(14).into();
+            }
+        }
+
+        // Build rows: (name, gains, fades, fraction, duration_secs)
+        let mut sorted: Vec<(String, u64, u64, f64, f64)> = player_data
             .iter()
-            .map(|(name, stats)| (name.clone(), stats.clone()))
+            .map(|(name, bu)| {
+                let dur_secs = bu.fraction * duration;
+                (name.clone(), bu.gains, bu.fades, bu.fraction, dur_secs)
+            })
             .collect();
-        sorted.sort_by_key(|s| Reverse(s.1.gains));
 
-        let summary = text(format!("Total Unique Buffs: {}", sorted.len()))
+        // Sort by uptime descending (primary), then gains descending (secondary)
+        sorted.sort_by(|a, b| b.3.total_cmp(&a.3).then_with(|| b.1.cmp(&a.1)));
+
+        let summary = if duration > 0.0 {
+            text(format!(
+                "Buffs: {} (encounter: {})",
+                sorted.len(),
+                theme::format_duration(duration),
+            ))
             .size(12)
-            .color(theme::TEXT_SECONDARY);
+            .color(theme::TEXT_SECONDARY)
+        } else {
+            text(format!("Buffs: {}", sorted.len()))
+                .size(12)
+                .color(theme::TEXT_SECONDARY)
+        };
 
         let header = |label| text(label).size(12);
 
         let columns = [
-            table::column(header("Buff"), |row: (String, BuffStats)| {
+            table::column(header("Buff"), |row: (String, u64, u64, f64, f64)| {
                 text(row.0).size(12)
             })
             .width(Length::FillPortion(3)),
-            table::column(header("Gains"), |row: (String, BuffStats)| {
-                text(row.1.gains.to_string()).size(12)
+            table::column(header("Gains"), |row: (String, u64, u64, f64, f64)| {
+                text(row.1.to_string()).size(12)
             })
             .width(Length::FillPortion(1)),
-            table::column(header("Fades"), |row: (String, BuffStats)| {
-                text(row.1.fades.to_string()).size(12)
+            table::column(header("Fades"), |row: (String, u64, u64, f64, f64)| {
+                text(row.2.to_string()).size(12)
             })
             .width(Length::FillPortion(1)),
+            table::column(header("Uptime"), |row: (String, u64, u64, f64, f64)| {
+                if row.3 > 0.0 {
+                    let mins = (row.4 as u64) / 60;
+                    let secs = (row.4 as u64) % 60;
+                    text(format!("{:.1}% ({mins}:{secs:02})", row.3 * 100.0)).size(12)
+                } else {
+                    text("-").size(12).color([0.4, 0.4, 0.4])
+                }
+            })
+            .width(Length::FillPortion(2)),
         ];
 
         let buff_table = table::table(columns, sorted)
