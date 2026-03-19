@@ -97,6 +97,10 @@ A per-fight timeline showing raid DPS, damage taken, healing, deaths (red vertic
 
 <img alt="Encounter timeline chart with raid DPS, HPS, DTPS, death markers, and alive count over a 1:34 boss fight" src="https://github.com/user-attachments/assets/2a885836-13d1-4fab-98d5-c91d90fcfc9e" />
 
+### Consumes Tracking
+
+<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/570282be-93c1-4729-8eb7-311ea8dda70e" />
+
 ---
 
 ## Combat Log Addon
