@@ -240,6 +240,17 @@ impl LogData {
                 .then_with(|| a.cmp(b))
         });
 
+        // ── Aura-to-consume offset translation ─────────────────────
+        // Aura intervals use encounter-relative offsets (0 to duration,
+        // concatenated with offset_base for multi-encounter). The consume
+        // chart uses session-relative offsets with a 5-min pre-pull buffer.
+        // Build translation segments so the consume chart renderer can map
+        // aura interval offsets to consume-timeline pixel coordinates.
+        let consume_aura_offset_segments = Self::build_consume_aura_segments(
+            self.start_time,
+            &encounters,
+        );
+
         TimelineData {
             buckets,
             events,
@@ -258,6 +269,7 @@ impl LogData {
             consume_aura_categories,
             available_consume_categories,
             consume_encounter_bounds,
+            consume_aura_offset_segments,
         }
     }
 
@@ -266,7 +278,14 @@ impl LogData {
     ///
     /// Scans `AuraGain`/`AuraFade` entries within encounter windows, pairing
     /// gains with their corresponding fades per player. Unclosed auras are
-    /// clamped to the encounter segment end.
+    /// clamped to the player's death time (if any) or to the encounter end.
+    /// Flasks and Zanzas (death-persistent buffs) are always clamped to the
+    /// encounter end, ignoring death.
+    ///
+    /// Pre-encounter lookback: scans entries before each encounter to detect
+    /// buffs that were already active when the fight started (e.g. Spirit of
+    /// Zanza applied 30 minutes pre-pull).
+    #[allow(clippy::too_many_lines)] // Aura interval builder — pre-encounter lookback + death-aware clamping
     fn build_aura_intervals(
         &self,
         encounters: &[&Encounter],
@@ -282,6 +301,44 @@ impl LogData {
         for enc in encounters {
             let enc_start = enc.start;
             let enc_duration = enc.duration;
+
+            // ── Pre-encounter lookback ──────────────────────────────────
+            // Find buffs that were already active when the encounter started.
+            // Scan all entries before enc_start, tracking the last AuraGain
+            // and AuraFade per (player, aura). If the last event for a pair
+            // is an AuraGain (no subsequent fade), the buff was active at
+            // encounter start → open an interval at offset 0.
+            let mut pre_state: HashMap<(String, String), bool> = HashMap::new();
+            for entry in &self.entries {
+                let ts = entry.timestamp();
+                if ts >= enc_start {
+                    break; // entries are sorted by timestamp
+                }
+                match entry {
+                    LogEntry::AuraGain { player, aura, .. } => {
+                        if self.all_combatants.contains_key(player.as_str()) {
+                            pre_state.insert((player.clone(), aura.clone()), true);
+                        }
+                    }
+                    LogEntry::AuraFade { player, aura, .. } => {
+                        pre_state.insert((player.clone(), aura.clone()), false);
+                    }
+                    _ => {}
+                }
+            }
+            // Inject pre-existing buffs as open intervals at encounter start
+            for ((player, aura), was_active) in &pre_state {
+                if *was_active {
+                    aura_names.insert(aura.clone());
+                    open.entry((player.clone(), aura.clone()))
+                        .or_default()
+                        .push(offset_base); // offset 0 relative to this encounter
+                }
+            }
+
+            // ── Main encounter scan ─────────────────────────────────────
+            // Collect death timestamps within this encounter segment
+            let mut deaths: HashMap<&str, f64> = HashMap::new();
 
             for entry in &self.entries {
                 let ts = entry.timestamp();
@@ -313,22 +370,43 @@ impl LogData {
                                 });
                         }
                     }
+                    LogEntry::Death { player, .. } => {
+                        // Record first death only (ignore subsequent deaths from
+                        // combat log quirks); resurrect creates new AuraGain events.
+                        deaths.entry(player.as_str()).or_insert(relative);
+                    }
                     _ => {}
                 }
             }
 
-            // Close any unclosed auras at the end of this encounter segment
+            // ── Close unclosed auras ────────────────────────────────────
+            // Clamp to death time UNLESS the aura is death-persistent
             let segment_end = offset_base + enc_duration;
             for ((player, aura), starts) in &mut open {
+                let clamp = if crate::consumable_data::is_death_persistent(aura) {
+                    // Flasks, Zanzas → clamp to encounter end (persist through death)
+                    segment_end.min(total_duration)
+                } else {
+                    // Normal buffs (including world buffs, elixirs) → clamp to death time
+                    deaths
+                        .get(player.as_str())
+                        .copied()
+                        .unwrap_or(segment_end)
+                        .min(segment_end)
+                        .min(total_duration)
+                };
+
                 for start in starts.drain(..) {
-                    intervals
-                        .entry(aura.clone())
-                        .or_default()
-                        .push(AuraInterval {
-                            player: player.clone(),
-                            start,
-                            end: segment_end.min(total_duration),
-                        });
+                    if clamp > start {
+                        intervals
+                            .entry(aura.clone())
+                            .or_default()
+                            .push(AuraInterval {
+                                player: player.clone(),
+                                start,
+                                end: clamp,
+                            });
+                    }
                 }
             }
 
@@ -344,6 +422,108 @@ impl LogData {
         sorted_names.sort_by_key(|n| n.to_lowercase());
 
         (intervals, sorted_names)
+    }
+
+    /// Compute per-player per-buff uptime fractions and encounter-filtered
+    /// gains/fades for selected encounters.
+    ///
+    /// Returns `(uptimes, total_duration)` where `uptimes` maps
+    /// `player -> buff_name -> BuffUptime`.
+    ///
+    /// Reuses `build_aura_intervals()` for encounter-aware interval pairing,
+    /// then merges overlapping intervals per (player, buff) before computing
+    /// the fraction of total encounter duration each buff was active.
+    /// Also counts `AuraGain`/`AuraFade` events within encounter windows for
+    /// encounter-filtered gains/fades.
+    pub fn compute_buff_uptimes(
+        &self,
+        filter: &EncounterFilter,
+    ) -> (HashMap<String, HashMap<String, BuffUptime>>, f64) {
+        let encounters = self.selected_encounters(filter);
+        let total_duration: f64 = encounters.iter().map(|e| e.duration).sum();
+
+        if total_duration <= 0.0 {
+            return (HashMap::new(), 0.0);
+        }
+
+        let (aura_intervals, _available) = self.build_aura_intervals(&encounters, total_duration);
+
+        // Count encounter-filtered gains/fades
+        let mut gains_fades: HashMap<(String, String), (u64, u64)> = HashMap::new();
+        for enc in &encounters {
+            for entry in &self.entries {
+                let ts = entry.timestamp();
+                if ts < enc.start || ts > enc.end {
+                    continue;
+                }
+                match entry {
+                    LogEntry::AuraGain { player, aura, .. } => {
+                        gains_fades
+                            .entry((player.clone(), aura.clone()))
+                            .or_default()
+                            .0 += 1;
+                    }
+                    LogEntry::AuraFade { player, aura, .. } => {
+                        gains_fades
+                            .entry((player.clone(), aura.clone()))
+                            .or_default()
+                            .1 += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Reorganize: aura_name -> Vec<AuraInterval>  into  player -> aura -> BuffUptime
+        let mut uptimes: HashMap<String, HashMap<String, BuffUptime>> = HashMap::new();
+
+        for (aura_name, intervals) in &aura_intervals {
+            // Group intervals by player
+            let mut by_player: HashMap<&str, Vec<(f64, f64)>> = HashMap::new();
+            for iv in intervals {
+                by_player
+                    .entry(iv.player.as_str())
+                    .or_default()
+                    .push((iv.start, iv.end));
+            }
+
+            for (player, mut spans) in by_player {
+                let merged_duration = merge_and_sum(&mut spans);
+                let fraction = (merged_duration / total_duration).min(1.0);
+                let (gains, fades) = gains_fades
+                    .get(&(player.to_string(), aura_name.clone()))
+                    .copied()
+                    .unwrap_or((0, 0));
+
+                uptimes
+                    .entry(player.to_string())
+                    .or_default()
+                    .insert(
+                        aura_name.clone(),
+                        BuffUptime {
+                            fraction,
+                            gains,
+                            fades,
+                        },
+                    );
+            }
+        }
+
+        // Add entries for buffs that have gains/fades but no intervals
+        // (e.g., buff gained and faded at the same timestamp)
+        for ((player, aura), (gains, fades)) in &gains_fades {
+            uptimes
+                .entry(player.clone())
+                .or_default()
+                .entry(aura.clone())
+                .or_insert(BuffUptime {
+                    fraction: 0.0,
+                    gains: *gains,
+                    fades: *fades,
+                });
+        }
+
+        (uptimes, total_duration)
     }
 
     /// Build consumable use marks and category metadata.
@@ -491,6 +671,90 @@ impl LogData {
             })
             .collect()
     }
+
+    /// Build translation segments for mapping encounter-relative aura interval
+    /// offsets to consume-timeline-relative offsets.
+    ///
+    /// Aura intervals use concatenated encounter-relative offsets (0 to dur1,
+    /// dur1 to dur1+dur2, …). The consume chart uses session-relative offsets
+    /// starting from `t_start` (earliest encounter − 5 min pre-pull buffer).
+    ///
+    /// Returns `(aura_offset_start, aura_offset_end, consume_timeline_start)`
+    /// for each encounter segment.
+    fn build_consume_aura_segments(
+        session_start: Option<f64>,
+        encounters: &[&Encounter],
+    ) -> Vec<(f64, f64, f64)> {
+        /// Pre-pull buffer: must match the constant in `build_consume_marks()`.
+        const PRE_PULL_BUFFER: f64 = 300.0;
+
+        let Some(t_session_start) = session_start else {
+            return Vec::new();
+        };
+
+        if encounters.is_empty() {
+            return Vec::new();
+        }
+
+        // Compute t_start using the same formula as build_consume_marks()
+        let earliest = encounters
+            .iter()
+            .map(|e| e.start)
+            .fold(f64::INFINITY, f64::min);
+        let t_start = (earliest - PRE_PULL_BUFFER).max(t_session_start);
+
+        let mut segments = Vec::with_capacity(encounters.len());
+        let mut aura_offset = 0.0;
+        for enc in encounters {
+            let consume_start = enc.start - t_start;
+            segments.push((aura_offset, aura_offset + enc.duration, consume_start));
+            aura_offset += enc.duration;
+        }
+        segments
+    }
+}
+
+// ── Buff Uptime Types ───────────────────────────────────────────────────────
+
+/// Per-buff uptime data for a single aura on a single player.
+#[derive(Debug, Clone)]
+pub struct BuffUptime {
+    /// Uptime fraction in \[0.0, 1.0\].
+    pub fraction: f64,
+    /// Gains count within selected encounter(s).
+    pub gains: u64,
+    /// Fades count within selected encounter(s).
+    pub fades: u64,
+}
+
+/// Merge overlapping time spans and return total covered duration.
+///
+/// Input spans are `(start, end)` pairs. The function sorts by start time,
+/// merges overlapping/adjacent intervals, and sums the merged durations.
+/// This prevents double-counting when a buff is refreshed before fading.
+fn merge_and_sum(spans: &mut [(f64, f64)]) -> f64 {
+    if spans.is_empty() {
+        return 0.0;
+    }
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut total = 0.0;
+    let mut current_start = spans[0].0;
+    let mut current_end = spans[0].1;
+
+    for &(start, end) in &spans[1..] {
+        if start <= current_end {
+            // Overlapping — extend current interval
+            current_end = current_end.max(end);
+        } else {
+            // Gap — close current interval, start new one
+            total += current_end - current_start;
+            current_start = start;
+            current_end = end;
+        }
+    }
+    total += current_end - current_start;
+    total
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -550,5 +814,263 @@ mod tests {
     fn test_is_pet_target_no_parens() {
         let combatants = combatants_with_pet("Hunter", "Cat");
         assert!(!is_pet_target("Ragnaros", &combatants));
+    }
+
+    // ── merge_and_sum tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_merge_and_sum_single_span() {
+        let mut spans = vec![(0.0, 10.0)];
+        assert!((merge_and_sum(&mut spans) - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_merge_and_sum_no_overlap() {
+        let mut spans = vec![(0.0, 5.0), (10.0, 15.0)];
+        assert!((merge_and_sum(&mut spans) - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_merge_and_sum_overlapping() {
+        let mut spans = vec![(0.0, 8.0), (5.0, 12.0)];
+        assert!((merge_and_sum(&mut spans) - 12.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_merge_and_sum_nested() {
+        let mut spans = vec![(0.0, 20.0), (5.0, 10.0)];
+        assert!((merge_and_sum(&mut spans) - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_merge_and_sum_empty() {
+        let mut spans: Vec<(f64, f64)> = vec![];
+        assert!((merge_and_sum(&mut spans)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_merge_and_sum_adjacent() {
+        // Spans that touch exactly (end == start of next)
+        let mut spans = vec![(0.0, 5.0), (5.0, 10.0)];
+        assert!((merge_and_sum(&mut spans) - 10.0).abs() < f64::EPSILON);
+    }
+
+    // ── compute_buff_uptimes tests ──────────────────────────────────
+
+    /// Helper to build a minimal encounter for testing.
+    fn test_encounter(name: &str, start: f64, end: f64) -> Encounter {
+        Encounter {
+            name: Some(name.to_string()),
+            start,
+            end,
+            duration: end - start,
+            is_boss: true,
+            is_kill: true,
+            zone: None,
+            attempt: None,
+            player_deaths: 0,
+            active_players: 1,
+        }
+    }
+
+    #[test]
+    fn test_buff_uptime_basic() {
+        // Aura gain at 10s, fade at 60s, encounter 0-100s → 50% uptime
+        let mut data = LogData::default();
+        data.encounters.push(test_encounter("Boss", 0.0, 100.0));
+        data.all_combatants
+            .insert("Warrior".to_string(), Combatant::default());
+        data.entries.push(LogEntry::AuraGain {
+            timestamp: 10.0,
+            player: "Warrior".to_string(),
+            aura: "Elixir of the Mongoose".to_string(),
+            stacks: 1,
+        });
+        data.entries.push(LogEntry::AuraFade {
+            timestamp: 60.0,
+            player: "Warrior".to_string(),
+            aura: "Elixir of the Mongoose".to_string(),
+        });
+
+        let (uptimes, duration) = data.compute_buff_uptimes(&EncounterFilter::All);
+        assert!((duration - 100.0).abs() < f64::EPSILON);
+        let warrior = uptimes.get("Warrior").expect("warrior should have uptimes");
+        let mongoose = warrior
+            .get("Elixir of the Mongoose")
+            .expect("mongoose should have uptime");
+        assert!((mongoose.fraction - 0.5).abs() < 0.01);
+        assert_eq!(mongoose.gains, 1);
+        assert_eq!(mongoose.fades, 1);
+    }
+
+    #[test]
+    fn test_buff_uptime_unclosed_aura() {
+        // Aura gained at 20s, never fades → clamped to encounter end (100s)
+        // Expected uptime: 80/100 = 80%
+        let mut data = LogData::default();
+        data.encounters.push(test_encounter("Boss", 0.0, 100.0));
+        data.all_combatants
+            .insert("Mage".to_string(), Combatant::default());
+        data.entries.push(LogEntry::AuraGain {
+            timestamp: 20.0,
+            player: "Mage".to_string(),
+            aura: "Arcane Power".to_string(),
+            stacks: 1,
+        });
+
+        let (uptimes, _) = data.compute_buff_uptimes(&EncounterFilter::All);
+        let mage = uptimes.get("Mage").expect("mage should have uptimes");
+        let ap = mage.get("Arcane Power").expect("AP should have uptime");
+        assert!((ap.fraction - 0.8).abs() < 0.01);
+        assert_eq!(ap.gains, 1);
+        assert_eq!(ap.fades, 0);
+    }
+
+    #[test]
+    fn test_buff_uptime_death_clamp() {
+        // Aura gained at 10s, player dies at 40s, encounter lasts 100s
+        // Expected uptime: 30/100 = 30% (clamped at death, not encounter end)
+        let mut data = LogData::default();
+        let mut enc = test_encounter("Boss", 0.0, 100.0);
+        enc.player_deaths = 1;
+        data.encounters.push(enc);
+        data.all_combatants
+            .insert("Rogue".to_string(), Combatant::default());
+        data.entries.push(LogEntry::AuraGain {
+            timestamp: 10.0,
+            player: "Rogue".to_string(),
+            aura: "Slice and Dice".to_string(),
+            stacks: 1,
+        });
+        data.entries.push(LogEntry::Death {
+            timestamp: 40.0,
+            player: "Rogue".to_string(),
+        });
+
+        let (uptimes, _) = data.compute_buff_uptimes(&EncounterFilter::All);
+        let rogue = uptimes.get("Rogue").expect("rogue should have uptimes");
+        let snd = rogue
+            .get("Slice and Dice")
+            .expect("SnD should have uptime");
+        assert!((snd.fraction - 0.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_buff_uptime_encounter_filtered_gains() {
+        // Two encounters, buff gained in first only.
+        // When filtering to second encounter, gains should be 0.
+        let mut data = LogData::default();
+        data.encounters.push(test_encounter("Boss A", 0.0, 100.0));
+        data.encounters
+            .push(test_encounter("Boss B", 200.0, 300.0));
+        data.all_combatants
+            .insert("Priest".to_string(), Combatant::default());
+        data.entries.push(LogEntry::AuraGain {
+            timestamp: 10.0,
+            player: "Priest".to_string(),
+            aura: "Power Infusion".to_string(),
+            stacks: 1,
+        });
+        data.entries.push(LogEntry::AuraFade {
+            timestamp: 25.0,
+            player: "Priest".to_string(),
+            aura: "Power Infusion".to_string(),
+        });
+
+        // Filter to second encounter only — should have no buff data
+        let filter = EncounterFilter::Single(1);
+        let (uptimes, _) = data.compute_buff_uptimes(&filter);
+        assert!(
+            uptimes.get("Priest").is_none()
+                || uptimes
+                    .get("Priest")
+                    .expect("checked above")
+                    .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_buff_uptime_death_persistent_flask() {
+        // Flask gained at 5s, player dies at 30s, encounter lasts 100s
+        // Flasks persist through death → uptime should be 95/100 = 95%
+        let mut data = LogData::default();
+        let mut enc = test_encounter("Boss", 0.0, 100.0);
+        enc.player_deaths = 1;
+        data.encounters.push(enc);
+        data.all_combatants
+            .insert("Mage".to_string(), Combatant::default());
+        data.entries.push(LogEntry::AuraGain {
+            timestamp: 5.0,
+            player: "Mage".to_string(),
+            aura: "Flask of Supreme Power".to_string(),
+            stacks: 1,
+        });
+        data.entries.push(LogEntry::Death {
+            timestamp: 30.0,
+            player: "Mage".to_string(),
+        });
+
+        let (uptimes, _) = data.compute_buff_uptimes(&EncounterFilter::All);
+        let mage = uptimes.get("Mage").expect("mage should have uptimes");
+        let flask = mage
+            .get("Flask of Supreme Power")
+            .expect("flask should have uptime");
+        // Flask persists through death: 95s / 100s = 95%
+        assert!((flask.fraction - 0.95).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_buff_uptime_pre_encounter_lookback() {
+        // Spirit of Zanza gained at timestamp 50 (before encounter)
+        // Encounter runs from 100-200
+        // No AuraFade in the log → buff active entire fight
+        // Expected uptime: 100%
+        let mut data = LogData::default();
+        data.encounters.push(test_encounter("Boss", 100.0, 200.0));
+        data.all_combatants
+            .insert("Warrior".to_string(), Combatant::default());
+        data.entries.push(LogEntry::AuraGain {
+            timestamp: 50.0,
+            player: "Warrior".to_string(),
+            aura: "Spirit of Zanza".to_string(),
+            stacks: 1,
+        });
+
+        let (uptimes, duration) = data.compute_buff_uptimes(&EncounterFilter::All);
+        assert!((duration - 100.0).abs() < f64::EPSILON);
+        let warrior = uptimes.get("Warrior").expect("warrior should have uptimes");
+        let zanza = warrior
+            .get("Spirit of Zanza")
+            .expect("zanza should have uptime");
+        assert!((zanza.fraction - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_buff_uptime_pre_encounter_with_mid_fight_fade() {
+        // Elixir gained at timestamp 50 (before encounter), fades at 150 (mid-fight)
+        // Encounter runs from 100-200
+        // Expected uptime: 50/100 = 50% (active from enc start to fade)
+        let mut data = LogData::default();
+        data.encounters.push(test_encounter("Boss", 100.0, 200.0));
+        data.all_combatants
+            .insert("Rogue".to_string(), Combatant::default());
+        data.entries.push(LogEntry::AuraGain {
+            timestamp: 50.0,
+            player: "Rogue".to_string(),
+            aura: "Elixir of the Mongoose".to_string(),
+            stacks: 1,
+        });
+        data.entries.push(LogEntry::AuraFade {
+            timestamp: 150.0,
+            player: "Rogue".to_string(),
+            aura: "Elixir of the Mongoose".to_string(),
+        });
+
+        let (uptimes, _) = data.compute_buff_uptimes(&EncounterFilter::All);
+        let rogue = uptimes.get("Rogue").expect("rogue should have uptimes");
+        let mongoose = rogue
+            .get("Elixir of the Mongoose")
+            .expect("mongoose should have uptime");
+        assert!((mongoose.fraction - 0.5).abs() < 0.01);
     }
 }

@@ -1329,7 +1329,9 @@ impl ConsumeChart<'_> {
     /// Draw aura interval bars for a player in a category.
     ///
     /// Iterates all aura names belonging to this category and draws horizontal
-    /// bars for intervals matching the given player.
+    /// bars for intervals matching the given player. Aura interval offsets are
+    /// encounter-relative, so they are translated to consume-timeline-relative
+    /// coordinates before mapping to pixels.
     #[allow(clippy::too_many_arguments)] // Drawing helper — all params needed for coordinate mapping
     #[allow(clippy::unused_self)] // Method on ConsumeChart for logical grouping with draw()
     fn draw_consume_bars(
@@ -1344,6 +1346,8 @@ impl ConsumeChart<'_> {
         view_span: f32,
         color: Color,
     ) {
+        let segments = &td.consume_aura_offset_segments;
+
         // Find all aura names in this category
         for (aura_name, &cat) in &td.consume_aura_categories {
             if cat != group.category {
@@ -1351,10 +1355,14 @@ impl ConsumeChart<'_> {
             }
             if let Some(intervals) = td.aura_intervals.get(aura_name.as_str()) {
                 for interval in intervals.iter().filter(|iv| iv.player == player) {
+                    // Translate from encounter-relative to consume-timeline-relative
+                    let start = translate_aura_to_consume(interval.start, segments);
+                    let end = translate_aura_to_consume(interval.end, segments);
+
                     let x_start = CHART_LEFT_MARGIN
-                        + ((interval.start as f32 - view_lo) / view_span) * chart_w;
+                        + ((start as f32 - view_lo) / view_span) * chart_w;
                     let x_end = CHART_LEFT_MARGIN
-                        + ((interval.end as f32 - view_lo) / view_span) * chart_w;
+                        + ((end as f32 - view_lo) / view_span) * chart_w;
                     let bar_w = (x_end - x_start).max(2.0);
 
                     // Filled bar
@@ -1395,4 +1403,22 @@ impl ConsumeChart<'_> {
             draw_diamond(frame, x, lane_center_y, 3.5, color);
         }
     }
+}
+
+/// Translate an encounter-relative aura interval offset to a
+/// consume-timeline-relative offset using the precomputed segments.
+///
+/// Each segment is `(aura_start, aura_end, consume_start)`. The translation
+/// is: `consume_x = aura_x - seg.aura_start + seg.consume_start`.
+///
+/// Falls back to the raw offset if no matching segment is found (shouldn't
+/// happen with well-formed data).
+pub(super) fn translate_aura_to_consume(offset: f64, segments: &[(f64, f64, f64)]) -> f64 {
+    for &(seg_start, seg_end, consume_start) in segments {
+        if offset >= seg_start && offset <= seg_end {
+            return offset - seg_start + consume_start;
+        }
+    }
+    // Fallback: no matching segment (empty segments or out-of-range offset)
+    offset
 }

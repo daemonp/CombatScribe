@@ -148,6 +148,15 @@ pub struct TimelineData {
     /// relative to the consume timeline's start (session start or pre-pull
     /// window start). Each entry is `(start_offset, end_offset, name, is_kill)`.
     pub consume_encounter_bounds: Vec<(f64, f64, String, bool)>,
+    /// Translation segments for mapping encounter-relative aura interval offsets
+    /// to consume-timeline-relative offsets.
+    ///
+    /// Each entry is `(aura_offset_start, aura_offset_end, consume_offset_start)`.
+    /// For a single encounter, this is `[(0.0, duration, enc.start - t_start)]`.
+    /// For multi-encounter concatenation, one segment per encounter.
+    ///
+    /// To translate: `consume_x = aura_x - seg.0 + seg.2`
+    pub consume_aura_offset_segments: Vec<(f64, f64, f64)>,
 }
 
 /// Which timeline data series a toggle controls.

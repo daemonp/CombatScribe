@@ -1,6 +1,8 @@
 //! Consumes tab: raid overview, per-player breakdown, encounter matrix, and timeline.
 
-use super::charts::{ConsumeChart, build_consume_layout, consume_chart_height};
+use super::charts::{
+    ConsumeChart, build_consume_layout, consume_chart_height, translate_aura_to_consume,
+};
 #[allow(clippy::wildcard_imports)]
 // viewer UI — many shared component functions used throughout
 use super::components::*;
@@ -358,6 +360,9 @@ impl ViewerState {
         let mut parts: Vec<String> = Vec::new();
 
         // Active aura intervals (bar data)
+        // Aura intervals use encounter-relative offsets; translate to
+        // consume-timeline coordinates before comparing with hover second.
+        let segments = &td.consume_aura_offset_segments;
         for (aura_name, &cat) in &td.consume_aura_categories {
             if !self.tracked_consume_categories.contains(&cat) {
                 continue;
@@ -365,7 +370,11 @@ impl ViewerState {
             if let Some(intervals) = td.aura_intervals.get(aura_name.as_str()) {
                 let mut active: Vec<&str> = intervals
                     .iter()
-                    .filter(|iv| iv.start <= second && second <= iv.end)
+                    .filter(|iv| {
+                        let start = translate_aura_to_consume(iv.start, segments);
+                        let end = translate_aura_to_consume(iv.end, segments);
+                        start <= second && second <= end
+                    })
                     .map(|iv| iv.player.as_str())
                     .collect();
                 active.sort_unstable();
