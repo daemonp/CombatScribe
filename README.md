@@ -78,7 +78,7 @@ Each raid session is exported as `Player-Raid-YYYY-MM-DD-export.txt.zip`. Multip
 
 Side-by-side damage and healing for an Upper Karazhan 40-player raid. Every player is ranked with class icon, class-colored name, total damage or healing, per-second throughput, and raid percentage. The encounter dropdown (top) lets you filter by boss, kills, wipes, or trash.
 
-<img alt="Damage and healing meters showing a 40-player Upper Karazhan raid with ranked player bars, class icons, and per-second throughput" src="https://github.com/user-attachments/assets/b912166b-6a99-4f53-ba91-5df4e443bc3e" />
+<img alt="Damage and healing meters showing a 40-player Upper Karazhan raid with ranked player bars, class icons, and per-second throughput" src="https://github.com/user-attachments/assets/32f27a99-24d3-4d92-b277-cc9d39bcba50" />
 
 ### Player Damage Breakdown
 
