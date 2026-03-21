@@ -4,7 +4,7 @@ use crate::log_data::{Combatant, DeathEvent, Encounter, LogData, LogEntry};
 use crate::parser;
 
 use super::ParseState;
-use super::helpers::{contains_word, is_player_guid, title_case};
+use super::helpers::{contains_word, is_pet_guid, is_player_guid, title_case};
 use super::post_process::{parse_gear_slot, parse_players_in_combat};
 
 // ── Combat State & Boss Detection ───────────────────────────────────────────
@@ -134,6 +134,12 @@ pub(super) fn parse_unit_died(
     let Some((dead_unit, guid)) = parser::extract_unit_died_with_guid(trimmed) else {
         return;
     };
+
+    // Skip pet/summon deaths - they should not affect encounter naming or death tracking.
+    // Pet GUIDs start with 0xF140 (vs NPCs 0xF130 or players 0x0000000000).
+    if is_pet_guid(guid) {
+        return;
+    }
 
     if is_player_guid(guid) {
         // Attribute death to last damage received
@@ -560,5 +566,44 @@ mod tests {
         assert_eq!(death.killer, Some("Patchwerk".to_string()));
         assert_eq!(death.killing_blow, Some("Auto Attack".to_string()));
         assert_eq!(death.damage_amount, Some(3500));
+    }
+
+    #[test]
+    fn test_pet_death_does_not_overwrite_boss_name() {
+        // Regression test: Pet death (Wallpainter) during Vaelastrasz fight
+        // should NOT cause encounter to be named after the pet.
+        // Based on actual log from BWL.txt around line 45836.
+        let lines: Vec<String> = vec![
+            // Setup: Hunter with pet Wallpainter
+            "3/20 19:18:17.000  COMBATANT_INFO: 20.03.26 19:18:17&Guajiro&HUNTER&Troll&2&Wallpainter&Nerds of a Feather&Big Nerd&5&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x000000000057C1FF&0xF140059471000008".to_string(),
+            // Combat starts on Vaelastrasz
+            "3/20 19:18:17.852  PLAYER_REGEN_DISABLED".to_string(),
+            // Wallpainter attacks boss - establishes boss in combat (damage format)
+            "3/20 19:18:22.450  Wallpainter 's Bite hits Vaelastrasz the Corrupt for 125 Physical damage.".to_string(),
+            "3/20 19:18:36.337  Wallpainter 's Bite hits Vaelastrasz the Corrupt for 142 Physical damage.".to_string(),
+            // Player attacks boss (damage format)
+            "3/20 19:18:37.498  Guajiro hits Vaelastrasz the Corrupt for 340 Physical damage.".to_string(),
+            // PET DIES FIRST - this is the bug trigger
+            // Pet GUID: 0xF140059471000008 (starts with 0xF140)
+            "3/20 19:18:38.385  UNIT_DIED:Wallpainter:0xF140059471000008".to_string(),
+            // Player dies - wipe
+            "3/20 19:18:40.000  UNIT_DIED:Guajiro:0x000000000057C1FF".to_string(),
+            // Combat ends
+            "3/20 19:18:45.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.encounters.len(), 1, "Should have 1 encounter");
+        let enc = &data.encounters[0];
+        
+        // The bug: this was returning "Wallpainter" instead of "Vaelastrasz the Corrupt"
+        assert_eq!(
+            enc.name.as_deref(),
+            Some("Vaelastrasz the Corrupt"),
+            "Boss name should be Vaelastrasz the Corrupt, not Wallpainter (pet). \
+             If this shows 'Wallpainter', the pet death is overwriting the boss name!"
+        );
+        assert!(enc.is_boss, "Should be marked as boss encounter");
+        assert!(!enc.is_kill, "Wipe should not be marked as kill");
     }
 }

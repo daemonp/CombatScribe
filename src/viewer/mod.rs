@@ -896,22 +896,41 @@ impl ViewerState {
             }
         }
 
-        // Boss kill count
-        let boss_kills = self
+        // Boss kill count (unique bosses, not total encounters)
+        let unique_bosses_killed: std::collections::HashSet<_> = self
             .log_data
             .encounters
             .iter()
             .filter(|e| e.is_boss && e.is_kill)
-            .count();
-        let total_bosses = self
+            .map(|e| &e.name)
+            .collect();
+        let unique_boss_count = unique_bosses_killed.len();
+
+        let total_unique_bosses: std::collections::HashSet<_> = self
             .log_data
             .encounters
             .iter()
             .filter(|e| e.is_boss)
+            .map(|e| &e.name)
+            .collect();
+        let total_unique_count = total_unique_bosses.len();
+
+        // Count wipe attempts separately
+        let wipe_count = self
+            .log_data
+            .encounters
+            .iter()
+            .filter(|e| e.is_boss && !e.is_kill)
             .count();
-        if total_bosses > 0 {
+
+        if total_unique_count > 0 {
+            let boss_text = if wipe_count > 0 {
+                format!("{unique_boss_count}/{total_unique_count} bosses ({wipe_count})")
+            } else {
+                format!("{unique_boss_count}/{total_unique_count} bosses")
+            };
             right_row = right_row.push(
-                text(format!("{boss_kills}/{total_bosses} bosses"))
+                text(boss_text)
                     .size(12)
                     .color(theme::TEXT_MUTED),
             );

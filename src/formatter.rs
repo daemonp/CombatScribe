@@ -5,6 +5,7 @@
 //! normalization, mob name handling, self-damage detection, and loot fixes.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use rayon::prelude::*;
 use regex::Regex;
@@ -225,36 +226,45 @@ const MOB_APOSTROPHE_PAIRS: &[(&str, &str)] = &[
 ];
 
 /// Build pet replacement rules (case-insensitive to match Python).
+///
+/// These match the Python `format_log_for_upload.py` output exactly.
+/// The `(pet)` tag is only applied to auto-attacks and Arcane Missiles here;
+/// other pet spells are tagged by the interstitial `tag_pet_spells()` step.
 fn build_pet_replacements() -> Vec<ReplacementRule> {
     let lp = letter_class_plus();
     let np = name_pattern();
 
     vec![
-        // Pet hits/crits/misses -> Auto Attack with (pet) tag
+        // Pet hits/crits/misses -> Auto Attack (pet)
+        // Python: r"  \g<2>'s Auto Attack (pet) \g<3>"
+        // Uses $2's (no space) — the generic normalization pass adds the space later.
         rule_ci(
             &format!(r"  ({np}) \(({lp})\) (hits|crits|misses)"),
-            "  $2 's (pet) Auto Attack $3".to_string(),
+            "  $2's Auto Attack (pet) $3".to_string(),
         ),
         // Pet dismissed — Python has unescaped `.` but real logs always end with `.`
         rule_ci(
             &format!(r"  Your ({np}) \(({lp})\) is dismissed\."),
             "  $2's $1 ($2) is dismissed.".to_string(),
         ),
-        // Pet Arcane Missiles (trinket) with (pet) tag
+        // Pet Arcane Missiles (trinket) — (pet) after spell name
+        // Python: r"  \g<2> 's Arcane Missiles (pet)"
         rule_ci(
             &format!(r"  ({np}) \(({lp})\)('s| 's) Arcane Missiles"),
-            "  $2 's (pet) Arcane Missiles".to_string(),
+            "  $2 's Arcane Missiles (pet)".to_string(),
         ),
-        // Generic pet ability — tag with (pet) so the parser can attribute
-        // pet damage separately from personal damage.
+        // Generic pet ability — NO (pet) tag, matches Python reference.
+        // Pet spells will be tagged by tag_pet_spells() interstitial step.
+        // Python: r"  \g<2> 's"
         rule_ci(
             &format!(r"  ({np}) \(({lp})\)('s| 's)"),
-            "  $2 's (pet)".to_string(),
+            "  $2 's".to_string(),
         ),
-        // Pet ability from — same (pet) tag for "suffers from" DoT lines
+        // Pet ability "from" — NO (pet) tag, matches Python reference.
+        // Python: r"from \g<2>\g<3>"
         rule_ci(
             &format!(r"from ({np}) \(({lp})\)('s| 's)"),
-            "from $2$3 (pet)".to_string(),
+            "from $2$3".to_string(),
         ),
     ]
 }
@@ -377,6 +387,55 @@ const IGNORED_PET_NAMES: &[&str] = &[
     "Naxxramas Worshipper (",
 ];
 
+/// Fallback pet-only spells for owners whose pets have no CAST lines in the log.
+/// Only activated for players who have a pet in `COMBATANT_INFO`.
+const KNOWN_PET_SPELLS: &[&str] = &[
+    // Hunter pets
+    "Bite",
+    "Claw",
+    "Screech",
+    "Savage Rend",
+    "Growl",
+    "Dash",
+    "Dive",
+    "Boar Charge",
+    "Lightning Breath",
+    "Scorpid Poison",
+    "Fire Shield",
+    "Furious Howl",
+    "Gore",
+    // Warlock pets
+    "Firebolt",
+    "Lash of Pain",
+    "Torment",
+    "Cleave",
+    "Soothing Kiss",
+    "Blood Pact",
+    "Phase Shift",
+    // Summoned entities
+    "Explosive Trap Effect",
+];
+
+/// Pet data collected during `first_pass()` for the interstitial `tag_pet_spells()` step.
+#[derive(Debug)]
+struct PetInfo {
+    /// Map: owner name → set of pet names for that owner (from `COMBATANT_INFO`).
+    owner_pets: HashMap<String, HashSet<String>>,
+    /// Map: pet name → set of spell names cast by that pet (from `CAST:` lines).
+    pet_spells: HashMap<String, HashSet<String>>,
+}
+
+/// Regex for extracting caster and spell name from `CAST:` lines.
+///
+/// Supports multi-word caster names (e.g. "Greater Feral Spirit") and all
+/// three verb forms (`casts`, `begins to cast`, `fails casting`).
+static RE_CAST_EXTRACT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"CAST:\s*([A-Za-z]+(?:\s[A-Za-z]+)*)\s+(?:casts|begins to cast|fails casting)\s+([A-Za-z][A-Za-z '\-]+?)(?:\(\d+\))+",
+    )
+    .expect("known-good CAST extraction regex")
+});
+
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /// All pre-compiled replacement rule sets used by the second pass.
@@ -418,7 +477,8 @@ pub fn format_log(mut lines: Vec<String>) -> (Vec<String>, Vec<String>) {
     ))
     .expect("known-good summoned pet regex");
 
-    let (pet_rename_rules, owner_names) = first_pass(&mut lines, &summoned_pet_owner_re);
+    let (pet_rename_rules, owner_names, pet_info) =
+        first_pass(&mut lines, &summoned_pet_owner_re);
     second_pass(
         &mut lines,
         &player_entries,
@@ -428,6 +488,12 @@ pub fn format_log(mut lines: Vec<String>) -> (Vec<String>, Vec<String>) {
         &rules,
     );
 
+    // Interstitial step: tag pet spells with (pet) using data from COMBATANT_INFO + CAST lines
+    let owner_pet_spells = build_owner_pet_spells(&pet_info);
+    if !owner_pet_spells.is_empty() {
+        tag_pet_spells(&mut lines, &owner_pet_spells);
+    }
+
     let player_names: Vec<String> = unique_names.into_iter().collect();
     (lines, player_names)
 }
@@ -436,13 +502,16 @@ pub fn format_log(mut lines: Vec<String>) -> (Vec<String>, Vec<String>) {
 
 /// First pass: normalize `'s`, collect pet info, handle LOOT and `COMBATANT_INFO` lines.
 ///
-/// Returns `(pet_rename_rules, owner_names)`.
+/// Returns `(pet_rename_rules, owner_names, pet_info)`.
 fn first_pass(
     lines: &mut [String],
     summoned_pet_owner_re: &Regex,
-) -> (Vec<ReplacementRule>, HashSet<String>) {
+) -> (Vec<ReplacementRule>, HashSet<String>, PetInfo) {
     let mut pet_rename_rules: Vec<ReplacementRule> = Vec::new();
     let mut owner_names: HashSet<String> = HashSet::new();
+    let mut owner_pets: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut all_pet_names: HashSet<String> = HashSet::new();
+    let mut pet_spells: HashMap<String, HashSet<String>> = HashMap::new();
 
     for line in lines.iter_mut() {
         // DPSMate logs have " 's" already which breaks parsing, remove the space.
@@ -478,6 +547,21 @@ fn first_pass(
                         let mut new_parts = parts.clone();
                         new_parts[5] = format!("{pet_name}Pet");
                         *line = new_parts.join("&");
+
+                        // Track renamed pet
+                        let renamed = format!("{pet_name}Pet");
+                        owner_pets
+                            .entry(owner_name.clone())
+                            .or_default()
+                            .insert(renamed.clone());
+                        all_pet_names.insert(renamed);
+                    } else {
+                        // Track normal pet → owner mapping
+                        owner_pets
+                            .entry(owner_name.clone())
+                            .or_default()
+                            .insert(pet_name.clone());
+                        all_pet_names.insert(pet_name.clone());
                     }
 
                     owner_names.insert(format!("({owner_name})"));
@@ -494,6 +578,23 @@ fn first_pass(
                 *line = format!("{trimmed}|h|rx1.");
             }
         } else {
+            // Extract pet spell names from CAST lines (e.g. "CAST: Wolf casts Bite(17261)").
+            // CAST lines have no possessive `'s` so the normalization above doesn't affect them.
+            // We check `all_pet_names` which may still be empty on early lines, but CAST lines
+            // from pets always appear after the COMBATANT_INFO that registers the pet.
+            if line.contains("CAST:")
+                && let Some(caps) = RE_CAST_EXTRACT.captures(line)
+            {
+                let caster = caps.get(1).map_or("", |m| m.as_str());
+                let spell = caps.get(2).map_or("", |m| m.as_str().trim());
+                if all_pet_names.contains(caster) && !spell.is_empty() {
+                    pet_spells
+                        .entry(caster.to_string())
+                        .or_default()
+                        .insert(spell.to_string());
+                }
+            }
+
             for summoned_name in SUMMONED_PET_NAMES {
                 if line.contains(summoned_name)
                     && let Some(caps) = summoned_pet_owner_re.captures(line)
@@ -505,7 +606,12 @@ fn first_pass(
         }
     }
 
-    (pet_rename_rules, owner_names)
+    let pet_info = PetInfo {
+        owner_pets,
+        pet_spells,
+    };
+
+    (pet_rename_rules, owner_names, pet_info)
 }
 
 /// Second pass: apply all replacement rules to every line (parallelized with rayon).
@@ -612,4 +718,409 @@ fn second_pass(
             }
         }
     });
+}
+
+// ── Pet Spell Tagging (Interstitial Step) ───────────────────────────────────
+
+/// Build the owner → pet spell set from collected `PetInfo`.
+///
+/// Unions all pet spell sets for each owner and adds "Auto Attack" (every pet
+/// can melee). Falls back to `KNOWN_PET_SPELLS` for owners whose pets have
+/// no observed CAST lines.
+fn build_owner_pet_spells(pet_info: &PetInfo) -> HashMap<String, HashSet<String>> {
+    let mut result: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for (owner, pet_names) in &pet_info.owner_pets {
+        let spells = result.entry(owner.clone()).or_default();
+
+        // Every pet can auto-attack
+        spells.insert("Auto Attack".to_string());
+
+        let mut has_cast_data = false;
+        for pet_name in pet_names {
+            if let Some(pet_spell_set) = pet_info.pet_spells.get(pet_name) {
+                has_cast_data = true;
+                spells.extend(pet_spell_set.iter().cloned());
+            }
+        }
+
+        // Fallback: if no CAST lines found for any of this owner's pets,
+        // use the known pet-only spells as a safety net.  These are spells
+        // exclusive to pet classes — a Hunter can't personally cast Bite,
+        // a Warlock can't personally cast Firebolt, etc.
+        if !has_cast_data {
+            spells.extend(KNOWN_PET_SPELLS.iter().map(|s| (*s).to_string()));
+        }
+    }
+
+    result
+}
+
+/// Interstitial step: tag pet spells with `(pet)` in formatted lines.
+///
+/// Runs after `second_pass()` completes. For each line containing `" 's "`,
+/// checks if the spell name belongs to a known pet owner's pet spell set.
+/// If so, inserts `(pet) ` before the spell name.
+///
+/// Also normalizes `Auto Attack (pet)` (Python format, tag after spell) to
+/// `(pet) Auto Attack` (our internal format, tag before spell) so that
+/// `RE_DMG_SPELL` matches correctly.
+fn tag_pet_spells(lines: &mut [String], owner_pet_spells: &HashMap<String, HashSet<String>>) {
+    lines.par_iter_mut().for_each(|line| {
+        // Skip lines that can't contain pet damage attribution
+        if !line.contains(" 's ") {
+            return;
+        }
+        // Skip lines that already have a (pet) tag in the right position
+        if line.contains(" 's (pet) ") {
+            return;
+        }
+
+        // Step 1: Normalize "Auto Attack (pet)" position.
+        // Python format: `Owner 's Auto Attack (pet) hits`
+        // Our parser expects: `Owner 's (pet) Auto Attack hits`
+        if line.contains("Auto Attack (pet)") {
+            *line = line.replace("Auto Attack (pet)", "(pet) Auto Attack");
+            return;
+        }
+
+        // Step 2: Normalize "Arcane Missiles (pet)" position.
+        // Python format: `Owner 's Arcane Missiles (pet)`
+        // Our parser expects: `Owner 's (pet) Arcane Missiles`
+        if line.contains("Arcane Missiles (pet)") {
+            *line = line.replace("Arcane Missiles (pet)", "(pet) Arcane Missiles");
+            return;
+        }
+
+        // Step 3: Tag pet spells that don't have (pet) yet.
+        // Find the owner name by looking for `Owner 's ` pattern.
+        // The timestamp's double-space separator anchors the owner name position.
+        // DoT lines have `from Owner 's `.
+        tag_pet_spell_in_line(line, owner_pet_spells);
+    });
+}
+
+/// Try to find an owner name and spell name in a line, and insert `(pet)` if
+/// the spell belongs to that owner's pet spell set.
+///
+/// Handles two formats:
+/// - `  Owner 's SpellName hits/crits/misses Target for N`
+/// - `Target suffers N damage from Owner 's SpellName`
+fn tag_pet_spell_in_line(line: &mut String, owner_pet_spells: &HashMap<String, HashSet<String>>) {
+    // Try both positions where `Owner 's ` can appear
+    for marker in &["  ", "from "] {
+        if let Some(tag_pos) = find_pet_tag_position(line, marker, owner_pet_spells) {
+            line.insert_str(tag_pos, "(pet) ");
+            return;
+        }
+    }
+}
+
+/// Search for `{marker}{OwnerName} 's {SpellName}` in `line`.
+///
+/// If `SpellName` is in the owner's pet spell set, returns the byte offset
+/// where `(pet) ` should be inserted (just before the spell name).
+/// Returns `None` if no match or the spell is not a pet spell.
+fn find_pet_tag_position(
+    line: &str,
+    marker: &str,
+    owner_pet_spells: &HashMap<String, HashSet<String>>,
+) -> Option<usize> {
+    // Find the marker in the line
+    let marker_pos = line.find(marker)?;
+    let after_marker = marker_pos + marker.len();
+
+    // Extract the candidate owner name (single word after marker)
+    let rest = &line[after_marker..];
+    let owner_end = rest.find(' ')?;
+    let owner_name = &rest[..owner_end];
+
+    // Check if this owner has pets
+    let pet_spells = owner_pet_spells.get(owner_name)?;
+
+    // Verify the `" 's "` pattern follows the owner name
+    let after_owner = &rest[owner_end..];
+    if !after_owner.starts_with(" 's ") {
+        return None;
+    }
+
+    // Extract the spell name: everything after " 's " up to the next verb/punctuation
+    let spell_start = owner_end + 4; // " 's " is 4 bytes
+    let spell_rest = &rest[spell_start..];
+
+    // The spell name ends at certain verb keywords or punctuation.
+    // Multi-word spell names like "Savage Rend" or "Explosive Trap Effect" are common.
+    let spell_name = extract_spell_name(spell_rest);
+
+    if !spell_name.is_empty() && pet_spells.contains(spell_name) {
+        // Return the absolute byte position where "(pet) " should be inserted
+        Some(after_marker + spell_start)
+    } else {
+        None
+    }
+}
+
+/// Extract a spell name from the text following `Owner 's `.
+///
+/// The spell name is a sequence of words (capitalized or not) that ends before
+/// a combat verb (`hits`, `crits`, `misses`, `was`, `fails`) or a period/end.
+/// For `DoT` lines like `from Owner 's SpellName.`, the spell ends at the period.
+fn extract_spell_name(text: &str) -> &str {
+    // Combat verbs and copulas that terminate a spell name
+    const TERMINATORS: &[&str] = &[
+        " hits ", " crits ", " misses ", " was ", " fails ", " missed ", " is ",
+    ];
+
+    let mut end = text.len();
+
+    // Check for terminators
+    for term in TERMINATORS {
+        if let Some(pos) = text.find(term)
+            && pos < end
+        {
+            end = pos;
+        }
+    }
+
+    // Check for trailing period (DoT "from" lines end with `SpellName.`)
+    if let Some(pos) = text.find('.')
+        && pos < end
+    {
+        end = pos;
+    }
+
+    text[..end].trim()
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal COMBATANT_INFO line with a pet name.
+    /// Fields: date & name & class & race & sex & pet & guild & ...
+    /// Needs 6+ `&`-separated fields for `first_pass()` to process the pet.
+    fn combatant_info(owner: &str, pet: &str) -> String {
+        format!(
+            "1/27 12:00:00.000  COMBATANT_INFO: 27.01.26 12:00:00\
+             &{owner}&HUNTER&Human&2&{pet}&nil&nil&nil\
+             &nil&nil&nil&nil&nil&nil&nil&nil&nil&nil\
+             &nil&nil&nil&nil&nil&nil&nil&nil&nil\
+             &0x{{00000001}}{{00000001}}&nil"
+        )
+    }
+
+    #[test]
+    fn test_pet_tag_preprocessed_auto_attack() {
+        // Python-format auto attack line gets normalized to our internal format
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            "1/27 12:01:00.000  Hunter 's Auto Attack (pet) hits Boss for 100.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[1].contains("(pet) Auto Attack"),
+            "Expected '(pet) Auto Attack', got: {}",
+            result[1]
+        );
+    }
+
+    #[test]
+    fn test_pet_tag_preprocessed_spell() {
+        // Pet spell without (pet) tag gets tagged via CAST-line discovery
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            "1/27 12:00:30.000  CAST: Wolf casts Bite(17261)(Rank 8) on Boss.".to_string(),
+            "1/27 12:01:00.000  Hunter 's Bite hits Boss for 50.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[2].contains("(pet) Bite"),
+            "Expected '(pet) Bite', got: {}",
+            result[2]
+        );
+    }
+
+    #[test]
+    fn test_pet_tag_raw_log_spell() {
+        // Raw-format pet spell: formatter rewrites PetName(Owner) to Owner 's,
+        // then interstitial tags with (pet)
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            "1/27 12:00:30.000  CAST: Wolf casts Bite(17261)(Rank 8) on Boss.".to_string(),
+            "1/27 12:01:00.000  Wolf (Hunter)'s Bite hits Boss for 50.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[2].contains("Hunter 's (pet) Bite"),
+            "Expected 'Hunter 's (pet) Bite', got: {}",
+            result[2]
+        );
+    }
+
+    #[test]
+    fn test_personal_spell_not_tagged() {
+        // Hunter's personal spell should NOT get (pet) tag
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            "1/27 12:00:30.000  CAST: Wolf casts Bite(17261)(Rank 8) on Boss.".to_string(),
+            "1/27 12:01:00.000  Hunter 's Aimed Shot hits Boss for 800.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            !result[2].contains("(pet)"),
+            "Personal spell should NOT have (pet), got: {}",
+            result[2]
+        );
+    }
+
+    #[test]
+    fn test_pet_tag_suffer_line() {
+        // DoT tick from pet spell should get tagged
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            "1/27 12:00:30.000  CAST: Wolf casts Savage Rend(36541)(Rank 6) on Boss.".to_string(),
+            "1/27 12:01:00.000  Boss suffers 101 Physical damage from Hunter 's Savage Rend."
+                .to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[2].contains("(pet) Savage Rend"),
+            "Expected '(pet) Savage Rend' in suffer line, got: {}",
+            result[2]
+        );
+    }
+
+    #[test]
+    fn test_pet_tag_fallback_known_spells() {
+        // Pet with no CAST lines falls back to KNOWN_PET_SPELLS
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            "1/27 12:01:00.000  Hunter 's Bite hits Boss for 50.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[1].contains("(pet) Bite"),
+            "Fallback KNOWN_PET_SPELLS should tag Bite, got: {}",
+            result[1]
+        );
+    }
+
+    #[test]
+    fn test_pet_tag_arcane_missiles_normalized() {
+        // Arcane Missiles (pet) from trinket should get normalized
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            "1/27 12:01:00.000  Hunter 's Arcane Missiles (pet) hits Boss for 200.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[1].contains("(pet) Arcane Missiles"),
+            "Expected '(pet) Arcane Missiles', got: {}",
+            result[1]
+        );
+    }
+
+    #[test]
+    fn test_no_pet_owner_no_tagging() {
+        // Player without a pet — spells should never get (pet) tagged
+        let lines = vec![
+            "1/27 12:00:00.000  COMBATANT_INFO: 27.01.26 12:00:00\
+             &Mage&MAGE&Human&2&nil&nil&nil&nil\
+             &nil&nil&nil&nil&nil&nil&nil&nil&nil&nil\
+             &nil&nil&nil&nil&nil&nil&nil&nil&nil\
+             &0x{00000002}{00000002}&nil"
+                .to_string(),
+            "1/27 12:01:00.000  Mage 's Bite hits Boss for 50.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            !result[1].contains("(pet)"),
+            "Mage with no pet should not get (pet) tag, got: {}",
+            result[1]
+        );
+    }
+
+    #[test]
+    fn test_pet_tag_raw_auto_attack() {
+        // Raw-format pet auto attack: PetName (OwnerName) hits ...
+        // Formatter should convert to Owner 's Auto Attack (pet) then
+        // interstitial normalizes to (pet) Auto Attack
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            "1/27 12:01:00.000  Wolf (Hunter) hits Boss for 100.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[1].contains("(pet) Auto Attack"),
+            "Raw pet auto attack should become '(pet) Auto Attack', got: {}",
+            result[1]
+        );
+    }
+
+    #[test]
+    fn test_pet_tag_multiple_pets_per_owner() {
+        // Hunter with multiple pets — spells from all pets should be tagged
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            combatant_info("Hunter", "Cat"),
+            "1/27 12:00:30.000  CAST: Wolf casts Bite(17261)(Rank 8) on Boss.".to_string(),
+            "1/27 12:00:31.000  CAST: Cat casts Claw(16830)(Rank 9) on Boss.".to_string(),
+            "1/27 12:01:00.000  Hunter 's Bite hits Boss for 50.".to_string(),
+            "1/27 12:01:01.000  Hunter 's Claw hits Boss for 40.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[4].contains("(pet) Bite"),
+            "Bite from Wolf should be tagged, got: {}",
+            result[4]
+        );
+        assert!(
+            result[5].contains("(pet) Claw"),
+            "Claw from Cat should be tagged, got: {}",
+            result[5]
+        );
+    }
+
+    #[test]
+    fn test_pet_tag_resist_line() {
+        // Pet spell resisted — "is resisted" should also get tagged
+        let lines = vec![
+            combatant_info("Hunter", "Wolf"),
+            "1/27 12:00:30.000  CAST: Wolf casts Screech(24580)(Rank 4) on Boss.".to_string(),
+            "1/27 12:01:00.000  Hunter 's Screech is resisted by Boss.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[2].contains("(pet) Screech"),
+            "Resisted pet spell should be tagged, got: {}",
+            result[2]
+        );
+    }
+
+    #[test]
+    fn test_pet_tag_same_spell_different_owners() {
+        // Two hunters with pets that both cast Bite — only the owner whose
+        // pet actually casts Bite should get tagged
+        let lines = vec![
+            combatant_info("Alice", "Fang"),
+            combatant_info("Bob", "Rex"),
+            "1/27 12:00:30.000  CAST: Fang casts Bite(17261)(Rank 8) on Boss.".to_string(),
+            // Rex has no CAST lines — falls back to KNOWN_PET_SPELLS
+            "1/27 12:01:00.000  Alice 's Bite hits Boss for 50.".to_string(),
+            "1/27 12:01:01.000  Bob 's Bite hits Boss for 40.".to_string(),
+        ];
+        let (result, _) = format_log(lines);
+        assert!(
+            result[3].contains("(pet) Bite"),
+            "Alice's Bite should be tagged (Fang casts it), got: {}",
+            result[3]
+        );
+        assert!(
+            result[4].contains("(pet) Bite"),
+            "Bob's Bite should be tagged (fallback KNOWN_PET_SPELLS), got: {}",
+            result[4]
+        );
+    }
 }
