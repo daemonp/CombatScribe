@@ -53,9 +53,11 @@ zones = [
 name = "Onyxia's Lair"
 encounter_count = 1
 encounters = [
+    "Broodcommander Axelus",
     "Onyxia",
 ]
 bosses = [
+    "Broodcommander Axelus",
     "Onyxia",
 ]
 trash = [
@@ -92,6 +94,7 @@ bosses = [
     "High Priestess Mar'li",
     "Jin'do the Hexxer",
     "Ohgan",
+    "Renataki",
     "Spawn of Mar'li",
     "Wushoolay",
 ]
@@ -215,6 +218,7 @@ encounters = [
     "Broodlord Lashlayer",
     "Chromaggus",
     "Ebonroc",
+    "Ezzel Darkbrewer",
     "Firemaw",
     "Flamegor",
     "Nefarian",
@@ -225,6 +229,7 @@ bosses = [
     "Broodlord Lashlayer",
     "Chromaggus",
     "Ebonroc",
+    "Ezzel Darkbrewer",
     "Firemaw",
     "Flamegor",
     "Nefarian",
@@ -553,11 +558,11 @@ encounters = [
     "Solnius",
 ]
 bosses = [
+    "Erennius",
     "Solnius",
 ]
 trash = [
     "Deer",
-    "Erennius",
     "Sanctum Dragonkin",
     "Sanctum Dreamer",
     "Sanctum Scalebane",
@@ -764,6 +769,7 @@ encounters = [
 bosses = [
     "Ambassador Flamelash",
     "Anub'shiah",
+    "Bael'Gar",
     "Emperor Dagran Thaurissan",
     "Eviscerator",
     "General Angerforge",
@@ -921,17 +927,20 @@ encounters = [
 ]
 bosses = [
     "Darkmaster Gandling",
+    "Death Knight Darkreaver",
     "Doctor Theolen Krastinov",
     "Illucia Barov",
     "Instructor Malicia",
     "Jandice Barov",
     "Kirtonos the Herald",
     "Kormok",
+    "Lady Illucia Barov",
     "Lord Alexei Barov",
     "Lord Blackwood",
     "Lorekeeper Polkelt",
     "Ras Frostwhisper",
     "Rattlegore",
+    "The Ravenian",
     "Vectus",
 ]
 trash = [
@@ -966,9 +975,11 @@ bosses = [
     "Guard Fengus",
     "Guard Mol'dar",
     "Guard Slip'kik",
+    "Illyanna Ravenoak",
     "Immol'thar",
     "Isalien",
     "King Gordok",
+    "Magister Kalendris",
     "Prince Tortheldrin",
     "Tendris Warpwood",
     "Zevrim Thornhoof",

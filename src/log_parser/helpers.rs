@@ -28,6 +28,15 @@ pub(super) fn is_player_guid(guid: &str) -> bool {
     guid.starts_with("0x0000000000")
 }
 
+/// Check if a GUID represents a pet or summon (starts with `0xF140`).
+///
+/// Pet GUIDs have the format `0xF140...` while NPCs use `0xF130...`.
+/// We need to distinguish pets from NPCs so that pet deaths don't
+/// get misattributed as encounter names during wipe detection.
+pub(super) fn is_pet_guid(guid: &str) -> bool {
+    guid.starts_with("0xF140")
+}
+
 /// Title-case a name (e.g. `"hakkar"` → `"Hakkar"`, `"high priest thekal"` → `"High Priest Thekal"`).
 pub(super) fn title_case(s: &str) -> String {
     crate::raid_data::format_zone_name(s)
