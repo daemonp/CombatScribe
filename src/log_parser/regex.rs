@@ -48,6 +48,17 @@ pub(super) static RE_CAST: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Extract caster, spell name, and rank from addon `CAST:` lines.
+///
+/// Matches: `CAST: Druid casts Regrowth(8910)(Rank 4) on Warrior.`
+/// Groups: 1=caster, 2=spell, 3=rank number.
+pub(super) static RE_CAST_RANK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"CAST:\s*([A-Za-z]+(?:\s[A-Za-z]+)*)\s+(?:casts|begins to cast)\s+([A-Za-z][A-Za-z '\-]+?)(?:\(\d+\))+\(Rank (\d+)\)",
+    )
+    .unwrap()
+});
+
 pub(super) static RE_DMG_SPELL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"([A-Za-z]+(?:\s[A-Za-z]+)*(?:\s*\([^)]+\))?) 's (?:\(pet\) )?([A-Za-z\s']+) (?:hits|crits) ([A-Za-z\s']+) for (\d+)",

@@ -25,6 +25,14 @@ pub(crate) fn boss_raid(name: &str) -> Option<&'static str> {
     binary_search_map(BOSS_TO_RAID, &lower)
 }
 
+/// Look up the encounter group name for a boss in a multi-boss fight.
+///
+/// Returns `Some("The Bug Family")` for "Lord Kri", `None` for single-boss encounters.
+pub(crate) fn boss_encounter_name(name: &str) -> Option<&'static str> {
+    let lower = to_lower_checked(name)?;
+    binary_search_map(BOSS_TO_ENCOUNTER, &lower)
+}
+
 /// Check if a name is a known boss.
 pub(crate) fn is_boss(name: &str) -> bool {
     let Some(lower) = to_lower_checked(name) else {

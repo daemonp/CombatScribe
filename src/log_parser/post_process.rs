@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::log_data::{Encounter, GearSlot, LogData, LogEntry};
+use crate::raid_data;
 
 use super::combat::KILL_GRACE_SECS;
 
@@ -27,6 +28,7 @@ pub(super) fn post_process(data: &mut LogData) {
     }
 
     time_phase!("extend_encounters", extend_encounters_to_last_activity);
+    time_phase!("rename_encounter_groups", rename_encounter_groups);
     time_phase!("merge_encounters", merge_encounters);
     time_phase!("assign_loot", assign_loot);
     time_phase!("link_trades", link_trades);
@@ -51,6 +53,7 @@ pub(super) fn post_process(data: &mut LogData) {
 #[cfg(not(debug_assertions))]
 pub(super) fn post_process(data: &mut LogData) {
     extend_encounters_to_last_activity(data);
+    rename_encounter_groups(data);
     merge_encounters(data);
     assign_loot(data);
     link_trades(data);
@@ -60,6 +63,22 @@ pub(super) fn post_process(data: &mut LogData) {
 }
 
 // ── Phase Functions ─────────────────────────────────────────────────────────
+
+/// Rename individual bosses in multi-boss encounters to their group name.
+///
+/// E.g. "Lord Kri" → "The Bug Family", "Highlord Mograine" → "The Four Horsemen".
+/// Runs before `merge_encounters()` so that bosses from the same group share a name
+/// and naturally merge when consecutive.
+fn rename_encounter_groups(data: &mut LogData) {
+    for enc in &mut data.encounters {
+        if enc.is_boss
+            && let Some(name) = &enc.name
+            && let Some(group_name) = raid_data::boss_encounter_name(name)
+        {
+            enc.name = Some(group_name.to_string());
+        }
+    }
+}
 
 /// Merge fragmented boss encounters (Hakkar MC, combat drops).
 fn merge_encounters(data: &mut LogData) {
@@ -570,5 +589,60 @@ mod tests {
         );
         assert!(!data.encounters[0].is_kill, "First should be a wipe");
         assert!(data.encounters[1].is_kill, "Second should be a kill");
+    }
+
+    // ── Multi-Boss Encounter Group Tests ───────────────────────────
+
+    #[test]
+    fn test_multi_boss_encounter_renamed_to_group() {
+        // A single boss from a multi-boss encounter should be renamed to the
+        // encounter group name (e.g. "Lord Kri" → "The Bug Family").
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 20:00:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:00:05.000  Lord Kri hits Tank for 500.".to_string(),
+            "1/27 20:02:00.000  UNIT_DIED:Lord Kri:0xF130003A6C000001".to_string(),
+            "1/27 20:02:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(data.encounters.len(), 1);
+        assert_eq!(
+            data.encounters[0].name.as_deref(),
+            Some("The Bug Family"),
+            "Lord Kri should be renamed to The Bug Family"
+        );
+        assert!(data.encounters[0].is_boss);
+    }
+
+    #[test]
+    fn test_multi_boss_encounter_bosses_merged() {
+        // Two bosses from the same encounter group in consecutive combat windows
+        // should merge into a single encounter with the group name.
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Tank&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            // First boss dies
+            "1/27 20:00:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:00:05.000  Lord Kri hits Tank for 500.".to_string(),
+            "1/27 20:00:30.000  UNIT_DIED:Lord Kri:0xF130003A6C000001".to_string(),
+            "1/27 20:00:30.000  PLAYER_REGEN_ENABLED".to_string(),
+            // Brief combat drop, then second boss detected
+            "1/27 20:00:45.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 20:00:50.000  Princess Yauj hits Tank for 600.".to_string(),
+            "1/27 20:01:20.000  UNIT_DIED:Princess Yauj:0xF130003A6C000002".to_string(),
+            "1/27 20:01:20.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        assert_eq!(
+            data.encounters.len(),
+            1,
+            "Two Bug Family bosses should merge into one encounter"
+        );
+        assert_eq!(
+            data.encounters[0].name.as_deref(),
+            Some("The Bug Family"),
+        );
+        assert!(data.encounters[0].is_kill);
     }
 }

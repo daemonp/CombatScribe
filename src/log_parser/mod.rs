@@ -26,6 +26,33 @@ use events::{
 };
 use healing::parse_healing_events;
 use post_process::post_process;
+use regex::RE_CAST_RANK;
+
+// ── Spell Rank Extraction ───────────────────────────────────────────────────
+
+/// Extract spell rank from addon `CAST:` lines and store in the rank map.
+///
+/// Parses lines like `CAST: Druid casts Regrowth(8910)(Rank 4) on Warrior.`
+/// and records `spell_ranks["Druid"]["Regrowth"] = 4`.
+fn extract_spell_rank(
+    trimmed: &str,
+    spell_ranks: &mut HashMap<String, HashMap<String, u8>>,
+) {
+    if let Some(caps) = RE_CAST_RANK.captures(trimmed) {
+        let caster = caps.get(1).map_or("", |m| m.as_str());
+        let spell = caps.get(2).map_or("", |m| m.as_str().trim());
+        let rank: u8 = caps
+            .get(3)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        if !caster.is_empty() && !spell.is_empty() && rank > 0 {
+            spell_ranks
+                .entry(caster.to_string())
+                .or_default()
+                .insert(spell.to_string(), rank);
+        }
+    }
+}
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -58,12 +85,18 @@ pub(super) struct ParseState {
     /// Maps target name → last damage info. Cleared on encounter boundaries
     /// to prevent cross-encounter attribution.
     pub(super) last_damage: HashMap<String, LastDamageInfo>,
+    /// Last-used spell rank per (caster, spell) from addon `CAST:` lines.
+    ///
+    /// Used to suffix healing spell names with rank (e.g. "Regrowth (Rank 4)").
+    /// Only populated when `CAST:` lines with `(Rank N)` are present (addon format).
+    pub(super) spell_ranks: HashMap<String, HashMap<String, u8>>,
 }
 
 /// Parse the session lines into a fully populated `LogData`.
 ///
 /// Uses keyword-based dispatch to avoid running all regexes on every line.
 /// Most lines are damage/healing events; metadata/loot/buff lines are rare.
+#[allow(clippy::too_many_lines)] // keyword-dispatch loop — linear sequence of checks
 pub fn parse_log(lines: &[String]) -> LogData {
     let mut data = LogData::default();
     let mut state = ParseState {
@@ -76,6 +109,7 @@ pub fn parse_log(lines: &[String]) -> LogData {
         encounter_deaths: HashSet::new(),
         encounter_active: HashSet::new(),
         last_damage: HashMap::new(),
+        spell_ranks: HashMap::new(),
     };
 
     for line in lines {
@@ -129,6 +163,11 @@ pub fn parse_log(lines: &[String]) -> LogData {
             // Cast lines can also be damage/healing — don't skip below
         }
 
+        // Spell rank extraction from addon CAST: lines (e.g. "Regrowth(8910)(Rank 4)")
+        if trimmed.contains("CAST:") && trimmed.contains("Rank ") {
+            extract_spell_rank(trimmed, &mut state.spell_ranks);
+        }
+
         // Pet ownership patterns: `Name (Owner)` (moderately common)
         // Cheap check: look for `(` which all pet patterns require
         if trimmed.contains('(') {
@@ -150,7 +189,13 @@ pub fn parse_log(lines: &[String]) -> LogData {
 
         // Healing: "heals" or "health from"
         if trimmed.contains("heals ") || trimmed.contains(" health from ") {
-            parse_healing_events(trimmed, timestamp, &mut data, &mut state.health_deficit);
+            parse_healing_events(
+                trimmed,
+                timestamp,
+                &mut data,
+                &mut state.health_deficit,
+                &state.spell_ranks,
+            );
         }
 
         // Boss detection from combat lines (during active combat only)

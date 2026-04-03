@@ -162,6 +162,9 @@ encounters = [
     "Sulfuron Harbinger",
     "Twin Giants",
 ]
+encounter_groups = [
+    { name = "Twin Giants", bosses = ["Basalthar", "Smoldaris"] },
+]
 bosses = [
     "Baron Geddon",
     "Basalthar",
@@ -335,6 +338,10 @@ encounters = [
     "The Twin Emperors",
     "Viscidus",
 ]
+encounter_groups = [
+    { name = "The Bug Family", bosses = ["Lord Kri", "Princess Yauj", "Vem"] },
+    { name = "The Twin Emperors", bosses = ["Emperor Vek'lor", "Emperor Vek'nilash"] },
+]
 bosses = [
     "Battleguard Sartura",
     "C'Thun",
@@ -462,6 +469,9 @@ encounters = [
     "Sapphiron",
     "Thaddius",
     "The Four Horsemen",
+]
+encounter_groups = [
+    { name = "The Four Horsemen", bosses = ["Highlord Mograine", "Lady Blaumeux", "Sir Zeliek", "Thane Korth'azz"] },
 ]
 bosses = [
     "Anub'Rekhan",

@@ -9,6 +9,21 @@ use super::regex::{RE_HEAL_GAIN, RE_HEAL_SPELL};
 
 // ── Healing Parsing ─────────────────────────────────────────────────────────
 
+/// Suffix a spell name with its rank from `CAST:` line data.
+///
+/// Returns `"Regrowth (Rank 4)"` if rank info exists, or the original spell name otherwise.
+fn rank_suffixed(
+    spell: &str,
+    source: &str,
+    spell_ranks: &HashMap<String, HashMap<String, u8>>,
+) -> String {
+    if let Some(rank) = spell_ranks.get(source).and_then(|s| s.get(spell)) {
+        format!("{spell} (Rank {rank})")
+    } else {
+        spell.to_string()
+    }
+}
+
 /// Compute effective healing from the target's health deficit.
 ///
 /// Returns `(effective_heal, overheal)`. The effective amount is capped at the
@@ -40,6 +55,7 @@ pub(super) fn parse_healing_events(
     timestamp: f64,
     data: &mut LogData,
     health_deficit: &mut HashMap<String, u64>,
+    spell_ranks: &HashMap<String, HashMap<String, u8>>,
 ) {
     let is_heal_crit = trimmed.contains("critically heals");
 
@@ -62,6 +78,9 @@ pub(super) fn parse_healing_events(
         if let Some(stripped) = spell.strip_suffix(" critically") {
             spell = stripped.trim().to_string();
         }
+
+        // Annotate with rank from CAST: lines (e.g. "Regrowth" → "Regrowth (Rank 4)")
+        spell = rank_suffixed(&spell, &source, spell_ranks);
 
         let (effective_heal, overheal) = compute_effective_heal(health_deficit, &target, amount);
         // Only credit player stats when the target is a known player.
@@ -106,8 +125,10 @@ pub(super) fn parse_healing_events(
         let Some(raw_spell) = caps.get(4).map(|m| m.as_str().trim().to_string()) else {
             return;
         };
-        // "gains health from" lines are periodic (HoT) ticks — distinguish from direct heals
-        let spell = format!("{raw_spell} (hot)");
+        // Annotate with rank then add (hot) suffix
+        // e.g. "Rejuvenation" → "Rejuvenation (Rank 4) (hot)"
+        let ranked_spell = rank_suffixed(&raw_spell, &source, spell_ranks);
+        let spell = format!("{ranked_spell} (hot)");
 
         let (effective_heal, overheal) = compute_effective_heal(health_deficit, &target, amount);
         if data.all_combatants.contains_key(target.as_str()) {
@@ -363,5 +384,108 @@ mod tests {
         assert!(hot.is_some(), "Should have 'Regrowth (hot)' for HoT ticks");
         assert_eq!(hot.unwrap().total, 300);
         assert_eq!(hot.unwrap().hits, 3);
+    }
+
+    // ── Spell Rank Tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_heal_rank_from_cast_line() {
+        // When a CAST: line with rank info precedes a heal, the heal ability
+        // should be stored with the rank suffix.
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Druid&DRUID&NightElf&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:00.500  Boss hits Warrior for 5000.".to_string(),
+            "1/27 12:24:01.000  CAST: Druid casts Regrowth(8910)(Rank 4) on Warrior.".to_string(),
+            "1/27 12:24:01.500  Druid 's Regrowth heals Warrior for 400.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let druid = data.player_stats.get("Druid").expect("Druid stats");
+        let ranked = druid.healing_abilities.get("Regrowth (Rank 4)");
+        assert!(
+            ranked.is_some(),
+            "Should have 'Regrowth (Rank 4)', got keys: {:?}",
+            druid.healing_abilities.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(ranked.unwrap().total, 400);
+    }
+
+    #[test]
+    fn test_heal_rank_hot_with_rank() {
+        // HoT ticks should include both rank and (hot) suffix:
+        // "Rejuvenation (Rank 4) (hot)"
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Druid&DRUID&NightElf&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:00.500  Boss hits Warrior for 5000.".to_string(),
+            "1/27 12:24:01.000  CAST: Druid casts Rejuvenation(774)(Rank 4) on Warrior.".to_string(),
+            "1/27 12:24:03.000  Warrior gains 148 health from Druid 's Rejuvenation.".to_string(),
+            "1/27 12:24:05.000  Warrior gains 148 health from Druid 's Rejuvenation.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let druid = data.player_stats.get("Druid").expect("Druid stats");
+        let hot = druid.healing_abilities.get("Rejuvenation (Rank 4) (hot)");
+        assert!(
+            hot.is_some(),
+            "Should have 'Rejuvenation (Rank 4) (hot)', got keys: {:?}",
+            druid.healing_abilities.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(hot.unwrap().total, 296);
+        assert_eq!(hot.unwrap().hits, 2);
+    }
+
+    #[test]
+    fn test_heal_different_ranks_separate_abilities() {
+        // Two different ranks of the same spell should produce separate ability entries.
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Druid&DRUID&NightElf&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:00.500  Boss hits Warrior for 5000.".to_string(),
+            // Rank 4 cast + heal
+            "1/27 12:24:01.000  CAST: Druid casts Regrowth(8910)(Rank 4) on Warrior.".to_string(),
+            "1/27 12:24:01.500  Druid 's Regrowth heals Warrior for 400.".to_string(),
+            // Rank 9 cast + heal
+            "1/27 12:24:03.000  CAST: Druid casts Regrowth(9750)(Rank 9) on Warrior.".to_string(),
+            "1/27 12:24:03.500  Druid 's Regrowth heals Warrior for 1200.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let druid = data.player_stats.get("Druid").expect("Druid stats");
+
+        let rank4 = druid.healing_abilities.get("Regrowth (Rank 4)");
+        assert!(rank4.is_some(), "Should have 'Regrowth (Rank 4)'");
+        assert_eq!(rank4.unwrap().total, 400);
+
+        let rank9 = druid.healing_abilities.get("Regrowth (Rank 9)");
+        assert!(rank9.is_some(), "Should have 'Regrowth (Rank 9)'");
+        assert_eq!(rank9.unwrap().total, 1200);
+    }
+
+    #[test]
+    fn test_heal_no_rank_without_cast_line() {
+        // Without a CAST: line, heals should appear with plain spell names (no rank).
+        let lines: Vec<String> = vec![
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Priest&PRIEST&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000001&nil".to_string(),
+            "1/27 12:23:41.000  COMBATANT_INFO: 27.01.26 12:23:41&Warrior&WARRIOR&Human&2&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&nil&0x0000000000000002&nil".to_string(),
+            "1/27 12:24:00.000  PLAYER_REGEN_DISABLED".to_string(),
+            "1/27 12:24:01.000  Priest 's Flash Heal heals Warrior for 2800.".to_string(),
+            "1/27 12:35:00.000  PLAYER_REGEN_ENABLED".to_string(),
+        ];
+        let data = parse_log(&lines);
+
+        let priest = data.player_stats.get("Priest").expect("Priest stats");
+        let plain = priest.healing_abilities.get("Flash Heal");
+        assert!(
+            plain.is_some(),
+            "Without CAST: line, should use plain spell name 'Flash Heal'"
+        );
     }
 }

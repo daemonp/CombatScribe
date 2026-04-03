@@ -34,10 +34,20 @@ struct Raid {
     #[allow(dead_code)] // Parsed for future use (encounter-level detail)
     #[serde(default)]
     encounters: Vec<String>,
+    /// Multi-boss encounter groups: maps a group name to its constituent bosses.
+    /// Used to rename individual boss encounters (e.g. "Lord Kri" → "The Bug Family").
+    #[serde(default)]
+    encounter_groups: Vec<EncounterGroup>,
     #[serde(default)]
     bosses: Vec<String>,
     #[serde(default)]
     trash: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct EncounterGroup {
+    name: String,
+    bosses: Vec<String>,
 }
 
 fn main() {
@@ -79,6 +89,17 @@ fn generate_raid_data() {
             npc_to_raid.push((lower, raid_lower.clone()));
         }
     }
+
+    // Collect boss → encounter group mappings for multi-boss fights
+    let mut boss_to_encounter: Vec<(String, String)> = Vec::new();
+    for raid in &db.raid {
+        for group in &raid.encounter_groups {
+            for boss in &group.bosses {
+                boss_to_encounter.push((boss.to_lowercase(), group.name.clone()));
+            }
+        }
+    }
+    boss_to_encounter.sort();
 
     npc_to_raid.sort();
     npc_to_raid.dedup_by(|a, b| a.0 == b.0);
@@ -143,6 +164,28 @@ fn generate_raid_data() {
     writeln!(out, "pub(crate) static ALL_BOSSES: &[&str] = &[").unwrap();
     for boss in &all_bosses {
         writeln!(out, "    {},", quote(boss)).unwrap();
+    }
+    writeln!(out, "];").unwrap();
+    writeln!(out).unwrap();
+
+    // Boss name → encounter group name (for multi-boss fights, sorted for binary search)
+    writeln!(
+        out,
+        "/// Individual boss NPC → encounter group name for multi-boss fights."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "/// E.g. \"lord kri\" → \"The Bug Family\". Sorted for binary search."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "pub(crate) static BOSS_TO_ENCOUNTER: &[(&str, &str)] = &["
+    )
+    .unwrap();
+    for (boss, encounter) in &boss_to_encounter {
+        writeln!(out, "    ({}, {}),", quote(boss), quote(encounter)).unwrap();
     }
     writeln!(out, "];").unwrap();
     writeln!(out).unwrap();
