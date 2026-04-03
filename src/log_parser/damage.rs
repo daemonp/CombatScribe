@@ -883,7 +883,7 @@ mod tests {
         ];
         let data = parse_log(&lines);
         // Boss is not a combatant, so no avoidance should be recorded for it
-        assert!(data.avoidance.get("Boss").is_none());
+        assert!(!data.avoidance.contains_key("Boss"));
     }
 
     // ── DoT Suffix Tests ───────────────────────────────────────────────

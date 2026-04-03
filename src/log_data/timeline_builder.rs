@@ -968,7 +968,7 @@ mod tests {
         let filter = EncounterFilter::Single(1);
         let (uptimes, _) = data.compute_buff_uptimes(&filter);
         assert!(
-            uptimes.get("Priest").is_none()
+            !uptimes.contains_key("Priest")
                 || uptimes.get("Priest").expect("checked above").is_empty()
         );
     }
