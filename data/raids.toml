@@ -754,6 +754,70 @@ trash = [
     "Scarlet Sister",
 ]
 
+# ─── Timbermaw Hold (Custom TW 40-man Raid) ─────────────────────────────────
+[[raid]]
+name = "Timbermaw Hold"
+encounter_count = 10
+encounters = [
+    "Archdruid Kronn",
+    "Chieftain Partath",
+    "Karrsh the Sentinel",
+    "Kodiak",
+    "Loktanag the Vile",
+    "Ormanos the Cracked",
+    "Rotgrowl",
+    "Selenaxx Foulheart",
+    "Trioch the Devourer",
+    "Ursol",
+]
+bosses = [
+    "Archdruid Kronn",
+    "Chieftain Partath",
+    "Karrsh the Sentinel",
+    "Kodiak",
+    "Loktanag the Vile",
+    "Ormanos the Cracked",
+    "Rotgrowl",
+    "Selenaxx Foulheart",
+    "Trioch the Devourer",
+    "Ursol",
+]
+trash = [
+    "Corrupted Globule",
+    "Corruption of Loktanag",
+    "Creeping Expulsion",
+    "Dreadful Miasma",
+    "Dreamform of Kronn",
+    "Enraged Withermaw",
+    "Foulheart Deceiver",
+    "Foulheart Hellcaller",
+    "Foulheart Satyr",
+    "Foulheart Trickster",
+    "Invading Miasma",
+    "Nightmare Fiend",
+    "Son of Ormanos",
+    "Son of Ursol",
+    "Tainted Mass",
+    "Timbermaw Defender",
+    "Timbermaw Sentinel",
+    "Tremor of Ormanos",
+    "Twisted Rumbler",
+    "Ursan Horror",
+    "Vile Skitterer",
+    "Withermaw Corrupter",
+    "Withermaw Defiler",
+    "Withermaw Den Watcher",
+    "Withermaw Illuminator",
+    "Withermaw Pathfinder",
+    "Withermaw Shadowkeeper",
+    "Withermaw Shaman",
+    "Withermaw Totemic",
+    "Withermaw Tracker",
+    "Withermaw Ursa",
+    "Xavian Form",
+    "Xavian Image",
+]
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Level 60 Dungeons
 # ══════════════════════════════════════════════════════════════════════════════
