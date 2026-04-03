@@ -73,6 +73,8 @@ pub(super) fn parse_combat_state(
         state.combat_start = Some(timestamp);
         state.encounter_deaths.clear();
         state.encounter_active.clear();
+        // Reset per-encounter healing deficit tracking.
+        state.health_deficit.clear();
     }
 
     if trimmed.contains("PLAYER_REGEN_ENABLED") {
@@ -103,6 +105,8 @@ pub(super) fn parse_combat_state(
             state.current_boss_killed = false;
             state.encounter_deaths.clear();
             state.encounter_active.clear();
+            // Reset per-encounter healing deficit tracking.
+            state.health_deficit.clear();
             // Clear last damage to prevent cross-encounter attribution
             state.last_damage.clear();
         }
