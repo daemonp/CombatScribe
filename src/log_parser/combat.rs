@@ -599,7 +599,7 @@ mod tests {
 
         assert_eq!(data.encounters.len(), 1, "Should have 1 encounter");
         let enc = &data.encounters[0];
-        
+
         // The bug: this was returning "Wallpainter" instead of "Vaelastrasz the Corrupt"
         assert_eq!(
             enc.name.as_deref(),

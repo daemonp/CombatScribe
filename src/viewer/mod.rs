@@ -34,9 +34,9 @@ use std::sync::LazyLock;
 
 use crate::log_data;
 use crate::log_data::{
-    AbilityStats, AvoidanceStats, ConsumableCategory, ConsumeViewMode, DeathEvent,
-    DeathLogWindow, EncounterFilter, EventLogMode, EventLogTypeFilter, EventLogTypeKind, LogData,
-    LogEntry, LootEvent, PlayerEventType, ResurrectEvent, TimelineData, TimelineSeriesKind,
+    AbilityStats, AvoidanceStats, ConsumableCategory, ConsumeViewMode, DeathEvent, DeathLogWindow,
+    EncounterFilter, EventLogMode, EventLogTypeFilter, EventLogTypeKind, LogData, LogEntry,
+    LootEvent, PlayerEventType, ResurrectEvent, TimelineData, TimelineSeriesKind,
     TimelineVisibility,
 };
 use crate::theme;
@@ -605,11 +605,7 @@ impl ViewerState {
                     let players = self.sorted_player_names(detail.detail_type);
                     if let Some(idx) = players.iter().position(|n| n == &detail.player_name) {
                         let new_idx = if matches!(message, ViewerMessage::DetailNext) {
-                            if idx + 1 < players.len() {
-                                idx + 1
-                            } else {
-                                0
-                            }
+                            if idx + 1 < players.len() { idx + 1 } else { 0 }
                         } else if idx > 0 {
                             idx - 1
                         } else {
@@ -929,11 +925,7 @@ impl ViewerState {
             } else {
                 format!("{unique_boss_count}/{total_unique_count} bosses")
             };
-            right_row = right_row.push(
-                text(boss_text)
-                    .size(12)
-                    .color(theme::TEXT_MUTED),
-            );
+            right_row = right_row.push(text(boss_text).size(12).color(theme::TEXT_MUTED));
         }
 
         // Save View button (eye icon with dirty indicator)

@@ -325,8 +325,8 @@ impl App {
 
             // ── Keyboard shortcuts ───────────────────────────────────────
             Message::KeyPressed(key, modifiers) => {
-                use keyboard::key::Named;
                 use keyboard::Key;
+                use keyboard::key::Named;
 
                 match key {
                     // Escape: close topmost overlay
@@ -630,9 +630,9 @@ impl App {
 
         // Keyboard shortcuts: Escape, arrows, Ctrl/Cmd+O, number keys for tabs
         let keys = keyboard::listen().filter_map(|event| match event {
-            keyboard::Event::KeyPressed {
-                key, modifiers, ..
-            } => Some(Message::KeyPressed(key, modifiers)),
+            keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                Some(Message::KeyPressed(key, modifiers))
+            }
             _ => None,
         });
 

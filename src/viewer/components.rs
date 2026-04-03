@@ -635,12 +635,8 @@ pub(super) fn build_damage_tooltip<'a>(
     );
 
     // Avg Hit / Avg Crit
-    let avg_hit_str = agg
-        .avg_hit()
-        .map_or("-".to_string(), theme::format_number);
-    let avg_crit_str = agg
-        .avg_crit()
-        .map_or("-".to_string(), theme::format_number);
+    let avg_hit_str = agg.avg_hit().map_or("-".to_string(), theme::format_number);
+    let avg_crit_str = agg.avg_crit().map_or("-".to_string(), theme::format_number);
     col = col.push(
         text(format!("Avg Hit: {avg_hit_str} | Avg Crit: {avg_crit_str}"))
             .size(11)
@@ -781,14 +777,12 @@ pub(super) fn build_healing_tooltip<'a>(
     let mut total_normals = 0_u64;
     for ab in ps.healing_abilities.values() {
         let normal_hits = ab.hits.saturating_sub(ab.crits);
-        let noncrit_amount = ab.effective.saturating_sub(
-            if ab.hits > 0 && ab.crits > 0 {
-                // Approximate effective crit proportionally
-                (ab.effective as f64 * ab.crit_total as f64 / ab.total.max(1) as f64) as u64
-            } else {
-                0
-            },
-        );
+        let noncrit_amount = ab.effective.saturating_sub(if ab.hits > 0 && ab.crits > 0 {
+            // Approximate effective crit proportionally
+            (ab.effective as f64 * ab.crit_total as f64 / ab.total.max(1) as f64) as u64
+        } else {
+            0
+        });
         let crit_amount = ab.effective.saturating_sub(noncrit_amount);
         eff_crit_total += crit_amount;
         eff_noncrit_total += noncrit_amount;

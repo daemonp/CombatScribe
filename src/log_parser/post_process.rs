@@ -639,10 +639,7 @@ mod tests {
             1,
             "Two Bug Family bosses should merge into one encounter"
         );
-        assert_eq!(
-            data.encounters[0].name.as_deref(),
-            Some("The Bug Family"),
-        );
+        assert_eq!(data.encounters[0].name.as_deref(), Some("The Bug Family"),);
         assert!(data.encounters[0].is_kill);
     }
 }

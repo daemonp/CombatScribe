@@ -34,10 +34,7 @@ use regex::RE_CAST_RANK;
 ///
 /// Parses lines like `CAST: Druid casts Regrowth(8910)(Rank 4) on Warrior.`
 /// and records `spell_ranks["Druid"]["Regrowth"] = 4`.
-fn extract_spell_rank(
-    trimmed: &str,
-    spell_ranks: &mut HashMap<String, HashMap<String, u8>>,
-) {
+fn extract_spell_rank(trimmed: &str, spell_ranks: &mut HashMap<String, HashMap<String, u8>>) {
     if let Some(caps) = RE_CAST_RANK.captures(trimmed) {
         let caster = caps.get(1).map_or("", |m| m.as_str());
         let spell = caps.get(2).map_or("", |m| m.as_str().trim());

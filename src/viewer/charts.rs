@@ -1242,10 +1242,7 @@ impl canvas::Program<ViewerMessage> for ConsumeChart<'_> {
                     if count > 0 {
                         frame.fill_text(canvas::Text {
                             content: count.to_string(),
-                            position: Point::new(
-                                w - CHART_RIGHT_MARGIN + 6.0,
-                                lane_y + 2.0,
-                            ),
+                            position: Point::new(w - CHART_RIGHT_MARGIN + 6.0, lane_y + 2.0),
                             color: Color { a: 0.6, ..color },
                             size: 9.0.into(),
                             ..canvas::Text::default()
@@ -1259,8 +1256,7 @@ impl canvas::Program<ViewerMessage> for ConsumeChart<'_> {
 
         // Hover line (shared time cursor)
         if let Some(second) = self.hover_second {
-            let x =
-                CHART_LEFT_MARGIN + ((second as f32 - view_lo as f32) / view_span) * chart_w;
+            let x = CHART_LEFT_MARGIN + ((second as f32 - view_lo as f32) / view_span) * chart_w;
             if x >= CHART_LEFT_MARGIN && x <= CHART_LEFT_MARGIN + chart_w {
                 let line = canvas::Path::line(Point::new(x, 0.0), Point::new(x, h));
                 frame.stroke(
@@ -1284,9 +1280,7 @@ impl canvas::Program<ViewerMessage> for ConsumeChart<'_> {
     ) -> Option<Action<ViewerMessage>> {
         let duration = self.data.consume_duration;
         let chart_w = (bounds.width - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN).max(1.0);
-        let (view_lo, view_hi) = self
-            .zoom
-            .map_or((0.0, duration), |(lo, hi)| (lo, hi));
+        let (view_lo, view_hi) = self.zoom.map_or((0.0, duration), |(lo, hi)| (lo, hi));
         let view_span = (view_hi - view_lo).max(0.001);
         match event {
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
@@ -1359,10 +1353,9 @@ impl ConsumeChart<'_> {
                     let start = translate_aura_to_consume(interval.start, segments);
                     let end = translate_aura_to_consume(interval.end, segments);
 
-                    let x_start = CHART_LEFT_MARGIN
-                        + ((start as f32 - view_lo) / view_span) * chart_w;
-                    let x_end = CHART_LEFT_MARGIN
-                        + ((end as f32 - view_lo) / view_span) * chart_w;
+                    let x_start =
+                        CHART_LEFT_MARGIN + ((start as f32 - view_lo) / view_span) * chart_w;
+                    let x_end = CHART_LEFT_MARGIN + ((end as f32 - view_lo) / view_span) * chart_w;
                     let bar_w = (x_end - x_start).max(2.0);
 
                     // Filled bar
@@ -1398,8 +1391,7 @@ impl ConsumeChart<'_> {
             if td.aura_intervals.contains_key(mark.consumable.as_str()) {
                 continue;
             }
-            let x = CHART_LEFT_MARGIN
-                + ((mark.offset as f32 - view_lo) / view_span) * chart_w;
+            let x = CHART_LEFT_MARGIN + ((mark.offset as f32 - view_lo) / view_span) * chart_w;
             draw_diamond(frame, x, lane_center_y, 3.5, color);
         }
     }

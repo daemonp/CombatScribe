@@ -412,9 +412,10 @@ mod tests {
     #[test]
     fn test_selected_encounters_single_out_of_bounds() {
         let data = make_log_data(vec![boss_kill("Ragnaros", 100.0, 200.0)]);
-        assert!(data
-            .selected_encounters(&EncounterFilter::Single(99))
-            .is_empty());
+        assert!(
+            data.selected_encounters(&EncounterFilter::Single(99))
+                .is_empty()
+        );
     }
 
     // ── is_in_selection ─────────────────────────────────────────────────

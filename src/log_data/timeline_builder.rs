@@ -6,9 +6,7 @@ use super::timeline::{
     AuraInterval, ConsumeMark, DispelMark, TimelineBucket, TimelineData, TimelineEvent,
     TimelineEventKind,
 };
-use super::types::{
-    Combatant, ConsumableCategory, Encounter, EncounterFilter, LogData, LogEntry,
-};
+use super::types::{Combatant, ConsumableCategory, Encounter, EncounterFilter, LogData, LogEntry};
 
 /// Pre-pull buffer in seconds (5 minutes) for consume timeline.
 const PRE_PULL_BUFFER: f64 = 300.0;
@@ -223,14 +221,18 @@ impl LogData {
         // For "All Encounters", show the full session.  For specific encounter
         // filters, extend each encounter window by 5 minutes before the pull
         // to capture pre-pull potions, food, and elixirs.
-        let (consume_marks, consume_duration, consume_aura_categories, available_consume_categories) =
-            Self::build_consume_marks(
-                &self.consumables,
-                self.start_time,
-                self.end_time,
-                &encounters,
-                &available_auras,
-            );
+        let (
+            consume_marks,
+            consume_duration,
+            consume_aura_categories,
+            available_consume_categories,
+        ) = Self::build_consume_marks(
+            &self.consumables,
+            self.start_time,
+            self.end_time,
+            &encounters,
+            &available_auras,
+        );
 
         // ── Encounter boundaries for the consumable chart ───────────
         // Show all boss encounters as faint vertical lines so the user can
@@ -261,10 +263,8 @@ impl LogData {
         // chart uses session-relative offsets with a 5-min pre-pull buffer.
         // Build translation segments so the consume chart renderer can map
         // aura interval offsets to consume-timeline pixel coordinates.
-        let consume_aura_offset_segments = Self::build_consume_aura_segments(
-            self.start_time,
-            &encounters,
-        );
+        let consume_aura_offset_segments =
+            Self::build_consume_aura_segments(self.start_time, &encounters);
 
         TimelineData {
             buckets,
@@ -510,17 +510,14 @@ impl LogData {
                     .copied()
                     .unwrap_or((0, 0));
 
-                uptimes
-                    .entry(player.to_string())
-                    .or_default()
-                    .insert(
-                        aura_name.clone(),
-                        BuffUptime {
-                            fraction,
-                            gains,
-                            fades,
-                        },
-                    );
+                uptimes.entry(player.to_string()).or_default().insert(
+                    aura_name.clone(),
+                    BuffUptime {
+                        fraction,
+                        gains,
+                        fades,
+                    },
+                );
             }
         }
 
@@ -655,12 +652,11 @@ impl LogData {
 
         // For "All Encounters", show all boss encounters.
         // For specific filters, show the selected encounters.
-        let encounters_to_show: Vec<&Encounter> =
-            if matches!(filter, EncounterFilter::All) {
-                all_encounters.iter().filter(|e| e.is_boss).collect()
-            } else {
-                selected_encounters.to_vec()
-            };
+        let encounters_to_show: Vec<&Encounter> = if matches!(filter, EncounterFilter::All) {
+            all_encounters.iter().filter(|e| e.is_boss).collect()
+        } else {
+            selected_encounters.to_vec()
+        };
 
         encounters_to_show
             .iter()
@@ -943,9 +939,7 @@ mod tests {
 
         let (uptimes, _) = data.compute_buff_uptimes(&EncounterFilter::All);
         let rogue = uptimes.get("Rogue").expect("rogue should have uptimes");
-        let snd = rogue
-            .get("Slice and Dice")
-            .expect("SnD should have uptime");
+        let snd = rogue.get("Slice and Dice").expect("SnD should have uptime");
         assert!((snd.fraction - 0.3).abs() < 0.01);
     }
 
@@ -955,8 +949,7 @@ mod tests {
         // When filtering to second encounter, gains should be 0.
         let mut data = LogData::default();
         data.encounters.push(test_encounter("Boss A", 0.0, 100.0));
-        data.encounters
-            .push(test_encounter("Boss B", 200.0, 300.0));
+        data.encounters.push(test_encounter("Boss B", 200.0, 300.0));
         data.all_combatants
             .insert("Priest".to_string(), Combatant::default());
         data.entries.push(LogEntry::AuraGain {
@@ -976,10 +969,7 @@ mod tests {
         let (uptimes, _) = data.compute_buff_uptimes(&filter);
         assert!(
             uptimes.get("Priest").is_none()
-                || uptimes
-                    .get("Priest")
-                    .expect("checked above")
-                    .is_empty()
+                || uptimes.get("Priest").expect("checked above").is_empty()
         );
     }
 

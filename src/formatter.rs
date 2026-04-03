@@ -477,8 +477,7 @@ pub fn format_log(mut lines: Vec<String>) -> (Vec<String>, Vec<String>) {
     ))
     .expect("known-good summoned pet regex");
 
-    let (pet_rename_rules, owner_names, pet_info) =
-        first_pass(&mut lines, &summoned_pet_owner_re);
+    let (pet_rename_rules, owner_names, pet_info) = first_pass(&mut lines, &summoned_pet_owner_re);
     second_pass(
         &mut lines,
         &player_entries,

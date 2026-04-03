@@ -302,12 +302,14 @@ impl ViewerState {
             // Use a stack to overlay the tooltip at the bottom of the chart
             // area so it doesn't push the canvas around.
             let chart_scroll: Element<ViewerMessage> = scrollable(
-                container(consume_canvas).width(Fill).padding(iced::Padding {
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 22.0,
-                    left: 0.0,
-                }),
+                container(consume_canvas)
+                    .width(Fill)
+                    .padding(iced::Padding {
+                        top: 0.0,
+                        right: 0.0,
+                        bottom: 22.0,
+                        left: 0.0,
+                    }),
             )
             .width(Fill)
             .height(Fill)
@@ -349,10 +351,7 @@ impl ViewerState {
     ///
     /// Shows both active buff intervals (for bar categories) and nearby
     /// consumable use events (for tick categories / instant-use items).
-    fn build_consume_tooltip<'a>(
-        &self,
-        td: &TimelineData,
-    ) -> Element<'a, ViewerMessage> {
+    fn build_consume_tooltip<'a>(&self, td: &TimelineData) -> Element<'a, ViewerMessage> {
         let Some(second) = self.consume_hover_second else {
             return column![].into();
         };
@@ -797,11 +796,7 @@ fn category_short_label(cat: ConsumableCategory) -> &'static str {
 }
 
 /// Button style for the Bars/Ticks mode toggle in the consumable timeline sidebar.
-fn consume_mode_button_style(
-    status: button::Status,
-    active: bool,
-    accent: Color,
-) -> button::Style {
+fn consume_mode_button_style(status: button::Status, active: bool, accent: Color) -> button::Style {
     let bg = if active {
         Some(iced::Background::Color(Color { a: 0.3, ..accent }))
     } else {
